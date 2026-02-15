@@ -137,12 +137,17 @@ fetch_secret_value() {
   log "Resolved secret id: $sid"
 
   log "Fetching secret value via bws secret get"
-  bws secret get "$sid" | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"])'
+  bws secret get "$sid" | python3 -c 'import sys,json; print(str(json.load(sys.stdin)["value"]).strip())'
 }
+
 
 export TF_VAR_pm_api_token_secret="$(fetch_secret_value "$PM_TOKEN_SECRET_REF")"
 export TF_VAR_pm_api_token_id="$(fetch_secret_value "$PM_TOKEN_ID_REF")"
 export TF_VAR_pm_endpoint="$(fetch_secret_value "$PM_ENDPOINT_REF")"
+
+log "TF_VAR_pm_endpoint = $(mask "${TF_VAR_pm_endpoint:-}")"
+log "TF_VAR_pm_api_token_id = $(mask "${TF_VAR_pm_api_token_id:-}")"
+log "TF_VAR_pm_api_token_secret = $(mask "${TF_VAR_pm_api_token_secret:-}")"
 
 # 4) Run terraform
 log "Handing off to terraform $*"
