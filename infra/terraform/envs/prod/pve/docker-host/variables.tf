@@ -1,10 +1,10 @@
 variable "pm_endpoint" {
-  type = string
+  type        = string
   description = "Ex: https://pve.home.arpa:8006"
 }
 
 variable "pm_api_token_id" {
-  type = string
+  type        = string
   description = "Ex: terraform@pve!tf"
 }
 
@@ -54,4 +54,3 @@ variable "vm_bridge" {
   type    = string
   default = "vmbr0"
 }
-

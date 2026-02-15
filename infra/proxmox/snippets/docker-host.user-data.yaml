@@ -1,0 +1,50 @@
+#cloud-config
+
+hostname: docker-prod-01
+manage_etc_hosts: true
+
+users:
+  - name: remi
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    lock_passwd: true
+    ssh_authorized_keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN0KZFdGai2GZ5WSce4sVdE4BmkLaQST96hmcNbNAdvG remi@macmini"
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP4HkGs8AMiekZ8/RwJtRNyAGJ5BTXeBMWG5+c46zemJ breakglass-remidom"
+
+disable_root: true
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - qemu-guest-agent
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - git
+  - vim
+  - htop
+  - chrony
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-homelab.conf
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin no
+      PubkeyAuthentication yes
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      UsePAM yes
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - systemctl restart ssh
+  - timedatectl set-timezone Europe/Paris
+
+final_message: |
+  cloud-init finished
+  docker-host baseline ready

@@ -2,6 +2,23 @@ provider "proxmox" {
   endpoint  = var.pm_endpoint
   api_token = "${var.pm_api_token_id}=${var.pm_api_token_secret}"
   insecure  = var.pm_tls_insecure
+  ssh {
+    agent    = true
+    username = "root"
+  }
+}
+
+# Cloud-init user-data managed by Terraform and uploaded to Proxmox as a snippet.
+# This avoids manual scp and guarantees the VM always uses the repo version.
+resource "proxmox_virtual_environment_file" "docker_host_user_data" {
+  content_type = "snippets"
+  datastore_id = "local"
+  node_name    = var.pm_node
+
+  source_raw {
+    data      = file("${path.module}/../../../../../proxmox/snippets/docker-host.user-data.yaml")
+    file_name = "docker-host.user-data.yaml"
+  }
 }
 
 resource "proxmox_virtual_environment_vm" "docker_host" {
@@ -41,8 +58,7 @@ resource "proxmox_virtual_environment_vm" "docker_host" {
         address = "dhcp"
       }
     }
-
-  
+    user_data_file_id = proxmox_virtual_environment_file.docker_host_user_data.id
   }
 
   started = true
