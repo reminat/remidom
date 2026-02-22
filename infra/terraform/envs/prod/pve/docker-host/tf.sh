@@ -24,6 +24,13 @@ require_cmd bw
 require_cmd bws
 require_cmd python3
 require_cmd terraform
+require_cmd rsync
+
+# Backup configuration
+BACKUP_HOST="192.168.1.200"
+BACKUP_USER="remi"
+BACKUP_PORT="4022"
+BACKUP_BASE_DIR="/volume1/TimeMachine/terraform-state-backups"
 
 bw_status() {
   # returns: unauthenticated | locked | unlocked | (empty on error)
@@ -141,14 +148,56 @@ fetch_secret_value() {
 }
 
 
+mask() {
+  local v="${1:-}"
+  if [ -z "$v" ]; then
+    echo "<empty>"
+  else
+    printf "%s... (len=%d)" "${v:0:8}" "${#v}"
+  fi
+}
+
+backup_state() {
+  local host="$BACKUP_HOST"
+  local user="$BACKUP_USER"
+  local port="$BACKUP_PORT"
+  local dst="${user}@${host}:${BACKUP_BASE_DIR}"
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+
+  # Ensure destination exists (ignore failure if permissions prevent mkdir)
+  ssh -p "$port" "${user}@${host}" "mkdir -p ${BACKUP_BASE_DIR}" >/dev/null 2>&1 || true
+
+  # Main state (timestamped)
+  rsync -a -e "ssh -p ${port}" --rsync-path="/usr/bin/rsync" terraform.tfstate "${dst}/terraform.tfstate.${ts}"
+
+  # Terraform's backup file if present (timestamped)
+  if [ -f terraform.tfstate.backup ]; then
+    rsync -a -e "ssh -p ${port}" --rsync-path="/usr/bin/rsync" terraform.tfstate.backup "${dst}/terraform.tfstate.backup.${ts}"
+  fi
+
+  log "State backed up to ${dst} (ts=${ts})"
+}
+
 export TF_VAR_pm_api_token_secret="$(fetch_secret_value "$PM_TOKEN_SECRET_REF")"
 export TF_VAR_pm_api_token_id="$(fetch_secret_value "$PM_TOKEN_ID_REF")"
 export TF_VAR_pm_endpoint="$(fetch_secret_value "$PM_ENDPOINT_REF")"
 
+# Debug: show what we are actually exporting to Terraform (masked)
 log "TF_VAR_pm_endpoint = $(mask "${TF_VAR_pm_endpoint:-}")"
 log "TF_VAR_pm_api_token_id = $(mask "${TF_VAR_pm_api_token_id:-}")"
 log "TF_VAR_pm_api_token_secret = $(mask "${TF_VAR_pm_api_token_secret:-}")"
 
 # 4) Run terraform
-log "Handing off to terraform $*"
-exec terraform "$@"
+log "Running: terraform $*"
+terraform "$@"
+rc=$?
+
+# Backup only after mutating commands
+case "${1:-}" in
+  apply|destroy)
+    backup_state
+    ;;
+esac
+
+exit $rc
