@@ -54,3 +54,30 @@ variable "vm_bridge" {
   type    = string
   default = "vmbr0"
 }
+
+# --- Home Assistant OS (HAOS) variables ---
+
+variable "haos_vm_name" {
+  type    = string
+  default = "haos-prod-01"
+}
+
+variable "haos_template_id" {
+  type    = number
+  default = 9100
+}
+
+variable "haos_cores" {
+  type    = number
+  default = 2
+}
+
+variable "haos_memory_mb" {
+  type    = number
+  default = 4096
+}
+
+variable "haos_disk_gb" {
+  type    = number
+  default = 64
+}
