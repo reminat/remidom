@@ -1,25 +1,56 @@
 #!/usr/bin/env bash
+
+# -----------------------------------------------------------------------------
+# tf.sh, Terraform wrapper for this env
+#
+# What this script does (high level):
+#   - Ensures Bitwarden CLI (`bw`) is logged in and the vault is unlocked
+#   - Ensures Bitwarden Secrets Manager CLI (`bws`) has an access token
+#   - Fetches Proxmox provider credentials from Bitwarden Secrets Manager
+#   - Exports them as TF_VAR_* so Terraform providers can read them
+#   - Runs `terraform` with the arguments you provide
+#   - After mutating commands (apply/destroy), backs up terraform state to the NAS
+#
+# Why it exists:
+#   - Avoid storing secrets in terraform.tfvars / repo files
+#   - Keep the workflow "terraform ..." identical, with secrets injected at runtime
+#
+# Key assumptions:
+#   - You have `bw` and `bws` installed and configured
+#   - Bitwarden PM contains an item password named `bws_machine_token`
+#   - Bitwarden Secrets Manager contains 3 secrets keyed/named:
+#       * pm_api_token_secret
+#       * pm_api_token_id
+#       * pm_endpoint
+#   - NAS (Synology) is reachable via SSH on BACKUP_PORT and accepts your SSH key
+#   - Remote rsync binary is at /usr/bin/rsync (forced because Synology PATH can differ)
+# -----------------------------------------------------------------------------
+
+# Fail fast: -e stop on error, -u error on unset var, pipefail catch errors in pipelines
 set -euo pipefail
 
+# Simple timestamped logger (stderr)
 log() {
   # Usage: log "message"
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
 }
 
-# Enable verbose tracing with: TFWRAP_DEBUG=1 ./tf.sh plan
+# Optional debug mode:
+#   TFWRAP_DEBUG=1 enables shell tracing (set -x) and Terraform debug logs (TF_LOG=DEBUG)
 if [ "${TFWRAP_DEBUG:-}" = "1" ]; then
   set -x
   export TF_LOG=${TF_LOG:-DEBUG}
 fi
 
+# If any command fails, print the line number to speed up debugging
 trap 'rc=$?; log "ERROR: command failed (exit=$rc) at line $LINENO"; exit $rc' ERR
 
-# Wrapper Terraform: hydrate required creds from Bitwarden (bw + bws) without storing them in terraform.tfvars
-
+# Hard dependency check: fail early if a required binary is missing
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing command: $1" >&2; exit 1; }
 }
 
+# Tooling needed by this wrapper
 require_cmd bw
 require_cmd bws
 require_cmd python3
@@ -27,20 +58,25 @@ require_cmd terraform
 require_cmd rsync
 
 # Backup configuration
+# These values are hardcoded for this env. Change here if your NAS/user/port/path changes.
+# Destination path is on the NAS (Synology): it must exist or be creatable.
 BACKUP_HOST="192.168.1.200"
 BACKUP_USER="remi"
 BACKUP_PORT="4022"
 BACKUP_BASE_DIR="/volume1/TimeMachine/terraform-state-backups"
 
+# Read Bitwarden vault status as a single word:
+#   unauthenticated | locked | unlocked
 bw_status() {
-  # returns: unauthenticated | locked | unlocked | (empty on error)
   bw status 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))'
 }
 
+# Snapshot the current Bitwarden status once, then transition through login/unlock if needed
 status="$(bw_status || true)"
 log "Bitwarden status: ${status:-<empty>}"
 
-# 0) Ensure logged-in
+# Step 0: ensure `bw` is logged in
+# If not logged in, we attempt a non-interactive login via API key (BW_CLIENTID/BW_CLIENTSECRET)
 if [ "$status" = "unauthenticated" ] || [ -z "$status" ]; then
   # Try non-interactive login via API key if available
   if [ -n "${BW_CLIENTID:-}" ] && [ -n "${BW_CLIENTSECRET:-}" ]; then
@@ -57,7 +93,8 @@ if [ "$status" = "unauthenticated" ] || [ -z "$status" ]; then
   log "Bitwarden status after login attempt: ${status:-<empty>}"
 fi
 
-# 1) Ensure vault unlocked (interactive once per shell)
+# Step 1: ensure the vault is unlocked
+# If BW_SESSION is not set, `bw unlock --raw` will prompt once and then we export BW_SESSION
 if [ "$status" != "unlocked" ]; then
   if [ -n "${BW_SESSION:-}" ]; then
     log "BW_SESSION already set in environment, re-checking status"
@@ -76,22 +113,24 @@ if [ "$status" != "unlocked" ]; then
   exit 1
 fi
 
-# 2) Ensure we have a Secrets Manager access token for bws.
-# Store this token in Bitwarden PM as an item password named: bws_machine_token
+# Step 2: ensure `bws` can talk to Secrets Manager
+# We load BWS_ACCESS_TOKEN from Bitwarden Password Manager item password: `bws_machine_token`
 if [ -z "${BWS_ACCESS_TOKEN:-}" ]; then
   log "BWS_ACCESS_TOKEN not set, fetching from Bitwarden Password Manager item: bws_machine_token"
   export BWS_ACCESS_TOKEN="$(bw get password bws_machine_token)"
   log "BWS_ACCESS_TOKEN loaded"
 fi
 
-# 3) Fetch Proxmox credentials from Bitwarden Secrets Manager.
-# We keep human-friendly secret key/name refs here and resolve them to UUIDs because `bws secret get` expects a secret ID.
+# Step 3: fetch Proxmox credentials from Bitwarden Secrets Manager
+# `bws secret get` expects a secret UUID. For convenience we keep human-friendly refs
+# (key or name) below and resolve them to UUIDs using `bws secret list`.
 PM_TOKEN_SECRET_REF="pm_api_token_secret"
 PM_TOKEN_ID_REF="pm_api_token_id"
 PM_ENDPOINT_REF="pm_endpoint"
 
 is_uuid_ref() {
   # Accept either raw UUID or urn:uuid:<uuid>
+  # If the ref is already a UUID, we skip listing and matching.
   [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || [[ "$1" =~ ^urn:uuid:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
 }
 
@@ -102,8 +141,8 @@ resolve_secret_id() {
     return 0
   fi
 
-  # Try to find the secret by key/name from the list.
-  # `bws secret list` should return JSON; if it doesn't, we fail fast.
+  # Otherwise, list all secrets once and find a match by key/name (or id/uuid).
+  # Note: `bws secret list` must return JSON; we suppress stderr in the python snippet.
   bws secret list | python3 -c 'import sys, json
 ref = sys.argv[1]
 data = json.load(sys.stdin)
@@ -132,6 +171,8 @@ raise SystemExit(1)
 ' "$ref" 2>/dev/null || return 1
 }
 
+# Fetches the value of a secret given a ref (key/name) or UUID.
+# Returns the raw secret value on stdout.
 fetch_secret_value() {
   local ref="$1"
   log "Resolving Secrets Manager secret ref '$ref' to an ID"
@@ -141,13 +182,11 @@ fetch_secret_value() {
     echo "Fix: use a real secret UUID (or urn:uuid:...) or ensure a secret exists with key/name '$ref'." >&2
     exit 1
   }
-  log "Resolved secret id: $sid"
 
-  log "Fetching secret value via bws secret get"
   bws secret get "$sid" | python3 -c 'import sys,json; print(str(json.load(sys.stdin)["value"]).strip())'
 }
 
-
+# Helper to print a masked version of a secret (never print full secrets in logs)
 mask() {
   local v="${1:-}"
   if [ -z "$v" ]; then
@@ -157,6 +196,8 @@ mask() {
   fi
 }
 
+# Backup terraform state files to the NAS (timestamped) after apply/destroy
+# We keep multiple timestamped copies for safety.
 backup_state() {
   local host="$BACKUP_HOST"
   local user="$BACKUP_USER"
@@ -165,13 +206,13 @@ backup_state() {
   local ts
   ts="$(date +%Y%m%d-%H%M%S)"
 
-  # Ensure destination exists (ignore failure if permissions prevent mkdir)
+  # Best effort: ensure destination exists. Ignore failure (ACLs/permissions on Synology shares can differ)
   ssh -p "$port" "${user}@${host}" "mkdir -p ${BACKUP_BASE_DIR}" >/dev/null 2>&1 || true
 
-  # Main state (timestamped)
+  # Main state file (always present after first terraform run)
   rsync -a -e "ssh -p ${port}" --rsync-path="/usr/bin/rsync" terraform.tfstate "${dst}/terraform.tfstate.${ts}"
 
-  # Terraform's backup file if present (timestamped)
+  # Terraform also keeps a local backup file sometimes, back it up too if present
   if [ -f terraform.tfstate.backup ]; then
     rsync -a -e "ssh -p ${port}" --rsync-path="/usr/bin/rsync" terraform.tfstate.backup "${dst}/terraform.tfstate.backup.${ts}"
   fi
@@ -183,17 +224,17 @@ export TF_VAR_pm_api_token_secret="$(fetch_secret_value "$PM_TOKEN_SECRET_REF")"
 export TF_VAR_pm_api_token_id="$(fetch_secret_value "$PM_TOKEN_ID_REF")"
 export TF_VAR_pm_endpoint="$(fetch_secret_value "$PM_ENDPOINT_REF")"
 
-# Debug: show what we are actually exporting to Terraform (masked)
+# Sanity check logs (masked): helps confirm the wrapper injected something without leaking secrets
 log "TF_VAR_pm_endpoint = $(mask "${TF_VAR_pm_endpoint:-}")"
 log "TF_VAR_pm_api_token_id = $(mask "${TF_VAR_pm_api_token_id:-}")"
 log "TF_VAR_pm_api_token_secret = $(mask "${TF_VAR_pm_api_token_secret:-}")"
 
-# 4) Run terraform
+# Step 4: run terraform with whatever args were provided to this script
 log "Running: terraform $*"
 terraform "$@"
 rc=$?
 
-# Backup only after mutating commands
+# Only back up state after mutating commands, avoid noise on plan/validate
 case "${1:-}" in
   apply|destroy)
     backup_state
