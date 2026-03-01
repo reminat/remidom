@@ -16,10 +16,6 @@ resource "proxmox_virtual_environment_vm" "haos" {
     vm_id = var.haos_template_id
   }
 
-  agent {
-    enabled = true
-  }
-
   cpu {
     cores = var.haos_cores
     type  = "host"

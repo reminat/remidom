@@ -8,19 +8,6 @@ provider "proxmox" {
   }
 }
 
-# Cloud-init user-data managed by Terraform and uploaded to Proxmox as a snippet.
-# This avoids manual scp and guarantees the VM always uses the repo version.
-resource "proxmox_virtual_environment_file" "docker_host_user_data" {
-  content_type = "snippets"
-  datastore_id = "local"
-  node_name    = var.pm_node
-
-  source_raw {
-    data      = file("${path.module}/../../../../../proxmox/snippets/docker-host.user-data.yaml")
-    file_name = "docker-host.user-data.yaml"
-  }
-}
-
 resource "proxmox_virtual_environment_vm" "docker_host" {
   node_name = var.pm_node
   name      = var.vm_name
@@ -58,7 +45,7 @@ resource "proxmox_virtual_environment_vm" "docker_host" {
         address = "dhcp"
       }
     }
-    user_data_file_id = proxmox_virtual_environment_file.docker_host_user_data.id
+    user_data_file_id = "local:snippets/docker-host.user-data.yaml"
   }
 
   started = true
