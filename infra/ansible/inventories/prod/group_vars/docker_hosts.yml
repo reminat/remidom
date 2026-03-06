@@ -1,0 +1,18 @@
+docker_users:
+  - remi
+
+docker_data_root: /srv/docker
+docker_core_dest: /srv/docker/core
+
+compose_projects:
+  - name: docker_prod
+    src: ../../../../services/docker/docker_prod
+    dest: /srv/docker/docker_prod
+
+
+# A mettre en clair au début si tu veux aller vite, mais mieux via env/SOPS ensuite
+mqtt_user: mqtt
+mqtt_password: "change-me-now"
+
+smlight_serial_url: "tcp://10.10.40.10:6638"
+z2m_network_key: "GENERATE"

@@ -1,0 +1,28 @@
+- name: Install Docker packages (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose-plugin
+    update_cache: true
+    state: present
+
+- name: Ensure docker service is enabled and started
+  ansible.builtin.service:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Add users to docker group
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users | default([]) }}"
+
+- name: Create docker data root
+  ansible.builtin.file:
+    path: "{{ docker_data_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"

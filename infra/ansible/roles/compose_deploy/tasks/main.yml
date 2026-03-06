@@ -1,0 +1,27 @@
+- name: Ensure project directories exist
+  ansible.builtin.file:
+    path: "{{ item.dest }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ compose_projects }}"
+
+- name: Sync compose projects to host
+  ansible.posix.synchronize:
+    src: "{{ item.src }}/"
+    dest: "{{ item.dest }}/"
+    delete: false
+    recursive: true
+  loop: "{{ compose_projects }}"
+
+- name: Docker compose pull
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ item.dest }}"
+  loop: "{{ compose_projects }}"
+  changed_when: false
+
+- name: Docker compose up
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ item.dest }}"
+  loop: "{{ compose_projects }}"

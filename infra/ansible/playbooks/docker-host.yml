@@ -1,0 +1,7 @@
+- name: Configure Docker host and deploy stacks
+  hosts: docker_hosts
+  become: true
+  roles:
+    - common
+    - docker
+    - compose_deploy
