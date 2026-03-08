@@ -18,10 +18,12 @@
 # Key assumptions:
 #   - You have `bw` and `bws` installed and configured
 #   - Bitwarden PM contains an item password named `bws_machine_token`
-#   - Bitwarden Secrets Manager contains 3 secrets keyed/named:
+#   - Bitwarden Secrets Manager contains Proxmox secrets keyed/named:
 #       * pm_api_token_secret
 #       * pm_api_token_id
 #       * pm_endpoint
+#   - For modules that declare it, it can also inject:
+#       * ssh_authorized_keys_json (JSON array of SSH public keys)
 #   - NAS (Synology) is reachable via SSH on BACKUP_PORT and accepts your SSH key
 #   - Remote rsync binary is at /usr/bin/rsync (forced because Synology PATH can differ)
 # -----------------------------------------------------------------------------
@@ -147,6 +149,7 @@ fi
 PM_TOKEN_SECRET_REF="pm_api_token_secret"
 PM_TOKEN_ID_REF="pm_api_token_id"
 PM_ENDPOINT_REF="pm_endpoint"
+SSH_AUTHORIZED_KEYS_REF="ssh_authorized_keys_json"
 
 is_uuid_ref() {
   # Accept either raw UUID or urn:uuid:<uuid>
@@ -246,6 +249,13 @@ backup_state() {
 export TF_VAR_pm_api_token_secret="$(fetch_secret_value "$PM_TOKEN_SECRET_REF")"
 export TF_VAR_pm_api_token_id="$(fetch_secret_value "$PM_TOKEN_ID_REF")"
 export TF_VAR_pm_endpoint="$(fetch_secret_value "$PM_ENDPOINT_REF")"
+
+# Optionally inject SSH keys list when the current module declares ssh_authorized_keys.
+# Expected secret format: JSON array, e.g. ["ssh-ed25519 AAAA... user@host", "..."].
+if [ -f variables.tf ] && grep -q 'variable "ssh_authorized_keys"' variables.tf; then
+  export TF_VAR_ssh_authorized_keys="$(fetch_secret_value "$SSH_AUTHORIZED_KEYS_REF")"
+  log "TF_VAR_ssh_authorized_keys = $(mask "${TF_VAR_ssh_authorized_keys:-}")"
+fi
 
 # Sanity check logs (masked): helps confirm the wrapper injected something without leaking secrets
 log "TF_VAR_pm_endpoint = $(mask "${TF_VAR_pm_endpoint:-}")"

@@ -11,7 +11,90 @@
     dest: "{{ item.dest }}/"
     delete: false
     recursive: true
+    rsync_opts:
+      - "--exclude=zigbee2mqtt/data/configuration.yaml.j2"
   loop: "{{ compose_projects }}"
+
+- name: Render Zigbee2MQTT configuration
+  ansible.builtin.template:
+    src: "{{ item.src }}/zigbee2mqtt/data/configuration.yaml.j2"
+    dest: "{{ item.dest }}/zigbee2mqtt/data/configuration.yaml"
+    mode: "0640"
+    owner: "1883"
+    group: "1883"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Remove stale Zigbee2MQTT template file from target
+  ansible.builtin.file:
+    path: "{{ item.dest }}/zigbee2mqtt/data/configuration.yaml.j2"
+    state: absent
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Ensure Node-RED data directory has the correct ownership
+  ansible.builtin.file:
+    path: "{{ item.dest }}/nodered/data"
+    state: directory
+    owner: "1000"
+    group: "1000"
+    recurse: true
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Ensure Mosquitto config directory has the correct ownership
+  ansible.builtin.file:
+    path: "{{ item.dest }}/mosquitto/config"
+    state: directory
+    owner: "1883"
+    group: "1883"
+    mode: "0750"
+    recurse: true
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Ensure Mosquitto data directory has the correct ownership
+  ansible.builtin.file:
+    path: "{{ item.dest }}/mosquitto/data"
+    state: directory
+    owner: "1883"
+    group: "1883"
+    mode: "0750"
+    recurse: true
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Ensure Mosquitto log directory has the correct ownership
+  ansible.builtin.file:
+    path: "{{ item.dest }}/mosquitto/log"
+    state: directory
+    owner: "1883"
+    group: "1883"
+    mode: "0750"
+    recurse: true
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Ensure Mosquitto password file contains current credentials
+  ansible.builtin.command:
+    cmd: >
+      docker run --rm
+      -v {{ item.dest }}/mosquitto/config:/mosquitto/config
+      eclipse-mosquitto:2
+      sh -lc "touch /mosquitto/config/passwords && mosquitto_passwd -b /mosquitto/config/passwords {{ mqtt_user }} {{ mqtt_password }}"
+  no_log: true
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Ensure Mosquitto password file permissions are correct
+  ansible.builtin.file:
+    path: "{{ item.dest }}/mosquitto/config/passwords"
+    state: file
+    owner: "1883"
+    group: "1883"
+    mode: "0640"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
 
 - name: Docker compose pull
   ansible.builtin.command:
@@ -25,3 +108,11 @@
     cmd: docker compose up -d
     chdir: "{{ item.dest }}"
   loop: "{{ compose_projects }}"
+
+- name: Reload Mosquitto to apply password file updates
+  ansible.builtin.command:
+    cmd: docker compose exec -T mosquitto kill -HUP 1
+    chdir: "{{ item.dest }}"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+  changed_when: false

@@ -3,8 +3,9 @@ provider "proxmox" {
   api_token = "${var.pm_api_token_id}=${var.pm_api_token_secret}"
   insecure  = var.pm_tls_insecure
   ssh {
-    agent    = true
+    agent    = false
     username = "root"
+    private_key = file(pathexpand("~/.ssh/id_ed25519_pve"))
   }
 }
 
@@ -45,9 +46,23 @@ resource "proxmox_virtual_environment_vm" "docker_host" {
         address = "dhcp"
       }
     }
-    user_data_file_id = "local:snippets/docker-host.user-data.yaml"
+    user_data_file_id = proxmox_virtual_environment_file.docker_host_user_data.id
   }
 
   started = true
   on_boot = true
+}
+
+resource "proxmox_virtual_environment_file" "docker_host_user_data" {
+  content_type = "snippets"
+  datastore_id = "local"
+  node_name    = var.pm_node
+
+  source_raw {
+    data = templatefile("${path.module}/../../../../../proxmox/snippets/docker-host.user-data.yaml.tftpl", {
+      hostname            = var.vm_name
+      ssh_authorized_keys = var.ssh_authorized_keys
+    })
+    file_name = "docker-host.user-data.yaml"
+  }
 }

@@ -20,14 +20,14 @@ L’objectif est d’avoir une infra **reproductible**, **jetable**, sans config
 Terraform est responsable de :
 - créer / détruire des VMs sur Proxmox
 - définir CPU, RAM, disque, réseau
-- référencer un template cloud-init
-- référencer un **snippet cloud-init**
+- rendre le template cloud-init
+- uploader le **snippet cloud-init** vers Proxmox (`content_type = "snippets"`)
 
 Terraform **ne fait pas** :
 - gestion des users
 - installation de paquets
 - configuration système
-- gestion des clés SSH
+- stockage des secrets
 
 Terraform ne fait **qu’orchestrer**.
 
@@ -73,8 +73,7 @@ infra/
     README.md
     snippets/
       docker-host.user-data.yaml
-    scripts/
-      push-snippets.sh
+      docker-host.user-data.yaml.tftpl
 
 infra/
   terraform/
@@ -96,11 +95,11 @@ infra/
 ### 1. Modifier le cloud-init
 Tu modifies par exemple :
 ```
-infra/proxmox/snippets/docker-host.user-data.yaml
+infra/proxmox/snippets/docker-host.user-data.yaml.tftpl
 ```
 
 Exemples :
-- ajout d’une clé SSH
+- changement de structure cloud-init
 - ajout d’un paquet
 - changement de configuration SSH
 
@@ -108,45 +107,32 @@ Exemples :
 
 ---
 
-### 2. Pousser le snippet sur Proxmox
-Depuis la racine du repo :
-
-```bash
-infra/proxmox/scripts/push-snippets.sh
-```
-
-Ce script :
-- copie les fichiers YAML vers `/var/lib/vz/snippets/` sur le node Proxmox
-- ne crée aucune VM
-- ne redémarre rien
-
----
-
-### 3. Créer (ou recréer) la VM avec Terraform
+### 2. Créer (ou recréer) la VM avec Terraform
 
 ```bash
 cd infra/terraform/envs/prod/pve/docker-host
-terraform apply
+./tf.sh apply
 ```
 
 Terraform :
 - clone le template cloud-init
-- référence le snippet cloud-init
+- rend `docker-host.user-data.yaml.tftpl`
+- upload le snippet rendu sur Proxmox
 - démarre la VM
 
 ➡️ Le cloud-init est exécuté **maintenant**, au premier boot.
 
 ---
 
-### 4. Modifier le cloud-init après coup
+### 3. Modifier le cloud-init après coup
 Si tu modifies le cloud-init **après** la création de la VM :
 
 - ❌ la VM existante **ne change pas**
 - ✅ il faut **détruire et recréer** la VM
 
 ```bash
-terraform destroy
-terraform apply
+./tf.sh destroy
+./tf.sh apply
 ```
 
 C’est volontaire.  
@@ -160,11 +146,21 @@ C’est la base d’une infra propre.
 - 1 workstation = 1 clé SSH
 - + 1 clé **break-glass** (secours)
 
-Toutes les clés **publiques** sont définies dans le cloud-init.
+Les clés **publiques** sont stockées dans Bitwarden Secrets Manager avec la clé :
+- `ssh_authorized_keys_json`
+- format : JSON array (liste de strings)
 
 Les clés privées :
 - ne vont jamais dans Git
 - sont stockées localement ou dans un coffre
+
+Exemple de valeur `ssh_authorized_keys_json` :
+```json
+[
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... remi@macmini",
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... breakglass-remidom"
+]
+```
 
 ---
 

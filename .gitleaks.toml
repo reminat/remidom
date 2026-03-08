@@ -1,0 +1,19 @@
+title = "remidom gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for non-secret artifacts"
+paths = [
+  '''.*\.terraform\.lock\.hcl$''',
+]
+
+[[allowlists]]
+description = "Allow SSH public keys in cloud-init"
+paths = [
+  '''infra/proxmox/snippets/docker-host\.user-data\.yaml$''',
+]
+regexes = [
+  '''ssh-ed25519\s+[A-Za-z0-9+/=]+''',
+]

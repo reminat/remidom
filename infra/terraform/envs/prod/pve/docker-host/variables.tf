@@ -54,3 +54,14 @@ variable "vm_bridge" {
   type    = string
   default = "vmbr0"
 }
+
+variable "ssh_authorized_keys" {
+  type        = list(string)
+  description = "SSH public keys injected into cloud-init for user remi."
+  sensitive   = true
+
+  validation {
+    condition     = length(var.ssh_authorized_keys) > 0
+    error_message = "ssh_authorized_keys must contain at least one SSH public key."
+  }
+}

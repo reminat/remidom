@@ -1,0 +1,17 @@
+homeassistant:
+  enabled: true
+frontend:
+  enabled: true
+mqtt:
+  server: mqtt://mosquitto:1883
+  user: {{ mqtt_user }}
+  password: {{ mqtt_password }}
+serial:
+  port: {{ smlight_serial_url }}
+  baudrate: 115200
+  adapter: ember
+  disable_led: false
+advanced:
+  transmit_power: 20
+  network_key: {{ z2m_network_key }}
+version: 5
