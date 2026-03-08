@@ -15,4 +15,4 @@ mqtt_user: mqtt
 mqtt_password: "{{ lookup('env', 'MQTT_PASSWORD') }}"
 
 smlight_serial_url: "tcp://10.10.40.2:6638"
-z2m_network_key: "GENERATE"
+z2m_network_key: "{{ (lookup('env', 'Z2M_NETWORK_KEY') | default('\"GENERATE\"', true)) | from_json }}"

@@ -13,5 +13,5 @@ serial:
   disable_led: false
 advanced:
   transmit_power: 20
-  network_key: {{ z2m_network_key }}
+  network_key: {{ z2m_network_key | to_json }}
 version: 5

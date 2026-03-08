@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MQTT_SECRET_REF="${MQTT_SECRET_REF:-MQTT_PASSWORD}"
+Z2M_NETWORK_KEY_SECRET_REF="${Z2M_NETWORK_KEY_SECRET_REF:-Z2M_NETWORK_KEY_JSON}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing command: $1" >&2; exit 1; }
@@ -42,23 +43,31 @@ if [ -z "${BWS_ACCESS_TOKEN:-}" ]; then
   export BWS_ACCESS_TOKEN="$(bw get password bws_machine_token)"
 fi
 
-# Accept either a secret UUID/urn:uuid or a key/name from Bitwarden Secrets Manager.
-if [[ "$MQTT_SECRET_REF" =~ ^(urn:uuid:)?[0-9a-fA-F-]{36}$ ]]; then
-  MQTT_SECRET_ID="$MQTT_SECRET_REF"
-else
-  MQTT_SECRET_ID="$(
-    bws secret list | jq -r --arg ref "$MQTT_SECRET_REF" '
-      (map(select((.key // "") == $ref or (.name // "") == $ref)) | .[0].id) // empty
-    '
-  )"
-fi
+resolve_secret_id() {
+  local ref="$1"
+  if [[ "$ref" =~ ^(urn:uuid:)?[0-9a-fA-F-]{36}$ ]]; then
+    printf '%s\n' "$ref"
+    return 0
+  fi
 
-if [ -z "${MQTT_SECRET_ID:-}" ]; then
-  echo "Could not resolve Bitwarden secret ref '${MQTT_SECRET_REF}' (expected key/name or UUID)." >&2
-  exit 1
-fi
+  bws secret list | jq -r --arg ref "$ref" '
+    (map(select((.key // "") == $ref or (.name // "") == $ref)) | .[0].id) // empty
+  '
+}
 
-export MQTT_PASSWORD="$(bws secret get "$MQTT_SECRET_ID" | jq -r '.value')"
+fetch_secret_value() {
+  local ref="$1"
+  local id
+  id="$(resolve_secret_id "$ref")"
+  if [ -z "${id:-}" ]; then
+    echo "Could not resolve Bitwarden secret ref '${ref}' (expected key/name or UUID)." >&2
+    exit 1
+  fi
+  bws secret get "$id" | jq -r '.value'
+}
+
+export MQTT_PASSWORD="$(fetch_secret_value "$MQTT_SECRET_REF")"
+export Z2M_NETWORK_KEY="$(fetch_secret_value "$Z2M_NETWORK_KEY_SECRET_REF")"
 
 cd "$SCRIPT_DIR"
 ansible-playbook playbooks/docker-host.yml
