@@ -20,24 +20,14 @@ variable "pm_tls_insecure" {
 
 variable "pm_node" { type = string }
 
-variable "vm_storage" {
-  type    = string
-  default = "local-lvm"
-}
-
-variable "vm_bridge" {
-  type    = string
-  default = "vmbr0"
-}
-
 variable "vm_name" {
   type    = string
-  default = "haos-prod-01"
+  default = "docker-test-01"
 }
 
 variable "vm_template_id" {
   type    = number
-  default = 9100
+  default = 9000
 }
 
 variable "vm_cores" {
@@ -52,5 +42,26 @@ variable "vm_memory_mb" {
 
 variable "vm_disk_gb" {
   type    = number
-  default = 64
+  default = 40
+}
+
+variable "vm_storage" {
+  type    = string
+  default = "local-lvm"
+}
+
+variable "vm_bridge" {
+  type    = string
+  default = "vmbr0"
+}
+
+variable "ssh_authorized_keys" {
+  type        = list(string)
+  description = "SSH public keys injected into cloud-init for user remi."
+  sensitive   = true
+
+  validation {
+    condition     = length(var.ssh_authorized_keys) > 0
+    error_message = "ssh_authorized_keys must contain at least one SSH public key."
+  }
 }

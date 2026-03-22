@@ -21,8 +21,3 @@ module "haos" {
   vm_storage     = var.vm_storage
   vm_bridge      = var.vm_bridge
 }
-
-moved {
-  from = proxmox_virtual_environment_vm.haos
-  to   = module.haos.proxmox_virtual_environment_vm.vm
-}

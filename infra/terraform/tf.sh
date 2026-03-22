@@ -34,6 +34,15 @@ set -euo pipefail
 TFWRAP_SHARED_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TFWRAP_ENVS_DIR="${TFWRAP_SHARED_DIR}/envs"
 
+# If the first argument is a path that exists under envs/, cd there and shift it off.
+# This allows calling tf.sh from the terraform/ root:
+#   ./tf.sh test/pve/docker-host apply
+#   ./tf.sh prod/pve/haos plan
+if [ $# -ge 1 ] && [ -d "${TFWRAP_ENVS_DIR}/${1}" ]; then
+  cd "${TFWRAP_ENVS_DIR}/${1}"
+  shift
+fi
+
 # Simple timestamped logger (stderr)
 log() {
   # Usage: log "message"
@@ -61,6 +70,43 @@ require_cmd bws
 require_cmd python3
 require_cmd terraform
 require_cmd rsync
+
+# Per-env config: if a tf.conf exists in the current directory, source it.
+# It can define TEMPLATE_SCRIPT to trigger a remote template build before apply.
+# Example tf.conf:
+#   TEMPLATE_SCRIPT=template-docker.sh
+if [ -f tf.conf ]; then
+  # shellcheck source=/dev/null
+  source tf.conf
+fi
+
+# Optional pre-apply step: ensure the Proxmox template exists before Terraform runs.
+# Triggered when TEMPLATE_SCRIPT and TEMPLATE_VM_ID are set (via tf.conf) and command is apply.
+# - If the template VM already exists on Proxmox: skip.
+# - If it doesn't exist: copy the script from the repo and run it on Proxmox.
+# Disable entirely with: TFWRAP_SKIP_TEMPLATE_BUILD=1 ./tf.sh <env> apply
+if [ "${1:-}" = "apply" ] && [ -n "${TEMPLATE_SCRIPT:-}" ] && [ -n "${TEMPLATE_VM_ID:-}" ] && [ "${TFWRAP_SKIP_TEMPLATE_BUILD:-0}" != "1" ]; then
+  PROXMOX_HOST="${PROXMOX_HOST:-pve.home.arpa}"
+  PROXMOX_USER="${PROXMOX_USER:-root}"
+  PROXMOX_SSH_OPTS="-i ${HOME}/.ssh/id_ed25519_pve -o StrictHostKeyChecking=no"
+
+  log "Checking if Proxmox template VM ${TEMPLATE_VM_ID} exists on ${PROXMOX_HOST}..."
+
+  if ssh ${PROXMOX_SSH_OPTS} "${PROXMOX_USER}@${PROXMOX_HOST}" "qm status ${TEMPLATE_VM_ID}" >/dev/null 2>&1; then
+    log "Template VM ${TEMPLATE_VM_ID} already exists, skipping build."
+  else
+    log "Template VM ${TEMPLATE_VM_ID} not found — building from ${TEMPLATE_SCRIPT}..."
+    SCRIPT_SRC="${TFWRAP_SHARED_DIR}/../proxmox/scripts/${TEMPLATE_SCRIPT}"
+    if [ ! -f "${SCRIPT_SRC}" ]; then
+      echo "ERROR: template script not found: ${SCRIPT_SRC}" >&2
+      exit 1
+    fi
+    log "Copying ${TEMPLATE_SCRIPT} to ${PROXMOX_HOST}:/tmp/..."
+    scp ${PROXMOX_SSH_OPTS} "${SCRIPT_SRC}" "${PROXMOX_USER}@${PROXMOX_HOST}:/tmp/${TEMPLATE_SCRIPT}"
+    log "Running ${TEMPLATE_SCRIPT} on ${PROXMOX_HOST}..."
+    ssh ${PROXMOX_SSH_OPTS} "${PROXMOX_USER}@${PROXMOX_HOST}" "bash /tmp/${TEMPLATE_SCRIPT}"
+  fi
+fi
 
 # Backup configuration
 # These values are hardcoded for this env. Change here if your NAS/user/port/path changes.

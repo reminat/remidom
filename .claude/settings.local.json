@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /Users/remi/dev/remidom -type d ! -path */.git* ! -path */__pycache__* ! -path */node_modules*)",
+      "Bash(chmod:*)"
+    ]
+  }
+}

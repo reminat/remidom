@@ -23,13 +23,3 @@ module "docker_host" {
   ssh_authorized_keys     = var.ssh_authorized_keys
   user_data_template_path = "${path.root}/../../../../../proxmox/snippets/docker-host.user-data.yaml.tftpl"
 }
-
-moved {
-  from = proxmox_virtual_environment_vm.docker_host
-  to   = module.docker_host.proxmox_virtual_environment_vm.vm
-}
-
-moved {
-  from = proxmox_virtual_environment_file.docker_host_user_data
-  to   = module.docker_host.proxmox_virtual_environment_file.user_data
-}

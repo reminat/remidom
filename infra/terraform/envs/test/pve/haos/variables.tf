@@ -32,7 +32,7 @@ variable "vm_bridge" {
 
 variable "vm_name" {
   type    = string
-  default = "haos-prod-01"
+  default = "haos-test-01"
 }
 
 variable "vm_template_id" {
@@ -47,10 +47,10 @@ variable "vm_cores" {
 
 variable "vm_memory_mb" {
   type    = number
-  default = 4096
+  default = 2048
 }
 
 variable "vm_disk_gb" {
   type    = number
-  default = 64
+  default = 32
 }
