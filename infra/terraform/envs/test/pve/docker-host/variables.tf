@@ -1,6 +1,6 @@
 variable "pm_endpoint" {
   type        = string
-  description = "Ex: https://pve.home.arpa:8006"
+  description = "Ex: https://pve.reminat.com:8006"
 }
 
 variable "pm_api_token_id" {

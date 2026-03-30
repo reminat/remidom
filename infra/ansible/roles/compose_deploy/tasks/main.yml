@@ -12,8 +12,64 @@
     delete: false
     recursive: true
     rsync_opts:
+      - "--checksum"
       - "--exclude=zigbee2mqtt/data/configuration.yaml.j2"
+      - "--exclude=.env.j2"
+      - "--exclude=traefik/traefik.yml.j2"
+      - "--exclude=traefik/dynamic/*.j2"
+      - "--exclude=traefik/acme/"
   loop: "{{ compose_projects }}"
+
+- name: Render .env
+  ansible.builtin.template:
+    src: "{{ item.src }}/.env.j2"
+    dest: "{{ item.dest }}/.env"
+    mode: "0640"
+  no_log: true
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Render Traefik static configuration
+  ansible.builtin.template:
+    src: "{{ item.src }}/traefik/traefik.yml.j2"
+    dest: "{{ item.dest }}/traefik/traefik.yml"
+    mode: "0644"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Ensure Traefik dynamic directory exists
+  ansible.builtin.file:
+    path: "{{ item.dest }}/traefik/dynamic"
+    state: directory
+    mode: "0755"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Render Traefik dynamic configuration (haos)
+  ansible.builtin.template:
+    src: "{{ item.src }}/traefik/dynamic/haos.yml.j2"
+    dest: "{{ item.dest }}/traefik/dynamic/haos.yml"
+    mode: "0644"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Ensure Traefik acme directory exists
+  ansible.builtin.file:
+    path: "{{ item.dest }}/traefik/acme"
+    state: directory
+    mode: "0700"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Ensure acme.json exists with correct permissions
+  ansible.builtin.file:
+    path: "{{ item.dest }}/traefik/acme/acme.json"
+    state: touch
+    mode: "0600"
+    modification_time: preserve
+    access_time: preserve
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
 
 - name: Render Zigbee2MQTT configuration
   ansible.builtin.template:
@@ -22,6 +78,7 @@
     mode: "0640"
     owner: "1883"
     group: "1883"
+  no_log: true
   loop: "{{ compose_projects }}"
   when: item.name == 'core'
 

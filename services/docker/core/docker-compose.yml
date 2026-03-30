@@ -1,6 +1,27 @@
 services:
+  traefik:
+    image: traefik:v3.6.11
+    container_name: traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./traefik/acme:/etc/traefik/acme
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN_BASE}`)"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.tls.certresolver=cloudflare"
+
   mosquitto:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2.0.22
     container_name: mosquitto
     restart: unless-stopped
     ports:
@@ -12,38 +33,49 @@ services:
       - ./mosquitto/log:/mosquitto/log
 
   zigbee2mqtt:
-    image: koenkk/zigbee2mqtt:1.42
+    image: koenkk/zigbee2mqtt:2.9.1
     container_name: zigbee2mqtt
     restart: unless-stopped
     depends_on:
       - mosquitto
-    ports:
-      - "8080:8080"
     environment:
       - TZ=${TZ}
     volumes:
       - ./zigbee2mqtt/data:/app/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.zigbee2mqtt.rule=Host(`z2m.${DOMAIN_BASE}`)"
+      - "traefik.http.routers.zigbee2mqtt.entrypoints=websecure"
+      - "traefik.http.routers.zigbee2mqtt.tls.certresolver=cloudflare"
+      - "traefik.http.services.zigbee2mqtt.loadbalancer.server.port=8080"
 
   nodered:
-    image: nodered/node-red:3.1
+    image: nodered/node-red:4.1.8
     container_name: nodered
     restart: unless-stopped
     depends_on:
       - mosquitto
-    ports:
-      - "1880:1880"
     environment:
       - TZ=${TZ}
     volumes:
       - ./nodered/data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nodered.rule=Host(`nodered.${DOMAIN_BASE}`)"
+      - "traefik.http.routers.nodered.entrypoints=websecure"
+      - "traefik.http.routers.nodered.tls.certresolver=cloudflare"
+      - "traefik.http.services.nodered.loadbalancer.server.port=1880"
 
   portainer:
-    image: portainer/portainer-ce:2.20
+    image: portainer/portainer-ce:2.39.1
     container_name: portainer
     restart: unless-stopped
-    ports:
-      - "9000:9000"
-      - "9443:9443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./portainer/data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN_BASE}`)"
+      - "traefik.http.routers.portainer.entrypoints=websecure"
+      - "traefik.http.routers.portainer.tls.certresolver=cloudflare"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"

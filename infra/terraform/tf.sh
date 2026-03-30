@@ -86,7 +86,7 @@ fi
 # - If it doesn't exist: copy the script from the repo and run it on Proxmox.
 # Disable entirely with: TFWRAP_SKIP_TEMPLATE_BUILD=1 ./tf.sh <env> apply
 if [ "${1:-}" = "apply" ] && [ -n "${TEMPLATE_SCRIPT:-}" ] && [ -n "${TEMPLATE_VM_ID:-}" ] && [ "${TFWRAP_SKIP_TEMPLATE_BUILD:-0}" != "1" ]; then
-  PROXMOX_HOST="${PROXMOX_HOST:-pve.home.arpa}"
+  PROXMOX_HOST="${PROXMOX_HOST:-pve.reminat.com}"
   PROXMOX_USER="${PROXMOX_USER:-root}"
   PROXMOX_SSH_OPTS="-i ${HOME}/.ssh/id_ed25519_pve -o StrictHostKeyChecking=no"
 

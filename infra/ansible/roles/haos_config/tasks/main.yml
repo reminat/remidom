@@ -1,0 +1,17 @@
+# HAOS n'a pas Python — on utilise uniquement raw (SSH pur).
+
+- name: Render configuration to temp file
+  ansible.builtin.raw: >-
+    printf '%s' '{{ lookup("template", playbook_dir + "/../../../services/ha/config/configuration.yaml.j2") | b64encode }}'
+    | base64 -d > /tmp/ha_configuration.yaml
+
+- name: Deploy configuration if changed
+  ansible.builtin.raw: |
+    if ! cmp -s /tmp/ha_configuration.yaml /mnt/data/supervisor/homeassistant/configuration.yaml; then
+      cp /tmp/ha_configuration.yaml /mnt/data/supervisor/homeassistant/configuration.yaml
+      echo CHANGED
+    fi
+    rm -f /tmp/ha_configuration.yaml
+  register: ha_config
+  changed_when: "'CHANGED' in ha_config.stdout"
+  notify: Restart Home Assistant

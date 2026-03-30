@@ -1,0 +1,2 @@
+docker_host_ip: 10.10.20.10
+ansible_remote_tmp: /tmp

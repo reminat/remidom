@@ -3,7 +3,22 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MQTT_SECRET_REF="${MQTT_SECRET_REF:-MQTT_PASSWORD}"
-Z2M_NETWORK_KEY_SECRET_REF="${Z2M_NETWORK_KEY_SECRET_REF:-Z2M_NETWORK_KEY_JSON}"
+Z2M_NETWORK_KEY_SECRET_REF="${Z2M_NETWORK_KEY_SECRET_REF:-}"
+CF_DNS_API_TOKEN_SECRET_REF="${CF_DNS_API_TOKEN_SECRET_REF:-CF_DNS_API_TOKEN}"
+
+# First argument is the target environment (test or prod).
+ENV="${1:-}"
+if [ -z "${ENV}" ]; then
+  echo "Usage: ./deploy.sh <env>   (e.g. test or prod)" >&2
+  exit 1
+fi
+shift
+
+INVENTORY="${SCRIPT_DIR}/inventories/${ENV}/hosts.ini"
+if [ ! -f "${INVENTORY}" ]; then
+  echo "No inventory found for env '${ENV}': ${INVENTORY}" >&2
+  exit 1
+fi
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing command: $1" >&2; exit 1; }
@@ -38,7 +53,7 @@ if [ "$status" != "unlocked" ]; then
   fi
 fi
 
-# Ensure bws has an access token, same pattern as infra/terraform/tf.sh.
+# Ensure bws has an access token.
 if [ -z "${BWS_ACCESS_TOKEN:-}" ]; then
   export BWS_ACCESS_TOKEN="$(bw get password bws_machine_token)"
 fi
@@ -67,7 +82,11 @@ fetch_secret_value() {
 }
 
 export MQTT_PASSWORD="$(fetch_secret_value "$MQTT_SECRET_REF")"
+ENV_UPPER="$(echo "$ENV" | tr '[:lower:]' '[:upper:]')"
+Z2M_NETWORK_KEY_SECRET_REF="${Z2M_NETWORK_KEY_SECRET_REF:-Z2M_NETWORK_KEY_${ENV_UPPER}}"
 export Z2M_NETWORK_KEY="$(fetch_secret_value "$Z2M_NETWORK_KEY_SECRET_REF")"
+export CF_DNS_API_TOKEN="$(fetch_secret_value "$CF_DNS_API_TOKEN_SECRET_REF")"
 
 cd "$SCRIPT_DIR"
-ansible-playbook playbooks/docker-host.yml
+ansible-playbook -i "${INVENTORY}" playbooks/docker-host.yml "$@"
+ansible-playbook -i "${INVENTORY}" playbooks/haos.yml "$@"

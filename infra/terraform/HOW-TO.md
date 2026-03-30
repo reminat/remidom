@@ -34,7 +34,7 @@ graph TD
         EP2["envs/prod/pve/haos<br/>haos-prod-01<br/>2 cores · 4 GB · 64 GB"]
     end
 
-    subgraph Proxmox["Proxmox (pve.home.arpa)"]
+    subgraph Proxmox["Proxmox (pve.reminat.com)"]
         TPL1["Template 9000<br/>Ubuntu cloud-init"]
         TPL2["Template 9100<br/>Home Assistant OS"]
         VM1["VM docker-test-01"]
@@ -89,7 +89,7 @@ Si elle n'existe pas encore :
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_pve -C "terraform@pve"
-ssh-copy-id -i ~/.ssh/id_ed25519_pve.pub root@pve.home.arpa
+ssh-copy-id -i ~/.ssh/id_ed25519_pve.pub root@pve.reminat.com
 ```
 
 ---
@@ -112,7 +112,7 @@ Quatre secrets à créer, identifiés par leur **key** (nom) :
 
 | Key                        | Valeur exemple                         |
 |----------------------------|----------------------------------------|
-| `pm_endpoint`              | `https://pve.home.arpa:8006`           |
+| `pm_endpoint`              | `https://pve.reminat.com:8006`           |
 | `pm_api_token_id`          | `terraform@pve!tf`                     |
 | `pm_api_token_secret`      | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
 | `ssh_authorized_keys_json` | `["ssh-ed25519 AAAA... remi@mac"]`     |
@@ -218,7 +218,7 @@ UI Proxmox → cliquer sur la VM → onglet **Summary** → champ **IP Address**
 ### Option 2 — Via la CLI Proxmox
 
 ```bash
-ssh root@pve.home.arpa "qm guest cmd <vmid> network-get-interfaces" | \
+ssh root@pve.reminat.com "qm guest cmd <vmid> network-get-interfaces" | \
   python3 -c "
 import sys, json
 for iface in json.load(sys.stdin)['return']:
@@ -246,10 +246,51 @@ Plage suggérée :
 
 | Machine        | IP suggérée   |
 |----------------|---------------|
-| docker-test-01 | 10.10.20.191  |
-| docker-prod-01 | 10.10.20.192  |
-| haos-test-01   | 10.10.20.193  |
-| haos-prod-01   | 10.10.20.194  |
+| docker-test-01 | 10.10.20.11   |
+| docker-prod-01 | 10.10.20.10   |
+| haos-test-01   | 10.10.20.21   |
+| haos-prod-01   | 10.10.20.20   |
+
+---
+
+## Bootstrap SSH sur les VMs HAOS
+
+> **Étape scriptée, à faire une seule fois après le premier `apply` HAOS.**
+
+HAOS ne supporte pas cloud-init — les clés SSH ne peuvent pas être injectées par Terraform comme pour le docker host. Le script `bootstrap-haos.sh` injecte automatiquement les clés via le QEMU guest agent, sans toucher à la console Proxmox.
+
+### Commande
+
+```bash
+cd infra/proxmox/scripts
+
+./bootstrap-haos.sh test   # VM haos-test-01
+./bootstrap-haos.sh prod   # VM haos-prod-01
+```
+
+Le script :
+1. S'authentifie à Bitwarden (même pattern que `tf.sh`)
+2. Récupère les clés SSH depuis `ssh_authorized_keys_json` dans Bitwarden Secrets Manager
+3. Récupère l'endpoint Proxmox depuis `pm_endpoint`
+4. Trouve le VMID de la VM par son nom via `qm list`
+5. Attend que le QEMU guest agent soit prêt (jusqu'à 2 min)
+6. Injecte les clés dans `/root/.ssh/authorized_keys` via `qm guest exec`
+
+> L'utilisateur sur HAOS est `root` (pas `remi` comme sur le docker host).
+
+### Prérequis
+
+- La VM HAOS doit être démarrée
+- `~/.ssh/id_ed25519_pve` doit permettre l'accès SSH à Proxmox
+- Le QEMU guest agent doit être actif sur la VM (configuré dans le template)
+
+### Ordre complet pour un déploiement from scratch
+
+```
+1. terraform apply haos              → VM créée et démarrée
+2. ./bootstrap-haos.sh <env>         → clés SSH injectées automatiquement
+3. ansible deploy.sh <env> --limit haos  → configuration.yaml déployé
+```
 
 ---
 
@@ -301,8 +342,8 @@ Où `<env>` est un chemin relatif depuis `envs/`, par exemple `test/pve/docker-h
 **`Error cloning VM: template not found`**
 → Le template n'a pas été créé. Vérifier que `TEMPLATE_VM_ID` est bien défini dans `tf.conf` et que `TFWRAP_SKIP_TEMPLATE_BUILD` n'est pas forcé à `1`. En dernier recours, créer le template manuellement en copiant le script sur Proxmox :
 ```bash
-scp infra/proxmox/scripts/template-docker.sh root@pve.home.arpa:/tmp/
-ssh root@pve.home.arpa "bash /tmp/template-docker.sh"
+scp infra/proxmox/scripts/template-docker.sh root@pve.reminat.com:/tmp/
+ssh root@pve.reminat.com "bash /tmp/template-docker.sh"
 ```
 
 **`ERROR: template script not found`**

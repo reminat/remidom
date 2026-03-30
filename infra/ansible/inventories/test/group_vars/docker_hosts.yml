@@ -10,14 +10,13 @@ compose_projects:
     src: "{{ docker_repo_root }}/services/docker/core"
     dest: /srv/docker/core
 
-
 mqtt_user: mqtt
 mqtt_password: "{{ lookup('env', 'MQTT_PASSWORD') }}"
 
-smlight_serial_url: "tcp://smlight.reminat.com:6638"
-smlight_adapter: ember
+smlight_serial_url: "tcp://smlight.test.reminat.com:6638"
+smlight_adapter: ezsp
 z2m_network_key: "{{ (lookup('env', 'Z2M_NETWORK_KEY') | default('\"GENERATE\"', true)) | from_json }}"
 
-domain_base: reminat.com
-haos_url: "http://10.10.20.20:8123"
+domain_base: test.reminat.com
+haos_url: "http://10.10.20.21:8123"
 cf_api_token: "{{ lookup('env', 'CF_DNS_API_TOKEN') }}"

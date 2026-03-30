@@ -1,0 +1,3 @@
+- name: Restart Home Assistant
+  ansible.builtin.raw: ha core restart
+  changed_when: false

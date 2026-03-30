@@ -1,0 +1,15 @@
+http:
+  routers:
+    haos:
+      rule: "Host(`haos.{{ domain_base }}`)"
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: cloudflare
+      service: haos
+
+  services:
+    haos:
+      loadBalancer:
+        servers:
+          - url: "{{ haos_url }}"

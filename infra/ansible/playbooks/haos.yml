@@ -1,0 +1,6 @@
+- name: Configure Home Assistant
+  hosts: haos
+  become: false
+  gather_facts: false
+  roles:
+    - haos_config

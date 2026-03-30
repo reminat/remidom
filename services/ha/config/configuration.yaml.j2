@@ -1,0 +1,9 @@
+# Managed by Ansible — do not edit manually on the host.
+
+homeassistant:
+
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - {{ docker_host_ip }}
+    - 172.16.0.0/12

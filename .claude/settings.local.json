@@ -2,7 +2,26 @@
   "permissions": {
     "allow": [
       "Bash(find /Users/remi/dev/remidom -type d ! -path */.git* ! -path */__pycache__* ! -path */node_modules*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(find /Users/remi/dev/remidom -type f \\\\\\(-name *.yml -o -name *.yaml -o -name *.tf -o -name *.tfvars -o -name *.env* -o -name *.sh -o -name *.json -o -name *.py -o -name docker-compose* -o -name .env* \\\\\\))",
+      "Bash(grep -r \"password\\\\|secret\\\\|token\\\\|api_key\\\\|apikey\\\\|private_key\\\\|bearer\" /Users/remi/dev/remidom/infra/terraform --include=*.tf --include=*.tfvars)",
+      "Bash(grep -r \"password\\\\|secret\\\\|token\\\\|api_key\" /Users/remi/dev/remidom --include=*.yml --include=*.yaml --include=*.tf --include=*.sh)",
+      "Bash(find /Users/remi/dev/remidom -type f \\\\\\(-name *.md -o -name README* \\\\\\))",
+      "Bash(grep -Er \"password\\\\s*:\\\\s*['''']?[a-zA-Z0-9!@#$%^&*\\(\\)_+\\\\-=\\\\[\\\\]{}|;:,.<>?/~]+['''']?\" /Users/remi/dev/remidom --include=*.yml --include=*.yaml --include=*.tf)",
+      "Bash(grep -Er \"\\(pem|rsa|ssh-rsa|ssh-ed25519|-----BEGIN\\)\" /Users/remi/dev/remidom --include=*.tf --include=*.sh)",
+      "Bash(xargs cat:*)",
+      "Bash(grep -Er \"mqtt_password|z2m_network_key|pm_api_token\" /Users/remi/dev/remidom --include=*.yml --include=*.yaml --include=*.tf --include=*.sh)",
+      "Bash(grep -r \"^[a-zA-Z0-9]*=\\\\|password\\\\|secret\\\\|token\" /Users/remi/dev/remidom --include=*.conf --include=*.config --include=*.properties)",
+      "Bash(git -C /Users/remi/dev/remidom ls-files --others --ignored --exclude-standard)",
+      "Bash(git -C /Users/remi/dev/remidom log -p --all -- *secret* *password* *token* *key*)",
+      "Bash(ls:*)",
+      "Bash(find /Users/remi/dev/remidom/infra/ansible -type f \\\\\\(-name *.yml -o -name *.yaml -o -name *.sh -o -name *.cfg -o -name *.ini -o -name *.j2 \\\\\\))",
+      "Bash(curl -s \"https://hub.docker.com/v2/repositories/portainer/portainer-ce/tags?page_size=10&ordering=last_updated\")",
+      "Bash(python3:*)",
+      "Bash(curl -s \"https://hub.docker.com/v2/repositories/koenkk/zigbee2mqtt/tags/?page_size=10\")",
+      "Bash(curl -s \"https://hub.docker.com/v2/repositories/library/eclipse-mosquitto/tags?page_size=15&ordering=last_updated\")",
+      "Bash(curl -s \"https://hub.docker.com/v2/repositories/library/traefik/tags?page_size=10&ordering=last_updated\")",
+      "Bash(./bootstrap-haos.sh test:*)"
     ]
   }
 }

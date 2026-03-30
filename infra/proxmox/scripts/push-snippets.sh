@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROXMOX_HOST="${PROXMOX_HOST:-pve.home.arpa}"
+PROXMOX_HOST="${PROXMOX_HOST:-pve.reminat.com}"
 PROXMOX_USER="${PROXMOX_USER:-root}"
 SNIPPETS_DIR="/var/lib/vz/snippets"
 
