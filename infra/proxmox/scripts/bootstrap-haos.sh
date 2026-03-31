@@ -7,7 +7,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-SSH_KEYS_SECRET_REF="${SSH_KEYS_SECRET_REF:-ssh_authorized_keys_json}"
+SSH_KEYS_SECRET_REF="${SSH_KEYS_SECRET_REF:-ssh_authorized_keys}"
 PVE_SSH_KEY="${PVE_SSH_KEY:-${HOME}/.ssh/id_ed25519_pve}"
 
 ENV="${1:-}"
@@ -90,7 +90,7 @@ fi
 
 echo "[bootstrap-haos] Fetching secrets from Bitwarden..."
 SSH_KEYS_JSON="$(fetch_secret_value "$SSH_KEYS_SECRET_REF")"
-PM_ENDPOINT="$(fetch_secret_value "pm_endpoint")"
+PM_ENDPOINT="$(fetch_secret_value "proxmox_endpoint")"
 
 # Extract hostname from https://pve.reminat.com:8006 (pure bash, portable)
 PVE_HOST="${PM_ENDPOINT#https://}"

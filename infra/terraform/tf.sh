@@ -192,10 +192,10 @@ fi
 # Step 3: fetch Proxmox credentials from Bitwarden Secrets Manager
 # `bws secret get` expects a secret UUID. For convenience we keep human-friendly refs
 # (key or name) below and resolve them to UUIDs using `bws secret list`.
-PM_TOKEN_SECRET_REF="pm_api_token_secret"
-PM_TOKEN_ID_REF="pm_api_token_id"
-PM_ENDPOINT_REF="pm_endpoint"
-SSH_AUTHORIZED_KEYS_REF="ssh_authorized_keys_json"
+PM_TOKEN_SECRET_REF="proxmox_api_token_secret"
+PM_TOKEN_ID_REF="proxmox_api_token_id"
+PM_ENDPOINT_REF="proxmox_endpoint"
+SSH_AUTHORIZED_KEYS_REF="ssh_authorized_keys"
 
 is_uuid_ref() {
   # Accept either raw UUID or urn:uuid:<uuid>

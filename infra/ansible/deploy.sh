@@ -2,9 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MQTT_SECRET_REF="${MQTT_SECRET_REF:-MQTT_PASSWORD}"
+MQTT_SECRET_REF="${MQTT_SECRET_REF:-mqtt_password}"
 Z2M_NETWORK_KEY_SECRET_REF="${Z2M_NETWORK_KEY_SECRET_REF:-}"
-CF_DNS_API_TOKEN_SECRET_REF="${CF_DNS_API_TOKEN_SECRET_REF:-CF_DNS_API_TOKEN}"
+CF_DNS_API_TOKEN_SECRET_REF="${CF_DNS_API_TOKEN_SECRET_REF:-cloudflare_dns_api_token}"
 
 # First argument is the target environment (test or prod).
 ENV="${1:-}"
@@ -82,8 +82,7 @@ fetch_secret_value() {
 }
 
 export MQTT_PASSWORD="$(fetch_secret_value "$MQTT_SECRET_REF")"
-ENV_UPPER="$(echo "$ENV" | tr '[:lower:]' '[:upper:]')"
-Z2M_NETWORK_KEY_SECRET_REF="${Z2M_NETWORK_KEY_SECRET_REF:-Z2M_NETWORK_KEY_${ENV_UPPER}}"
+Z2M_NETWORK_KEY_SECRET_REF="${Z2M_NETWORK_KEY_SECRET_REF:-zigbee_network_key_${ENV}}"
 export Z2M_NETWORK_KEY="$(fetch_secret_value "$Z2M_NETWORK_KEY_SECRET_REF")"
 export CF_DNS_API_TOKEN="$(fetch_secret_value "$CF_DNS_API_TOKEN_SECRET_REF")"
 
