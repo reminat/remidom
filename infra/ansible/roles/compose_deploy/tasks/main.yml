@@ -14,6 +14,7 @@
     rsync_opts:
       - "--checksum"
       - "--exclude=zigbee2mqtt/data/configuration.yaml.j2"
+      - "--exclude=zigbee2mqtt/data/configuration.yaml"
       - "--exclude=.env.j2"
       - "--exclude=traefik/traefik.yml.j2"
       - "--exclude=traefik/dynamic/*.j2"
@@ -131,6 +132,14 @@
     recurse: true
   loop: "{{ compose_projects }}"
   when: item.name == 'core'
+
+- name: Fail if mqtt_password is empty
+  ansible.builtin.fail:
+    msg: "mqtt_password est vide — MQTT_PASSWORD non défini ou secret introuvable dans BWS"
+  when:
+    - item.name == 'core'
+    - mqtt_password | length == 0
+  loop: "{{ compose_projects }}"
 
 - name: Ensure Mosquitto password file contains current credentials
   ansible.builtin.command:
