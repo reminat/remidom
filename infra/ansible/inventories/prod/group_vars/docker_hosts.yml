@@ -21,3 +21,10 @@ z2m_network_key: "{{ (lookup('env', 'Z2M_NETWORK_KEY') | default('\"GENERATE\"',
 domain_base: reminat.com
 haos_url: "http://10.10.20.20:8123"
 cf_api_token: "{{ lookup('env', 'CF_DNS_API_TOKEN') }}"
+
+# GitHub Actions self-hosted runner
+github_runner_repo: reminat/remidom
+github_runner_name: docker-prod
+github_runner_labels: "homelab,prod"
+# github_runner_registration_token: à passer en extra-var lors de l'installation initiale
+#   ./deploy.sh prod -e github_runner_registration_token=TOKEN

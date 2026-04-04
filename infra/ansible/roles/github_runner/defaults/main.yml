@@ -1,0 +1,9 @@
+github_runner_version: "2.333.1"
+github_runner_user: github-runner
+github_runner_dir: /opt/github-runner
+github_runner_name: "{{ inventory_hostname }}"
+github_runner_labels: "homelab"
+github_runner_repo: ""  # format: owner/repo — ex: remi/remidom
+github_runner_registration_token: ""  # token généré depuis GitHub UI (expire en 1h, usage unique)
+
+bws_version: "1.0.0"

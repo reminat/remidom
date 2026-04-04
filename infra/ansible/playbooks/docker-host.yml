@@ -5,3 +5,4 @@
     - common
     - docker
     - compose_deploy
+    - github_runner

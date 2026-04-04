@@ -103,6 +103,56 @@ Les volumes Docker sont isolés par VM : `/srv/docker/core` existe indépendamme
 
 ---
 
+## GitHub Actions — Self-hosted runner
+
+Le runner tourne sur `docker-prod` et exécute les déploiements automatiquement :
+- Push sur `feature/**` → deploy sur `test`
+- Push sur `main` → deploy sur `prod`
+
+### Prérequis (une seule fois)
+
+**1. Clé SSH dédiée**
+
+```bash
+ssh-keygen -t ed25519 -C "github-runner" -f ~/.ssh/id_github_runner -N ""
+```
+
+Ajouter la clé publique dans `~/.ssh/authorized_keys` sur :
+- `remi@docker.reminat.com`
+- `remi@docker.test.reminat.com`
+- `root@10.10.20.20` (haos-prod)
+- `root@10.10.20.21` (haos-test)
+
+**2. Secrets GitHub** (Settings → Secrets and variables → Actions → Repository secrets)
+
+| Secret | Valeur |
+|--------|--------|
+| `ANSIBLE_SSH_KEY` | Contenu de `~/.ssh/id_github_runner` (clé privée) |
+| `BWS_ACCESS_TOKEN` | Token machine Bitwarden Secrets Manager |
+
+**3. Installer le runner sur docker-prod**
+
+Générer un token depuis GitHub : Settings → Actions → Runners → New self-hosted runner → copier le token affiché.
+
+```bash
+# Depuis le poste local, passer le token en extra-var
+cd infra/ansible
+./deploy.sh prod -e github_runner_registration_token=TOKEN_ICI
+```
+
+Le runner est enregistré, installé comme service systemd et démarré automatiquement. Le token n'est plus nécessaire après ça.
+
+**Vérifier que le runner tourne :**
+
+```bash
+ssh remi@docker.reminat.com
+systemctl status "actions.runner.remi-remidom.docker-prod"
+```
+
+Il doit aussi apparaître dans GitHub : Settings → Actions → Runners.
+
+---
+
 ## Rôles
 
 ### `common`

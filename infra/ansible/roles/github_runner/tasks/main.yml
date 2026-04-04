@@ -1,0 +1,98 @@
+- name: Install dependencies
+  ansible.builtin.apt:
+    name:
+      - python3-pip
+      - acl
+    state: present
+    update_cache: false
+
+- name: Install Ansible via pip
+  ansible.builtin.pip:
+    name: ansible
+    state: present
+
+- name: Download bws CLI
+  ansible.builtin.get_url:
+    url: "https://github.com/bitwarden/sdk-sm/releases/download/bws-v{{ bws_version }}/bws-x86_64-unknown-linux-gnu-{{ bws_version }}.zip"
+    dest: /tmp/bws.zip
+    mode: "0644"
+
+- name: Install bws CLI
+  ansible.builtin.unarchive:
+    src: /tmp/bws.zip
+    dest: /usr/local/bin
+    remote_src: true
+    include:
+      - bws
+
+- name: Ensure bws is executable
+  ansible.builtin.file:
+    path: /usr/local/bin/bws
+    mode: "0755"
+
+- name: Create runner user
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    shell: /bin/bash
+    home: "{{ github_runner_dir }}"
+    create_home: true
+    system: true
+
+- name: Check if runner already configured
+  ansible.builtin.stat:
+    path: "{{ github_runner_dir }}/.runner"
+  register: runner_configured
+
+- name: Download runner archive
+  ansible.builtin.get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ github_runner_version }}/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    dest: /tmp/actions-runner.tar.gz
+    mode: "0644"
+  when: not runner_configured.stat.exists
+
+- name: Extract runner archive
+  ansible.builtin.unarchive:
+    src: /tmp/actions-runner.tar.gz
+    dest: "{{ github_runner_dir }}"
+    remote_src: true
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+  when: not runner_configured.stat.exists
+
+- name: Configure runner
+  ansible.builtin.command:
+    cmd: >-
+      ./config.sh
+      --url https://github.com/{{ github_runner_repo }}
+      --token {{ github_runner_registration_token }}
+      --name {{ github_runner_name }}
+      --labels {{ github_runner_labels }}
+      --unattended
+    chdir: "{{ github_runner_dir }}"
+  become_user: "{{ github_runner_user }}"
+  when:
+    - not runner_configured.stat.exists
+    - github_runner_registration_token != ""
+
+- name: Install runner as systemd service
+  ansible.builtin.command:
+    cmd: ./svc.sh install {{ github_runner_user }}
+    chdir: "{{ github_runner_dir }}"
+  when:
+    - not runner_configured.stat.exists
+    - github_runner_registration_token != ""
+
+- name: Start runner service
+  ansible.builtin.command:
+    cmd: ./svc.sh start
+    chdir: "{{ github_runner_dir }}"
+  when:
+    - not runner_configured.stat.exists
+    - github_runner_registration_token != ""
+
+- name: Ensure runner service is running (runs suivants)
+  ansible.builtin.systemd:
+    name: "actions.runner.{{ github_runner_repo | replace('/', '-') }}.{{ github_runner_name }}"
+    state: started
+    enabled: true
+  when: runner_configured.stat.exists
