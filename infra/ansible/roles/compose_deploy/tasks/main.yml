@@ -79,7 +79,6 @@
     mode: "0640"
     owner: "1883"
     group: "1883"
-  no_log: true
   loop: "{{ compose_projects }}"
   when: item.name == 'core'
 
