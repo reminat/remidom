@@ -39,7 +39,7 @@ jobs:
           BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
         run: |
           cd infra/ansible
-          ./deploy.sh test
+          ./deploy.sh test --skip-tags github_runner
 
   deploy-prod:
     name: Deploy → prod
@@ -65,4 +65,4 @@ jobs:
           BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
         run: |
           cd infra/ansible
-          ./deploy.sh prod
+          ./deploy.sh prod --skip-tags github_runner
