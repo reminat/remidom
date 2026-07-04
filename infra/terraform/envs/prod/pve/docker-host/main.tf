@@ -6,6 +6,10 @@ provider "proxmox" {
     agent       = false
     username    = "root"
     private_key = file(pathexpand("~/.ssh/id_ed25519_pve"))
+    node {
+      name    = var.pm_node
+      address = regex("https?://([^:/]+)", var.pm_endpoint)[0]
+    }
   }
 }
 
