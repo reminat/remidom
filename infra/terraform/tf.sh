@@ -111,7 +111,7 @@ fi
 # Backup configuration
 # These values are hardcoded for this env. Change here if your NAS/user/port/path changes.
 # Destination path is on the NAS (Synology): it must exist or be creatable.
-BACKUP_HOST="192.168.1.200"
+BACKUP_HOST="10.10.20.60"
 BACKUP_USER="remi"
 BACKUP_PORT="4022"
 BACKUP_BASE_DIR="/volume1/TimeMachine/terraform-state-backups"

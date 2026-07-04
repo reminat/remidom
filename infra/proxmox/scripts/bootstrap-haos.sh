@@ -152,4 +152,4 @@ esac
 
 echo "[bootstrap-haos] SSH keys injected on ${VM_NAME}."
 echo ""
-echo "  Test connection: ssh root@${HAOS_HOST}"
+echo "  Test connection: ssh root@${HAOS_HOST} -p 22222"

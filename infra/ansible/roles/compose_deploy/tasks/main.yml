@@ -14,6 +14,7 @@
     rsync_opts:
       - "--checksum"
       - "--exclude=zigbee2mqtt/data/configuration.yaml.j2"
+      - "--exclude=zigbee2mqtt/data/configuration.yaml"
       - "--exclude=.env.j2"
       - "--exclude=traefik/traefik.yml.j2"
       - "--exclude=traefik/dynamic/*.j2"
@@ -78,7 +79,6 @@
     mode: "0640"
     owner: "1883"
     group: "1883"
-  no_log: true
   loop: "{{ compose_projects }}"
   when: item.name == 'core'
 
@@ -132,26 +132,13 @@
   loop: "{{ compose_projects }}"
   when: item.name == 'core'
 
-- name: Ensure Mosquitto password file contains current credentials
-  ansible.builtin.command:
-    cmd: >
-      docker run --rm
-      -v {{ item.dest }}/mosquitto/config:/mosquitto/config
-      eclipse-mosquitto:2
-      sh -lc "touch /mosquitto/config/passwords && mosquitto_passwd -b /mosquitto/config/passwords {{ mqtt_user }} {{ mqtt_password }}"
-  no_log: true
+- name: Fail if mqtt_password is empty
+  ansible.builtin.fail:
+    msg: "mqtt_password est vide — MQTT_PASSWORD non défini ou secret introuvable dans BWS"
+  when:
+    - item.name == 'core'
+    - mqtt_password | length == 0
   loop: "{{ compose_projects }}"
-  when: item.name == 'core'
-
-- name: Ensure Mosquitto password file permissions are correct
-  ansible.builtin.file:
-    path: "{{ item.dest }}/mosquitto/config/passwords"
-    state: file
-    owner: "1883"
-    group: "1883"
-    mode: "0640"
-  loop: "{{ compose_projects }}"
-  when: item.name == 'core'
 
 - name: Docker compose pull
   ansible.builtin.command:
@@ -165,6 +152,28 @@
     cmd: docker compose up -d
     chdir: "{{ item.dest }}"
   loop: "{{ compose_projects }}"
+
+- name: Ensure Mosquitto passwords file exists
+  ansible.builtin.file:
+    path: "{{ item.dest }}/mosquitto/config/passwords"
+    state: touch
+    owner: "1883"
+    group: "1883"
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Update Mosquitto password via running container
+  ansible.builtin.command:
+    cmd: >-
+      docker exec mosquitto
+      mosquitto_passwd -b /mosquitto/config/passwords
+      {{ mqtt_user }} {{ mqtt_password }}
+  no_log: true
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
 
 - name: Reload Mosquitto to apply password file updates
   ansible.builtin.command:
