@@ -120,8 +120,8 @@ ssh-keygen -t ed25519 -C "github-runner" -f ~/.ssh/id_github_runner -N ""
 Ajouter la clé publique dans `~/.ssh/authorized_keys` sur :
 - `remi@docker.reminat.com`
 - `remi@docker.test.reminat.com`
-- `root@10.10.20.20` (haos-prod)
-- `root@10.10.20.21` (haos-test)
+- `root@haos.reminat.com` (haos-prod)
+- `root@haos.test.reminat.com` (haos-test)
 
 **2. Secrets GitHub** (Settings → Secrets and variables → Actions → Repository secrets)
 

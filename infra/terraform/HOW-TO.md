@@ -246,10 +246,10 @@ Plage suggérée :
 
 | Machine        | IP suggérée   |
 |----------------|---------------|
-| docker-test-01 | 10.10.20.11   |
-| docker-prod-01 | 10.10.20.10   |
-| haos-test-01   | 10.10.20.21   |
-| haos-prod-01   | 10.10.20.20   |
+| docker-test-01 | 10.10.20.53   |
+| docker-prod-01 | 10.10.20.52   |
+| haos-test-01   | 10.10.20.51   |
+| haos-prod-01   | 10.10.20.50   |
 
 ---
 
