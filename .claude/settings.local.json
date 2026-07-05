@@ -21,7 +21,9 @@
       "Bash(curl -s \"https://hub.docker.com/v2/repositories/koenkk/zigbee2mqtt/tags/?page_size=10\")",
       "Bash(curl -s \"https://hub.docker.com/v2/repositories/library/eclipse-mosquitto/tags?page_size=15&ordering=last_updated\")",
       "Bash(curl -s \"https://hub.docker.com/v2/repositories/library/traefik/tags?page_size=10&ordering=last_updated\")",
-      "Bash(./bootstrap-haos.sh test:*)"
+      "Bash(./bootstrap-haos.sh test:*)",
+      "Bash(git commit *)",
+      "Bash(git *)"
     ]
   }
 }

@@ -32,7 +32,7 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H docker.test.reminat.com >> ~/.ssh/known_hosts
-          ssh-keyscan -p 22222 -H 10.10.20.21 >> ~/.ssh/known_hosts
+          ssh-keyscan -p 22222 -H haos.test.reminat.com >> ~/.ssh/known_hosts
 
       - name: Deploy
         env:
@@ -58,7 +58,7 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H docker.reminat.com >> ~/.ssh/known_hosts
-          ssh-keyscan -p 22222 -H 10.10.20.20 >> ~/.ssh/known_hosts
+          ssh-keyscan -p 22222 -H haos.reminat.com >> ~/.ssh/known_hosts
 
       - name: Deploy
         env:

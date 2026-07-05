@@ -1,0 +1,20 @@
+http:
+  routers:
+    unifi:
+      rule: "Host(`unifi.{{ domain_base }}`)"
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: cloudflare
+      service: unifi
+
+  services:
+    unifi:
+      loadBalancer:
+        servers:
+          - url: "{{ unifi_url }}"
+        serversTransport: unifi-insecure
+
+serversTransports:
+  unifi-insecure:
+    insecureSkipVerify: true
