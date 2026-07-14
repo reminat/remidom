@@ -23,7 +23,25 @@
       "Bash(curl -s \"https://hub.docker.com/v2/repositories/library/traefik/tags?page_size=10&ordering=last_updated\")",
       "Bash(./bootstrap-haos.sh test:*)",
       "Bash(git commit *)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(curl -vk --max-time 8 https://portainer.reminat.com)",
+      "Bash(curl -sk --max-time 8 https://portainer.reminat.com/api/status)",
+      "Bash(curl -sk --max-time 8 -w \"\\\\nHTTP_CODE:%{http_code}\\\\n\" https://portainer.reminat.com/api/system/status)",
+      "Bash(curl *)",
+      "Bash(dig portainer.reminat.com +short)",
+      "Bash(dig portainer.test.reminat.com +short)",
+      "Bash(dig portainer.reminat.com @1.1.1.1 +short)",
+      "Bash(dig portainer.test.reminat.com @1.1.1.1 +short)",
+      "Bash(dig portainer.reminat.com AAAA +short)",
+      "Bash(dig docker.reminat.com AAAA +short)",
+      "Bash(dig portainer.reminat.com AAAA @1.1.1.1 +short)",
+      "Bash(dig docker.reminat.com A @1.1.1.1 +short)",
+      "Bash(dig docker.reminat.com AAAA @1.1.1.1 +short)",
+      "Bash(dig docker.test.reminat.com A @1.1.1.1 +short)",
+      "Bash(dig docker.test.reminat.com AAAA @1.1.1.1 +short)",
+      "Bash(dig portainer.reminat.com HTTPS +short)",
+      "Bash(dig docker.reminat.com HTTPS +short)",
+      "Bash(dig portainer.reminat.com HTTPS @1.1.1.1 +short)"
     ]
   }
 }

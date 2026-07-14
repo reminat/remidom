@@ -19,7 +19,7 @@ smlight_adapter: ember
 z2m_network_key: "{{ (lookup('env', 'Z2M_NETWORK_KEY') | default('\"GENERATE\"', true)) | from_json }}"
 
 domain_base: reminat.com
-haos_url: "http://haos.reminat.com:8123"
+haos_url: "http://haos-vm.reminat.com:8123"
 unifi_url: "https://10.10.1.1"
 cf_api_token: "{{ lookup('env', 'CF_DNS_API_TOKEN') }}"
 

@@ -18,7 +18,7 @@ smlight_adapter: ezsp
 z2m_network_key: "{{ (lookup('env', 'Z2M_NETWORK_KEY') | default('\"GENERATE\"', true)) | from_json }}"
 
 domain_base: test.reminat.com
-haos_url: "http://haos.test.reminat.com:8123"
+haos_url: "http://haos-vm.test.reminat.com:8123"
 cf_api_token: "{{ lookup('env', 'CF_DNS_API_TOKEN') }}"
 
 # GitHub Actions self-hosted runner
