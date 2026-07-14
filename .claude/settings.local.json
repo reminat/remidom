@@ -41,7 +41,8 @@
       "Bash(dig docker.test.reminat.com AAAA @1.1.1.1 +short)",
       "Bash(dig portainer.reminat.com HTTPS +short)",
       "Bash(dig docker.reminat.com HTTPS +short)",
-      "Bash(dig portainer.reminat.com HTTPS @1.1.1.1 +short)"
+      "Bash(dig portainer.reminat.com HTTPS @1.1.1.1 +short)",
+      "Bash(xargs -I{} sh -c 'echo \"== {} ==\"; cat {}')"
     ]
   }
 }
