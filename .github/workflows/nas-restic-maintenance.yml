@@ -32,15 +32,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Clé dédiée au NAS (secret de l'environnement GitHub, pas ANSIBLE_SSH_KEY).
+      # La clé d'hôte est épinglée dans inventories/<env>/nas_known_hosts.
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.ANSIBLE_SSH_KEY }}
+          ssh-private-key: ${{ secrets.NAS_SSH_KEY }}
 
-      - name: Add NAS to known_hosts
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -p 4022 -H 10.10.20.60 >> ~/.ssh/known_hosts
+      - name: Show Ansible version
+        run: ansible --version
 
       - name: Deploy
         working-directory: infra/ansible

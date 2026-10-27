@@ -1,5 +1,6 @@
 # Ce rôle dépose uniquement des fichiers : il n'exécute ni restic, ni docker,
 # et ne crée pas la tâche planifiée DSM (voir services/synology/restic-maintenance/README.md).
+# Pas de « mode » : les droits viennent de l'héritage des ACL Synology (fichiers non secrets).
 
 - name: Check Restic maintenance configuration
   ansible.builtin.assert:
@@ -57,13 +58,11 @@
   ansible.builtin.copy:
     src: "{{ restic_maintenance_src }}/restic_maintenance.py"
     dest: "{{ restic_maintenance_deploy_dir }}/restic_maintenance.py"
-    mode: "0644"
 
 - name: Render Restic maintenance configuration
   ansible.builtin.template:
     src: "{{ restic_maintenance_src }}/config.json.j2"
     dest: "{{ restic_maintenance_deploy_dir }}/config.json"
-    mode: "0644"
 
 - name: Compute deployed file checksums
   ansible.builtin.stat:

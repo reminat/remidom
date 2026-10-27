@@ -2,6 +2,15 @@
 ansible_python_interpreter: /usr/bin/python3
 ansible_remote_tmp: /tmp
 
+# Clé d'hôte vérifiée contre le fichier versionné (ansible.cfg désactive la vérification
+# pour les autres hôtes ; elle est réactivée ici pour le NAS uniquement).
+ansible_host_key_checking: true
+ansible_ssh_common_args: "-o UserKnownHostsFile={{ inventory_dir }}/nas_known_hosts -o StrictHostKeyChecking=yes"
+
+# Transfert des fichiers : SFTP (défaut). Si SFTP reste désactivé dans DSM et que
+# `ansible-doc -t connection ssh` liste « piped » sur le runner, décommenter :
+# ansible_ssh_transfer_method: piped
+
 # Maintenance Restic du repository docker-test (dry-run uniquement).
 restic_maintenance_name: docker-test
 restic_maintenance_repository: /volume1/Restic/docker-test

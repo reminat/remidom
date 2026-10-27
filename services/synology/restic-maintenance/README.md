@@ -19,7 +19,7 @@ ne quitte jamais le NAS.
 |---|---|---|
 | `restic_maintenance.py` | `/volume1/docker/restic-maintenance/<nom>/restic_maintenance.py` | compte Ansible (`remi`) |
 | `config.json.j2` | `/volume1/docker/restic-maintenance/<nom>/config.json` | compte Ansible |
-| — | `/volume1/docker/restic-maintenance/state/<nom>/` (verrou, état) | root, 0700, créé par le script |
+| — | `/volume1/docker/restic-maintenance/state/<nom>/` (verrou, état) | root, 0700, créé par le script (voir « Risques » : ACL) |
 | — | `/volume1/docker/restic-maintenance/logs/<nom>/report-*.json` | root, 0700, créé par le script |
 | — | `/volume1/docker/restic-maintenance/secrets/` | root, **ne pas modifier** |
 
@@ -87,56 +87,116 @@ restic/Docker, `5` délai dépassé, `75` exécution déjà en cours.
 
 ## Préparation du NAS (une fois, par un administrateur)
 
-Ansible n'utilise pas `sudo` : ces étapes sont manuelles. Ne pas toucher aux
-permissions de `secrets/`.
+Ansible n'utilise pas `sudo` : ces étapes sont manuelles. Ne modifier ni les ACL, ni
+`secrets/`, ni le REST Server.
 
 1. **SSH** : le service SSH de DSM écoute sur le port 4022. Sur DSM, seuls les membres
-   du groupe `administrators` peuvent se connecter en SSH : à vérifier pour `remi`.
-2. **Clé du runner** : ajouter la clé publique correspondant au secret GitHub
-   `ANSIBLE_SSH_KEY` dans `/var/services/homes/remi/.ssh/authorized_keys` (service
-   « Accueil utilisateur » activé), en la restreignant aux runners :
+   du groupe `administrators` peuvent se connecter en SSH.
+2. **Configuration sshd** : l'authentification par clé doit être active et un sous-système
+   SFTP déclaré :
+   ```sh
+   sudo grep -iE '^\s*(PubkeyAuthentication|AuthorizedKeysFile|StrictModes|Subsystem|AllowUsers|AllowGroups|Match)' /etc/ssh/sshd_config
    ```
-   from="10.10.20.52,10.10.20.53" ssh-ed25519 AAAA... ansible-runner
+3. **Clé SSH dédiée au NAS** : générer une paire réservée à ce déploiement (ne pas
+   réutiliser `ANSIBLE_SSH_KEY`, partagée avec les autres hôtes) :
+   ```sh
+   ssh-keygen -t ed25519 -N '' -C nas-restic-deploy -f nas_restic_deploy
    ```
-   Droits attendus : `~` sans écriture pour le groupe, `.ssh` 0700, `authorized_keys` 0600.
-3. **Python** : `/usr/bin/python3 --version` doit afficher 3.8 ou plus (fourni par DSM 7).
-   Les transferts Ansible utilisent SFTP ou SCP : activer SFTP dans
-   *Panneau de configuration → Services de fichiers → FTP → SFTP* si nécessaire.
-4. **Docker** : Container Manager installé ; `/usr/local/bin/docker` doit exister.
-5. **Répertoire de déploiement**, accessible en écriture au seul compte `remi` :
+   - clé privée → secret **`NAS_SSH_KEY` de l'environnement GitHub `test`**
+     (*Settings → Environments → test → Environment secrets*), pas un secret de dépôt ;
+   - clé publique → `/var/services/homes/remi/.ssh/authorized_keys` (service « Accueil
+     utilisateur » activé), restreinte au runner de test (`docker-test-01`) :
+     ```
+     from="10.10.20.53",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... nas-restic-deploy
+     ```
+   - avec `StrictModes`, sshd ignore la clé si le répertoire personnel ou `.ssh` est
+     accessible en écriture au groupe ou aux autres : vérifier
+     `ls -ld /var/services/homes/remi /var/services/homes/remi/.ssh` et
+     `ls -l /var/services/homes/remi/.ssh/authorized_keys` (attendu : `.ssh` 0700,
+     `authorized_keys` 0600).
+   - détruire la copie locale de la clé privée une fois le secret créé.
+4. **Clé d'hôte** : `infra/ansible/inventories/test/nas_known_hosts` contient la clé
+   d'hôte ED25519 du NAS ; Ansible refuse la connexion si elle ne correspond pas
+   (`ansible_host_key_checking: true`, uniquement pour le NAS). Avant le premier
+   déploiement, **comparer l'empreinte** indiquée dans ce fichier avec celle du NAS :
+   ```sh
+   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+   ```
+   Si DSM régénère ses clés d'hôte, mettre à jour ce fichier par une PR.
+5. **Python et Docker** : `/usr/bin/python3 --version` (3.8 minimum),
+   `ls -l /usr/local/bin/docker`, `sudo docker version --format '{{.Server.Version}}'`
+   (20.10 minimum pour `--pull never`).
+6. **Transfert de fichiers** : Ansible utilise SFTP. Depuis `docker-test-01` :
+   ```sh
+   echo pwd | sftp -P 4022 -b - -i nas_restic_deploy remi@10.10.20.60
+   ```
+   En cas d'échec, activer SFTP (*Panneau de configuration → Services de fichiers → FTP
+   → SFTP*), ou, si `ansible-doc -t connection ssh` liste `piped` pour
+   `ssh_transfer_method` sur le runner, décommenter `ansible_ssh_transfer_method: piped`
+   dans `group_vars/nas.yml`. La version d'Ansible du runner est affichée par le workflow.
+7. **Répertoire de déploiement** : le créer sans modifier les ACL, puis vérifier que
+   `remi` peut y écrire par héritage :
    ```sh
    sudo mkdir /volume1/docker/restic-maintenance/docker-test
-   sudo chown remi /volume1/docker/restic-maintenance/docker-test
-   sudo chmod 0755 /volume1/docker/restic-maintenance/docker-test
+   test -w /volume1/docker/restic-maintenance/docker-test && echo inscriptible   # en tant que remi
    ```
-   `/volume1/docker/restic-maintenance` doit rester propriété de root, et `remi` ne doit
-   avoir **aucun** droit d'écriture dessus : sinon il pourrait renommer `secrets/`,
-   `state/` ou `logs/`. Le dossier partagé `docker` utilise les ACL Synology : vérifier
-   avec `sudo synoacltool -get <chemin>` et, si une ACL héritée donne l'écriture à
-   `remi` ou à `users` sur le parent, la corriger dans File Station (*Propriétés →
-   Autorisations*).
-6. **Image** : la tâche utilise `--pull never`. Télécharger l'image puis relever son digest :
+   Le rôle ne fixe pas de `mode` : sur un dossier partagé en mode ACL, `chmod` peut
+   échouer ou être sans effet ; les fichiers déposés (script, configuration) ne
+   contiennent aucun secret et héritent des ACL.
+8. **Lecture du secret et du repository** avec exactement les restrictions du script
+   (sans afficher le secret) :
+   ```sh
+   sudo docker run --rm --pull never --network none --read-only \
+     --tmpfs /tmp:rw,noexec,nosuid,size=512m \
+     --cap-drop ALL --cap-add DAC_READ_SEARCH --security-opt no-new-privileges \
+     -v /volume1/Restic/docker-test:/repo:ro \
+     -v /volume1/docker/restic-maintenance/secrets/restic_password_test:/run/secrets/restic_password:ro \
+     -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password \
+     restic/restic:0.19.1 --no-lock --no-cache cat config > /dev/null && echo "secret et repository lisibles"
+   ```
+   En cas de `permission denied`, décider entre ajouter `DAC_OVERRIDE` (les montages
+   restent en lecture seule) et ajuster l'ACL.
+9. **Image** : la tâche utilise `--pull never`. Télécharger l'image puis relever son digest :
    ```sh
    sudo docker pull restic/restic:0.19.1
    sudo docker image inspect --format '{{index .RepoDigests 0}}' restic/restic:0.19.1
    ```
    Reporter le digest dans `restic_maintenance_image_digest` (`@sha256:…`) pour l'épingler.
-7. **Groupes attendus** : `restic_maintenance_groups` dans `group_vars/nas.yml` (le
-   playbook refuse une liste vide). En cas d'anomalie, le rapport liste les hôtes et
-   chemins réellement présents (`summary.hosts`, `summary.paths`) et le nombre de
-   snapshots par groupe (`summary.per_group`).
+10. **Groupes attendus** : `restic_maintenance_groups` dans `group_vars/nas.yml` (le
+    playbook refuse une liste vide). En cas d'anomalie, le rapport liste les hôtes et
+    chemins réellement présents (`summary.hosts`, `summary.paths`) et le nombre de
+    snapshots par groupe (`summary.per_group`).
 
 ## Déploiement (GitOps, manuel)
 
 Workflow **NAS — Restic maintenance** (`.github/workflows/nas-restic-maintenance.yml`),
-déclenché uniquement à la main, indépendant du workflow `Deploy` :
+déclenché uniquement à la main, indépendant du workflow `Deploy`. GitHub ne propose un
+`workflow_dispatch` qu'une fois le fichier présent sur `main` : le premier usage suppose
+le merge, qui ne touche pas le NAS (le `Deploy` prod déclenché par ce merge peut être
+rejeté).
 
-1. *Actions → NAS — Restic maintenance → Run workflow*, branche voulue, `apply` décoché :
+1. *Actions → NAS — Restic maintenance → Run workflow*, `apply` décoché :
    exécute `ansible-playbook --check --diff` (aucune écriture sur le NAS).
 2. Relire le diff, puis relancer avec `apply` coché.
 3. Le dernier bloc affiche les SHA-256 de `restic_maintenance.py` et `config.json`.
 
 Le rôle ne lance ni Docker ni restic et ne crée pas la tâche DSM.
+
+## Risques
+
+- **Compte de déploiement administrateur** : DSM réserve SSH aux administrateurs, et
+  `remi` dispose de droits étendus par les ACL Synology, y compris, a priori, sur
+  `/volume1/docker/restic-maintenance` (`secrets/`, `state/`, `logs/`) et sur
+  `/volume1/Restic`. La clé `NAS_SSH_KEY` donne donc ces droits : sa compromission
+  permettrait de modifier les fichiers exécutés en root, l'état de référence ou les
+  rapports, et de contourner l'append-only du REST Server. Atténuations : clé dédiée
+  et révocable, restreinte à `10.10.20.53` sans redirections, clé d'hôte épinglée,
+  vérification des SHA-256 dans la tâche DSM, snapshots Btrfs et Hyper Backup comme
+  filet. Isoler un compte de déploiement sans droit sur `/volume1/Restic` demanderait de
+  modifier les ACL : décision à prendre ultérieurement.
+- **Référence initiale** : si le repository est déjà altéré lors de la première
+  exécution, l'anomalie est intégrée à la référence.
+- **`check` sans verrou** : erreurs transitoires possibles pendant une sauvegarde.
 
 ## Premier lancement manuel
 

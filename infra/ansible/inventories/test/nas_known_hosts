@@ -1,0 +1,4 @@
+# Clé d'hôte SSH du NAS (ReminatNas), épinglée : la connexion Ansible échoue si elle change.
+# Empreinte : SHA256:9lLPOU/62a4RDGADKaKsFfcufvYB/RAFPwTHmS4H/TA (ED25519)
+# Vérification sur le NAS : ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+[10.10.20.60]:4022 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICOPTsuizTf5DrC7uAtO9hL1txK2HlBCrE3gmBjSYIC7
