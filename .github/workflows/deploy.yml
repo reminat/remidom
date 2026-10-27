@@ -18,7 +18,7 @@ jobs:
   deploy-test:
     name: Deploy → test
     if: github.ref != 'refs/heads/main'
-    runs-on: [self-hosted, homelab]
+    runs-on: [self-hosted, homelab, test]
     environment: test
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +44,7 @@ jobs:
   deploy-prod:
     name: Deploy → prod
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, homelab]
+    runs-on: [self-hosted, homelab, prod]
     environment: prod
     steps:
       - uses: actions/checkout@v4
