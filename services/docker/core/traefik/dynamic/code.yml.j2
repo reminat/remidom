@@ -1,0 +1,15 @@
+http:
+  routers:
+    code:
+      rule: "Host(`code.{{ domain_base }}`)"
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: cloudflare
+      service: code
+
+  services:
+    code:
+      loadBalancer:
+        servers:
+          - url: "{{ code_url }}"
