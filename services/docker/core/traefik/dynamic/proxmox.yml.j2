@@ -1,0 +1,26 @@
+http:
+  routers:
+    proxmox:
+      rule: "Host(`proxmox.{{ domain_base }}`)"
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: cloudflare
+      middlewares:
+        - lan-vpn-only
+      service: proxmox
+
+  services:
+    proxmox:
+      loadBalancer:
+        servers:
+          - url: "{{ proxmox_url }}"
+        serversTransport: proxmox
+
+  serversTransports:
+    # Proxmox présente un certificat signé par sa CA interne, avec "pve" dans le SAN.
+    proxmox:
+      serverName: pve
+      rootCAs:
+        - |
+          {{ lookup('ansible.builtin.file', 'pve-root-ca.pem') | trim | indent(10) }}

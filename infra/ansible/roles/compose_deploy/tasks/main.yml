@@ -70,6 +70,22 @@
   loop: "{{ compose_projects }}"
   when: item.name == 'core' and code_url | length > 0
 
+- name: Render Traefik dynamic configuration (middlewares)
+  ansible.builtin.template:
+    src: "{{ item.src }}/traefik/dynamic/middlewares.yml.j2"
+    dest: "{{ item.dest }}/traefik/dynamic/middlewares.yml"
+    mode: "0644"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core'
+
+- name: Render Traefik dynamic configuration (proxmox)
+  ansible.builtin.template:
+    src: "{{ item.src }}/traefik/dynamic/proxmox.yml.j2"
+    dest: "{{ item.dest }}/traefik/dynamic/proxmox.yml"
+    mode: "0644"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core' and proxmox_url | length > 0
+
 - name: Ensure Traefik acme directory exists
   ansible.builtin.file:
     path: "{{ item.dest }}/traefik/acme"

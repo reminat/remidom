@@ -22,6 +22,7 @@ domain_base: reminat.com
 haos_url: "http://haos-vm.reminat.com:8123"
 unifi_url: "https://10.10.1.1"
 code_url: "http://10.10.20.10:8080"
+proxmox_url: "https://10.10.20.2:8006"
 cf_api_token: "{{ lookup('env', 'CF_DNS_API_TOKEN') }}"
 
 # GitHub Actions self-hosted runner

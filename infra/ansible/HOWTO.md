@@ -244,6 +244,7 @@ Traefik est le reverse proxy de la stack. Il gère :
 | Node-RED        | `nodered.test.reminat.com`      | `nodered.reminat.com`     |
 | Portainer       | `portainer.test.reminat.com`    | `portainer.reminat.com`   |
 | Home Assistant  | `haos.test.reminat.com`         | `haos.reminat.com`        |
+| Proxmox (LAN/VPN uniquement) | — | `proxmox.reminat.com` |
 
 ### Labels Docker Compose
 

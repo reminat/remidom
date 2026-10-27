@@ -1,2 +1,10 @@
 unifi_url: ""
 code_url: ""
+proxmox_url: ""
+
+# Réseaux autorisés par le middleware Traefik lan-vpn-only (communs à test et prod).
+# VLAN-40-IOT volontairement exclu.
+traefik_allowed_ranges:
+  - 10.10.1.0/24    # Default
+  - 10.10.20.0/24   # VLAN-20-SERVERS
+  - 10.10.60.0/24   # WG-Remidom (VPN WireGuard)
