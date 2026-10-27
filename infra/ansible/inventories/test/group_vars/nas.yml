@@ -1,0 +1,13 @@
+# NAS Synology (DSM 7) — accès SSH sans élévation de privilèges.
+ansible_python_interpreter: /usr/bin/python3
+ansible_remote_tmp: /tmp
+
+# Maintenance Restic du repository docker-test (dry-run uniquement).
+restic_maintenance_name: docker-test
+restic_maintenance_repository: /volume1/Restic/docker-test
+restic_maintenance_password_file: /volume1/docker/restic-maintenance/secrets/restic_password_test
+
+# À COMPLÉTER avant le premier déploiement : hostname et chemins exacts
+# des snapshots attendus (le playbook refuse des listes vides).
+restic_maintenance_allowed_hosts: []
+restic_maintenance_allowed_paths: []

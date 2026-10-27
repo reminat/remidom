@@ -1,0 +1,44 @@
+# Seul mode accepté dans cette version (le script refuse toute autre valeur).
+restic_maintenance_mode: dry-run
+restic_maintenance_image: restic/restic:0.19.1
+# Optionnel : épingler le digest relevé sur le NAS, ex. "@sha256:<64 hex>".
+restic_maintenance_image_digest: ""
+
+restic_maintenance_src: "{{ playbook_dir }}/../../../services/synology/restic-maintenance"
+restic_maintenance_base_dir: /volume1/docker/restic-maintenance
+
+# À définir par environnement (group_vars/nas.yml).
+restic_maintenance_name: ""
+restic_maintenance_repository: ""
+restic_maintenance_password_file: ""
+restic_maintenance_allowed_hosts: []
+restic_maintenance_allowed_paths: []
+
+# Répertoire des fichiers déployés (doit exister et appartenir au compte Ansible).
+restic_maintenance_deploy_dir: "{{ restic_maintenance_base_dir }}/{{ restic_maintenance_name }}"
+# État et rapports : créés en root (0700) par le script, hors de portée du compte Ansible.
+restic_maintenance_state_dir: "{{ restic_maintenance_base_dir }}/state/{{ restic_maintenance_name }}"
+restic_maintenance_log_dir: "{{ restic_maintenance_base_dir }}/logs/{{ restic_maintenance_name }}"
+restic_maintenance_keep_reports: 90
+
+restic_maintenance_retention:
+  keep_within: 30d
+  keep_daily: 14
+  keep_weekly: 8
+  keep_monthly: 12
+
+# Fenêtre provisoire : l'horaire définitif reste à fixer (hors sauvegardes, avant 05:00).
+restic_maintenance_window:
+  start: "01:00"
+  end: "04:30"
+restic_maintenance_timeout_minutes: 120
+restic_maintenance_run_check: true
+
+restic_maintenance_thresholds:
+  max_future_skew_minutes: 60
+  max_age_hours: 48
+  max_snapshots_per_24h: 6
+  backdate_tolerance_hours: 24
+  max_remove_count: 10
+  max_remove_percent: 20
+  min_keep_per_group: 7

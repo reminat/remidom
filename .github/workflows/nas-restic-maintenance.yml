@@ -1,0 +1,55 @@
+name: NAS — Restic maintenance
+
+# Déploiement manuel uniquement, indépendant du workflow Deploy (test/prod).
+# Dépose les fichiers sur le NAS ; n'exécute jamais restic.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Inventaire cible
+        required: true
+        default: test
+        type: choice
+        options: [test]
+      apply:
+        description: Appliquer les changements (sinon --check --diff)
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: nas-restic-maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Restic maintenance → NAS (${{ inputs.environment }})
+    runs-on: [self-hosted, homelab, "${{ inputs.environment }}"]
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.ANSIBLE_SSH_KEY }}
+
+      - name: Add NAS to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p 4022 -H 10.10.20.60 >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        working-directory: infra/ansible
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          args=(--diff)
+          if [ "$APPLY" != "true" ]; then
+            args+=(--check)
+          fi
+          ansible-playbook -i "inventories/${TARGET_ENV}/hosts.ini" playbooks/nas.yml "${args[@]}"

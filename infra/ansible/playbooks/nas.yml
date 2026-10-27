@@ -1,0 +1,6 @@
+- name: Deploy Restic maintenance on the Synology NAS
+  hosts: nas
+  become: false
+  gather_facts: false
+  roles:
+    - restic_maintenance
