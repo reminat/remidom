@@ -8,12 +8,13 @@
       - restic_maintenance_name is match('^[a-z0-9][a-z0-9-]*$')
       - restic_maintenance_repository is match('^/volume[0-9]+/')
       - restic_maintenance_password_file is match('^/volume[0-9]+/')
-      - restic_maintenance_allowed_hosts | length > 0
-      - restic_maintenance_allowed_paths | length > 0
+      - restic_maintenance_groups | length > 0
+      - restic_maintenance_groups | rejectattr('host', 'defined') | list | length == 0
+      - restic_maintenance_groups | rejectattr('paths', 'defined') | list | length == 0
       - restic_maintenance_image_digest == '' or restic_maintenance_image_digest is match('^@sha256:[0-9a-f]{64}$')
     fail_msg: >-
       Configuration incomplète ou mode refusé : seul dry-run est autorisé, et nom, repository,
-      secret, hôtes et chemins autorisés doivent être définis dans group_vars/nas.yml.
+      secret et groupes attendus doivent être définis dans group_vars/nas.yml.
     quiet: true
 
 - name: Check Python version on the NAS

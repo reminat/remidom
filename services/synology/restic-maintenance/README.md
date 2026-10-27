@@ -24,8 +24,33 @@ ne quitte jamais le NAS.
 | — | `/volume1/docker/restic-maintenance/secrets/` | root, **ne pas modifier** |
 
 Configuration : `infra/ansible/roles/restic_maintenance/defaults/main.yml` (valeurs communes)
-et `infra/ansible/inventories/<env>/group_vars/nas.yml` (repository, secret, hôtes et
-chemins autorisés).
+et `infra/ansible/inventories/<env>/group_vars/nas.yml` (repository, secret, groupes
+attendus).
+
+### Groupes attendus
+
+Chaque snapshot doit appartenir à un groupe déclaré dans `restic_maintenance_groups` :
+même hôte et **même ensemble exact de chemins** (comme `--group-by host,paths` de restic),
+et, si `tags` est indiqué, exactement ces tags. Aucun préfixe n'est accepté :
+`/srv/docker/core` n'autorise ni `/srv/docker`, ni `/srv/docker/core/sub`.
+
+```yaml
+restic_maintenance_groups:
+  - name: core
+    host: docker-test-01
+    paths: [/srv/docker/core]
+    tags: [core, test]
+  - name: validation              # historique, figé
+    host: docker-test-01
+    paths: [/tmp/restic-test]
+    tags: [validation]
+    frozen_ids: ["1e30db7a"]
+```
+
+Un groupe avec `frozen_ids` est **historique** : seuls ces identifiants (préfixe de
+8 caractères au moins) y sont acceptés, et il n'est soumis ni au contrôle de fraîcheur ni
+à celui de fréquence. Il ne masque donc pas l'arrêt des sauvegardes régulières et ne
+compte pas dans leurs rafales. La disparition d'un identifiant figé est une anomalie.
 
 ## Déroulé d'une exécution
 
@@ -39,10 +64,12 @@ chemins autorisés).
 
    | Code | Contrôle |
    |---|---|
-   | `host_not_allowed`, `path_not_allowed` | hôte ou chemin absent de `allowed_hosts` / `allowed_paths` |
+   | `host_not_allowed`, `path_not_allowed` | snapshot hors des groupes attendus (hôte inconnu, ou chemins différents) |
+   | `tags_mismatch` | tags différents de ceux déclarés pour le groupe |
+   | `frozen_group_changed`, `frozen_snapshot_missing` | nouveau snapshot dans un groupe historique, ou identifiant figé absent |
    | `future_snapshot` | snapshot daté de plus de `max_future_skew_minutes` dans le futur. Restic l'ignore pour `--keep-within`, mais il consomme les compteurs daily/weekly/monthly. |
-   | `no_snapshot`, `stale` | hôte autorisé sans snapshot de moins de `max_age_hours` |
-   | `burst` | plus de `max_snapshots_per_24h` snapshots sur 24 h glissantes, sur tout l'historique |
+   | `no_snapshot`, `stale` | groupe régulier sans snapshot de moins de `max_age_hours` |
+   | `burst` | plus de `max_snapshots_per_24h` snapshots d'un même groupe régulier sur 24 h glissantes, sur tout l'historique |
    | `backdated_snapshot` | snapshot **nouveau** depuis la dernière exécution validée mais daté de plus de `backdate_tolerance_hours` avant elle. Un faux snapshot antidaté pourrait sinon remplacer le vrai comme « dernier du jour ». |
    | `snapshots_disappeared` | snapshot présent à la dernière exécution validée et absent maintenant (le repository est censé être append-only) |
    | `remove_count`, `remove_percent` | suppressions estimées au-delà de `max_remove_count` / `max_remove_percent` |
@@ -94,10 +121,10 @@ permissions de `secrets/`.
    sudo docker image inspect --format '{{index .RepoDigests 0}}' restic/restic:0.19.1
    ```
    Reporter le digest dans `restic_maintenance_image_digest` (`@sha256:…`) pour l'épingler.
-7. **Hôtes et chemins autorisés** : renseigner `restic_maintenance_allowed_hosts` et
-   `restic_maintenance_allowed_paths` dans `group_vars/nas.yml` (le playbook refuse des
-   listes vides). Un premier lancement manuel peut aider : en cas d'anomalie, le rapport
-   liste les hôtes et chemins réellement présents (`summary.hosts`, `summary.paths`).
+7. **Groupes attendus** : `restic_maintenance_groups` dans `group_vars/nas.yml` (le
+   playbook refuse une liste vide). En cas d'anomalie, le rapport liste les hôtes et
+   chemins réellement présents (`summary.hosts`, `summary.paths`) et le nombre de
+   snapshots par groupe (`summary.per_group`).
 
 ## Déploiement (GitOps, manuel)
 

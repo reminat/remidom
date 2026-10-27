@@ -7,7 +7,15 @@ restic_maintenance_name: docker-test
 restic_maintenance_repository: /volume1/Restic/docker-test
 restic_maintenance_password_file: /volume1/docker/restic-maintenance/secrets/restic_password_test
 
-# À COMPLÉTER avant le premier déploiement : hostname et chemins exacts
-# des snapshots attendus (le playbook refuse des listes vides).
-restic_maintenance_allowed_hosts: []
-restic_maintenance_allowed_paths: []
+# Groupes attendus : chemins exacts, pas de préfixe (/srv/docker n'est pas autorisé).
+restic_maintenance_groups:
+  - name: core
+    host: docker-test-01
+    paths: [/srv/docker/core]
+    tags: [core, test]
+  # Snapshot de validation historique : figé, aucun nouveau snapshot accepté.
+  - name: validation
+    host: docker-test-01
+    paths: [/tmp/restic-test]
+    tags: [validation]
+    frozen_ids: ["1e30db7a"]

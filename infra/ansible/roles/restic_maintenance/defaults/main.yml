@@ -11,8 +11,10 @@ restic_maintenance_base_dir: /volume1/docker/restic-maintenance
 restic_maintenance_name: ""
 restic_maintenance_repository: ""
 restic_maintenance_password_file: ""
-restic_maintenance_allowed_hosts: []
-restic_maintenance_allowed_paths: []
+# Groupes de snapshots attendus (hôte + ensemble exact de chemins, comme --group-by host,paths).
+# Tout snapshot hors de ces groupes est une anomalie. Un groupe avec frozen_ids est historique :
+# seuls ces identifiants y sont acceptés, sans contrôle de fraîcheur ni de fréquence.
+restic_maintenance_groups: []
 
 # Répertoire des fichiers déployés (doit exister et appartenir au compte Ansible).
 restic_maintenance_deploy_dir: "{{ restic_maintenance_base_dir }}/{{ restic_maintenance_name }}"

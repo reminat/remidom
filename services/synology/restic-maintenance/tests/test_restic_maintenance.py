@@ -16,7 +16,14 @@ import restic_maintenance as rm  # noqa: E402
 
 NOW = dt.datetime(2026, 10, 27, 2, 0, tzinfo=dt.timezone.utc)
 HOST = "docker-test-01"
-PATHS = ["/srv/docker"]
+PATHS = ["/srv/docker/core"]
+TAGS = ["core", "test"]
+VALIDATION_ID = "1e30db7a" + "c" * 56
+GROUPS = [
+    {"name": "core", "host": HOST, "paths": PATHS, "tags": TAGS},
+    {"name": "validation", "host": HOST, "paths": ["/tmp/restic-test"], "tags": ["validation"],
+     "frozen_ids": ["1e30db7a"]},
+]
 
 
 def cfg(**overrides):
@@ -25,7 +32,7 @@ def cfg(**overrides):
         "repository": "/volume1/Restic/docker-test",
         "password_file": "/volume1/docker/restic-maintenance/secrets/restic_password_test",
         "state_dir": "/tmp/state", "log_dir": "/tmp/logs",
-        "allowed_hosts": [HOST], "allowed_paths": PATHS,
+        "groups": GROUPS,
         "retention": {"keep_within": "30d", "keep_daily": 14, "keep_weekly": 8, "keep_monthly": 12},
         "window": {"start": "01:00", "end": "04:30"},
         "timeout_minutes": 120,
@@ -37,17 +44,29 @@ def cfg(**overrides):
     return base
 
 
-def snap(sid, when, host=HOST, paths=None):
+def snap(sid, when, host=HOST, paths=None, tags=None):
     return {"id": sid * 8 if len(sid) == 1 else sid, "time": when.strftime("%Y-%m-%dT%H:%M:%S.123456789+00:00"),
-            "hostname": host, "paths": paths or PATHS}
+            "hostname": host, "paths": paths or PATHS, "tags": TAGS if tags is None else tags}
 
 
 def daily(n, end=NOW - dt.timedelta(hours=1)):
     return [snap("%064x" % i, end - dt.timedelta(days=i)) for i in range(n)]
 
 
-def groups(keep, remove=()):
-    return [{"host": HOST, "paths": PATHS, "tags": None, "keep": list(keep), "remove": list(remove)}]
+def validation(when=NOW - dt.timedelta(days=50)):
+    return snap(VALIDATION_ID, when, paths=["/tmp/restic-test"], tags=["validation"])
+
+
+def groups(keep, remove=(), paths=PATHS):
+    return [{"host": HOST, "paths": paths, "tags": None, "keep": list(keep), "remove": list(remove)}]
+
+
+def real_repo(end=NOW - dt.timedelta(hours=1)):
+    """Contenu actuel : 38 snapshots core (tags core,test) + le snapshot de validation."""
+    core = daily(38, end)
+    v = validation()
+    forget = groups(core) + groups([v], paths=["/tmp/restic-test"])
+    return core + [v], forget
 
 
 def codes(findings, level="ERROR"):
@@ -57,35 +76,90 @@ def codes(findings, level="ERROR"):
 class AnalyzeTest(unittest.TestCase):
     def test_clean_repository(self):
         s = daily(20)
-        f, summary = rm.analyze(cfg(), s, groups(s), NOW, None)
+        f, summary = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s), NOW, None)
         self.assertEqual(codes(f), [])
         self.assertEqual(codes(f, "INFO"), ["baseline"])
         self.assertEqual(summary["would_remove"], 0)
 
-    def test_unknown_host_and_path(self):
-        s = daily(10) + [snap("a", NOW - dt.timedelta(hours=2), host="intrus", paths=["/etc"])]
-        f, _ = rm.analyze(cfg(), s, groups(s), NOW, None)
-        self.assertEqual(codes(f), ["host_not_allowed", "path_not_allowed"])
+    def test_real_repository_is_clean(self):
+        s, forget = real_repo()
+        f, summary = rm.analyze(cfg(), s, forget, NOW, None)
+        self.assertEqual(codes(f), [])
+        self.assertEqual(summary["per_group"], {"core": 38, "validation": 1})
+
+    def test_unknown_host(self):
+        s = daily(10) + [snap("a", NOW - dt.timedelta(hours=2), host="intrus")]
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s), NOW, None)
+        self.assertEqual(codes(f), ["host_not_allowed"])
+
+    def test_paths_must_match_exactly(self):
+        for paths in (["/srv/docker"], ["/srv/docker/core/sub"], ["/srv/docker/core", "/etc"], ["/etc"]):
+            s = daily(10) + [snap("a", NOW - dt.timedelta(hours=2), paths=paths)]
+            f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s), NOW, None)
+            self.assertEqual(codes(f), ["path_not_allowed"], paths)
+
+    def test_tags_mismatch(self):
+        s = daily(10) + [snap("a", NOW - dt.timedelta(hours=2), tags=["core"])]
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s), NOW, None)
+        self.assertEqual(codes(f), ["tags_mismatch"])
+
+    def test_new_snapshot_in_frozen_group(self):
+        s, forget = real_repo()
+        extra = snap("e", NOW - dt.timedelta(hours=3), paths=["/tmp/restic-test"], tags=["validation"])
+        f, _ = rm.analyze(cfg(), s + [extra], forget + groups([extra], paths=["/tmp/restic-test"]), NOW, None)
+        self.assertEqual(codes(f), ["frozen_group_changed"])
+
+    def test_frozen_snapshot_missing(self):
+        core = daily(38)
+        f, _ = rm.analyze(cfg(), core, groups(core), NOW, None)
+        self.assertEqual(codes(f), ["frozen_snapshot_missing"])
+
+    def test_validation_does_not_mask_stale_core(self):
+        # Core arrêté depuis 3 jours, validation présente : la fraîcheur doit échouer sur core seulement.
+        s, forget = real_repo(end=NOW - dt.timedelta(days=3))
+        f, _ = rm.analyze(cfg(), s, forget, NOW, None)
+        self.assertEqual(codes(f), ["stale"])
+        self.assertIn("groupe core", [x for x in f if x["code"] == "stale"][0]["message"])
+
+    def test_old_validation_never_stale(self):
+        s, forget = real_repo()
+        self.assertGreater(NOW - rm.parse_time(s[-1]["time"]), dt.timedelta(days=49))  # validation vieille de 50 j
+        f, _ = rm.analyze(cfg(), s, forget, NOW, None)
+        self.assertNotIn("stale", codes(f))
+
+    def test_validation_not_counted_in_frequency(self):
+        # 6 snapshots core dans la même journée (au seuil) + validation ce même jour : pas de rafale.
+        day = NOW - dt.timedelta(days=10)
+        core = daily(5) + [snap("%064x" % (500 + i), day + dt.timedelta(hours=i)) for i in range(6)]
+        v = validation(when=day + dt.timedelta(hours=2, minutes=30))
+        forget = groups(core) + groups([v], paths=["/tmp/restic-test"])
+        f, _ = rm.analyze(cfg(), core + [v], forget, NOW, None)
+        self.assertEqual(codes(f), [])
+        # Un 7e snapshot core ce jour-là dépasse bien le seuil.
+        core.append(snap("%064x" % 600, day + dt.timedelta(hours=7)))
+        f, _ = rm.analyze(cfg(), core + [v], groups(core) + groups([v], paths=["/tmp/restic-test"]), NOW, None)
+        self.assertEqual(codes(f), ["burst"])
 
     def test_future_snapshot(self):
         s = daily(10) + [snap("f", NOW + dt.timedelta(days=400))]
-        f, _ = rm.analyze(cfg(), s, groups(s), NOW, None)
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s), NOW, None)
         self.assertIn("future_snapshot", codes(f))
 
     def test_small_clock_skew_tolerated(self):
         s = daily(10) + [snap("f", NOW + dt.timedelta(minutes=30))]
-        f, _ = rm.analyze(cfg(), s, groups(s), NOW, None)
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s), NOW, None)
         self.assertNotIn("future_snapshot", codes(f))
 
-    def test_stale_and_missing_host(self):
-        s = daily(10, end=NOW - dt.timedelta(days=3))
-        f, _ = rm.analyze(cfg(allowed_hosts=[HOST, "docker-test-02"]), s, groups(s), NOW, None)
-        self.assertEqual(codes(f), ["no_snapshot", "stale"])
+    def test_missing_group(self):
+        s = daily(10)
+        extra = {"name": "other", "host": "docker-test-02", "paths": PATHS, "tags": TAGS}
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1] + [extra]), s, groups(s), NOW, None)
+        self.assertEqual(codes(f), ["no_snapshot"])
 
     def test_burst_detected_anywhere_in_history(self):
         old = NOW - dt.timedelta(days=200)
         s = daily(10) + [snap("%064x" % (900 + i), old + dt.timedelta(minutes=i)) for i in range(7)]
-        f, _ = rm.analyze(cfg(), s, groups(s), NOW, None)
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s), NOW, None)
         self.assertIn("burst", codes(f))
 
     def test_backdated_and_disappeared_snapshots(self):
@@ -93,29 +167,35 @@ class AnalyzeTest(unittest.TestCase):
         state = {"last_run": (NOW - dt.timedelta(days=1)).isoformat(),
                  "snapshot_ids": [x["id"] for x in s] + ["d" * 64]}
         forged = snap("b", NOW - dt.timedelta(days=5))
-        f, _ = rm.analyze(cfg(), s + [forged], groups(s + [forged]), NOW, state)
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s + [forged], groups(s + [forged]), NOW, state)
         self.assertEqual(codes(f), ["backdated_snapshot", "snapshots_disappeared"])
 
     def test_new_snapshot_after_last_run_is_fine(self):
         s = daily(10)
         state = {"last_run": (NOW - dt.timedelta(days=1)).isoformat(), "snapshot_ids": [x["id"] for x in s[1:]]}
-        f, _ = rm.analyze(cfg(), s, groups(s), NOW, state)
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s), NOW, state)
         self.assertEqual(codes(f), [])
 
     def test_removal_thresholds(self):
         s = daily(40)
-        f, summary = rm.analyze(cfg(), s, groups(s[:25], s[25:]), NOW, None)
+        f, summary = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s[:25], s[25:]), NOW, None)
         self.assertEqual(codes(f), ["remove_count", "remove_percent"])
         self.assertEqual(summary["would_remove"], 15)
 
     def test_min_keep_per_group(self):
         s = daily(10)
-        f, _ = rm.analyze(cfg(), s, groups(s[:5], s[5:]), NOW, None)
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s[:5], s[5:]), NOW, None)
         self.assertIn("min_keep", codes(f))
+
+    def test_validation_group_kept_alone_is_not_min_keep(self):
+        # Le groupe de validation ne contient qu'un snapshot, conservé : pas d'alerte min_keep.
+        s, forget = real_repo()
+        f, _ = rm.analyze(cfg(), s, forget, NOW, None)
+        self.assertNotIn("min_keep", codes(f))
 
     def test_forget_must_cover_all_snapshots(self):
         s = daily(10)
-        f, _ = rm.analyze(cfg(), s, groups(s[:8]), NOW, None)
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s[:8]), NOW, None)
         self.assertIn("forget_mismatch", codes(f))
 
 
@@ -164,9 +244,20 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaises(rm.ConfigError, msg=mode):
                 rm.load_config(self.write(cfg(mode=mode)))
 
-    def test_empty_allowlists_refused(self):
-        with self.assertRaises(rm.ConfigError):
-            rm.load_config(self.write(cfg(allowed_hosts=[])))
+    def test_groups_validation(self):
+        bad = [
+            [],
+            [{"name": "x", "host": HOST, "paths": []}],
+            [{"name": "x", "host": HOST, "paths": ["/srv/docker/"]}],
+            [{"name": "x", "host": HOST, "paths": ["/srv/docker/*"]}],
+            [{"name": "x", "host": HOST, "paths": ["srv/docker/core"]}],
+            [{"name": "x", "host": HOST, "paths": PATHS, "frozen_ids": ["1e30"]}],
+            GROUPS + [{"name": "dup", "host": HOST, "paths": PATHS}],
+        ]
+        for groups_ in bad:
+            with self.assertRaises(rm.ConfigError, msg=groups_):
+                rm.load_config(self.write(cfg(groups=groups_)))
+        self.assertEqual(rm.load_config(self.write(cfg()))["groups"], GROUPS)
 
     def test_window(self):
         w = {"start": "23:00", "end": "02:00"}
@@ -237,8 +328,10 @@ class EndToEndTest(unittest.TestCase):
 
     def test_full_dry_run_then_backdated_insertion(self):
         now = dt.datetime.now(dt.timezone.utc)
-        s = daily(20, end=now - dt.timedelta(hours=1))
-        code, calls = self.run_with(s, groups(s))
+        core = daily(20, end=now - dt.timedelta(hours=1))
+        s = core + [validation()]
+        forget = groups(core) + groups([s[-1]], paths=["/tmp/restic-test"])
+        code, calls = self.run_with(s, forget)
         self.assertEqual(code, rm.EXIT_OK)
         subs = []
         for call in calls:
@@ -253,7 +346,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "state", "state.json")))
 
         forged = snap("b", now - dt.timedelta(days=4))
-        code, _ = self.run_with(s + [forged], groups(s + [forged]))
+        code, _ = self.run_with(s + [forged], groups(core + [forged]) + forget[1:])
         self.assertEqual(code, rm.EXIT_ANOMALY)
         reports = sorted(os.listdir(os.path.join(self.tmp, "logs")))
         with open(os.path.join(self.tmp, "logs", reports[-1])) as f:

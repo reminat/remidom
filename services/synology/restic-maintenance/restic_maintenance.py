@@ -37,7 +37,7 @@ EXIT_TIMEOUT = 5
 EXIT_LOCKED = 75
 
 REQUIRED_KEYS = ("name", "mode", "image", "repository", "password_file", "state_dir",
-                 "log_dir", "allowed_hosts", "allowed_paths", "retention", "window",
+                 "log_dir", "groups", "retention", "window",
                  "timeout_minutes", "thresholds")
 
 
@@ -66,12 +66,43 @@ def load_config(path):
     for key in ("repository", "password_file", "state_dir", "log_dir"):
         if not os.path.isabs(cfg[key]):
             raise ConfigError("%s doit être un chemin absolu" % key)
-    if not cfg["allowed_hosts"] or not cfg["allowed_paths"]:
-        raise ConfigError("allowed_hosts et allowed_paths ne doivent pas être vides")
+    validate_groups(cfg["groups"])
     if not re.match(r"^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+(@sha256:[0-9a-f]{64})?$", cfg["image"]):
         raise ConfigError("image invalide : %r" % cfg["image"])
     parse_window(cfg["window"])
     return cfg
+
+
+def validate_groups(groups):
+    """Groupes attendus : hôte + ensemble exact de chemins (+ tags), comme --group-by host,paths."""
+    if not groups:
+        raise ConfigError("groups ne doit pas être vide")
+    seen = set()
+    for g in groups:
+        if not g.get("name") or not g.get("host") or not g.get("paths"):
+            raise ConfigError("groupe incomplet (name, host et paths requis) : %r" % g)
+        for path in g["paths"]:
+            if not path.startswith("/") or path.rstrip("/") != path or "*" in path:
+                raise ConfigError("chemin invalide dans %s : %r (chemin absolu exact attendu)" % (g["name"], path))
+        for sid in g.get("frozen_ids", []):
+            if not re.match(r"^[0-9a-f]{8,64}$", sid):
+                raise ConfigError("identifiant figé invalide dans %s : %r" % (g["name"], sid))
+        key = group_key(g["host"], g["paths"])
+        if key in seen:
+            raise ConfigError("groupe en double : %s" % g["name"])
+        seen.add(key)
+
+
+def group_key(host, paths):
+    return (host, tuple(sorted(paths or [])))
+
+
+def match_group(groups, sn):
+    key = group_key(sn.get("hostname", ""), sn.get("paths"))
+    for g in groups:
+        if group_key(g["host"], g["paths"]) == key:
+            return g
+    return None
 
 
 def parse_hhmm(value):
@@ -215,11 +246,11 @@ def analyze(cfg, snapshots, forget_groups, now, state):
     """Analyse pure : ne fait aucune entrée/sortie. Retourne (findings, summary)."""
     th = cfg["thresholds"]
     findings = []
-    allowed_hosts = set(cfg["allowed_hosts"])
-    allowed_paths = set(cfg["allowed_paths"])
+    groups = cfg["groups"]
+    known_hosts = {g["host"] for g in groups}
     future_limit = now + dt.timedelta(minutes=th["max_future_skew_minutes"])
 
-    by_host = {}
+    by_group = {g["name"]: [] for g in groups}
     ids = set()
     for sn in snapshots:
         sid = sn.get("id", "?")
@@ -229,30 +260,46 @@ def analyze(cfg, snapshots, forget_groups, now, state):
         except (KeyError, ValueError) as exc:
             findings.append(finding("ERROR", "time_unreadable", "%s : %s" % (sid[:8], exc)))
             continue
-        host = sn.get("hostname", "")
-        if host not in allowed_hosts:
-            findings.append(finding("ERROR", "host_not_allowed", "%s : hôte non autorisé %r" % (sid[:8], host)))
-        bad_paths = [p for p in sn.get("paths", []) if p not in allowed_paths]
-        if bad_paths or not sn.get("paths"):
-            findings.append(finding("ERROR", "path_not_allowed", "%s : chemins non autorisés %r" % (sid[:8], bad_paths or [])))
         if t > future_limit:
             findings.append(finding("ERROR", "future_snapshot", "%s : daté dans le futur (%s)" % (sid[:8], sn["time"])))
-        by_host.setdefault(host, []).append(t)
+        g = match_group(groups, sn)
+        if g is None:
+            host = sn.get("hostname", "")
+            if host not in known_hosts:
+                findings.append(finding("ERROR", "host_not_allowed", "%s : hôte non autorisé %r" % (sid[:8], host)))
+            else:
+                findings.append(finding("ERROR", "path_not_allowed", "%s : %s, chemins non autorisés %r"
+                                        % (sid[:8], host, sn.get("paths"))))
+            continue
+        if "tags" in g and sorted(sn.get("tags") or []) != sorted(g["tags"]):
+            findings.append(finding("ERROR", "tags_mismatch", "%s : groupe %s, tags %r au lieu de %r"
+                                    % (sid[:8], g["name"], sn.get("tags") or [], g["tags"])))
+        frozen = g.get("frozen_ids")
+        if frozen is not None and not any(sid.startswith(f) for f in frozen):
+            findings.append(finding("ERROR", "frozen_group_changed", "%s : nouveau snapshot dans le groupe figé %s"
+                                    % (sid[:8], g["name"])))
+        by_group[g["name"]].append(t)
 
-    # Fraîcheur : chaque hôte autorisé doit avoir un snapshot récent (hors futur).
-    max_age = dt.timedelta(hours=th["max_age_hours"])
-    for host in sorted(allowed_hosts):
-        past = [t for t in by_host.get(host, []) if t <= future_limit]
+    for g in groups:
+        times = by_group[g["name"]]
+        if g.get("frozen_ids") is not None:
+            # Groupe historique : ni fraîcheur ni fréquence, seulement la présence des snapshots attendus.
+            for f in g["frozen_ids"]:
+                if not any(sid.startswith(f) for sid in ids):
+                    findings.append(finding("ERROR", "frozen_snapshot_missing", "groupe %s : %s absent" % (g["name"], f)))
+            continue
+        # Fraîcheur du groupe (hors snapshots futurs).
+        past = [t for t in times if t <= future_limit]
         if not past:
-            findings.append(finding("ERROR", "no_snapshot", "%s : aucun snapshot" % host))
-        elif now - max(past) > max_age:
-            findings.append(finding("ERROR", "stale", "%s : dernier snapshot trop ancien (%s)" % (host, max(past).isoformat())))
-
-    # Fréquence anormale sur 24 h glissantes, sur tout l'historique.
-    for host, times in sorted(by_host.items()):
+            findings.append(finding("ERROR", "no_snapshot", "groupe %s : aucun snapshot" % g["name"]))
+        elif now - max(past) > dt.timedelta(hours=th["max_age_hours"]):
+            findings.append(finding("ERROR", "stale", "groupe %s : dernier snapshot trop ancien (%s)"
+                                    % (g["name"], max(past).isoformat())))
+        # Fréquence anormale sur 24 h glissantes, sur tout l'historique du groupe.
         peak = max_in_window(sorted(times), dt.timedelta(hours=24))
         if peak > th["max_snapshots_per_24h"]:
-            findings.append(finding("ERROR", "burst", "%s : %d snapshots sur 24 h (max %d)" % (host, peak, th["max_snapshots_per_24h"])))
+            findings.append(finding("ERROR", "burst", "groupe %s : %d snapshots sur 24 h (max %d)"
+                                    % (g["name"], peak, th["max_snapshots_per_24h"])))
 
     # Comparaison avec la dernière exécution validée (état local, hors repository).
     if state:
@@ -301,8 +348,9 @@ def analyze(cfg, snapshots, forget_groups, now, state):
 
     summary = {
         "snapshots": total,
-        "hosts": sorted(by_host),
+        "hosts": sorted({sn.get("hostname", "") for sn in snapshots}),
         "paths": sorted({p for sn in snapshots for p in sn.get("paths", [])}),
+        "per_group": {name: len(times) for name, times in sorted(by_group.items())},
         "would_keep": kept,
         "would_remove": removed,
         "would_remove_percent": round(percent, 1),
