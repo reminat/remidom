@@ -1,0 +1,9 @@
+http:
+  middlewares:
+    # Basé sur l'IP source de la connexion TCP (pas de X-Forwarded-For).
+    lan-vpn-only:
+      ipAllowList:
+        sourceRange:
+{% for range in traefik_allowed_ranges %}
+          - "{{ range }}"
+{% endfor %}
