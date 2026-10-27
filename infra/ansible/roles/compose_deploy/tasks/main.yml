@@ -62,6 +62,14 @@
   loop: "{{ compose_projects }}"
   when: item.name == 'core' and unifi_url | length > 0
 
+- name: Render Traefik dynamic configuration (code)
+  ansible.builtin.template:
+    src: "{{ item.src }}/traefik/dynamic/code.yml.j2"
+    dest: "{{ item.dest }}/traefik/dynamic/code.yml"
+    mode: "0644"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core' and code_url | length > 0
+
 - name: Ensure Traefik acme directory exists
   ansible.builtin.file:
     path: "{{ item.dest }}/traefik/acme"
