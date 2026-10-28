@@ -82,7 +82,7 @@ Les secrets ne sont jamais stockés dans le repo. Ils sont injectés au moment d
 | `mqtt_password`       | `lookup('env', 'MQTT_PASSWORD')`    | `MQTT_PASSWORD`         |
 | `z2m_network_key`     | `lookup('env', 'Z2M_NETWORK_KEY')`  | `Z2M_NETWORK_KEY_JSON`  |
 | `cf_api_token`        | `lookup('env', 'CF_DNS_API_TOKEN')` | `CF_DNS_API_TOKEN`      |
-| `restic_backup_repository` | `lookup('env', 'RESTIC_REPOSITORY_URL')` | `restic_repository_<env>` (facultatif) |
+| `restic_backup_rest_password` | `lookup('env', 'RESTIC_REST_PASSWORD')` | `restic_rest_password_<env>` (facultatif) |
 | `restic_backup_password`   | `lookup('env', 'RESTIC_REPO_PASSWORD')`  | `restic_password_<env>` (facultatif)   |
 
 Le token machine `bws` est lui-même stocké dans le vault Bitwarden sous le nom `bws_machine_token`.
@@ -282,8 +282,10 @@ vers le REST Server du NAS (repository append-only : le client ne peut rien supp
 | Élément | Valeur (prod) |
 |---|---|
 | Hôte, chemin, tags | `docker-prod-01`, `/srv/docker/core`, `core,prod` (exclu : `mosquitto/log`) |
-| Repository | secret `restic_repository_prod` : `rest:https://<utilisateur>:<mot de passe>@<serveur>/<repo>/` |
-| Mot de passe du repository | secret `restic_password_prod` (20 caractères minimum ; à conserver aussi hors de l'hôte) |
+| REST Server | `https://restic.reminat.com`, utilisateur `docker-prod`, repository `/docker-prod/` (`group_vars`) ; `--private-repos` impose que le chemin commence par le nom d'utilisateur |
+| Mot de passe REST | secret `restic_rest_password_prod` (même convention que `restic_rest_password_test`) |
+| Mot de passe du repository | secret `restic_password_prod` (à conserver aussi hors de l'hôte : sans lui, aucune restauration) |
+| URL restic | assemblée par Ansible dans `/etc/restic/core.env`, mot de passe REST encodé |
 | Image | `restic/restic@sha256:…` (même digest que la maintenance du NAS) |
 | Fichiers sur l'hôte | `/etc/restic/core.env`, `/etc/restic/core.password` (root, 0600), cache `/var/cache/restic/core` |
 | Commande | `sudo /usr/local/sbin/restic-core <commande restic>` (données en lecture seule) |
@@ -318,10 +320,39 @@ Limites : chaque fichier est cohérent, mais les fichiers de services différent
 capturés à quelques secondes d'intervalle ; les données écrites en mémoire et pas encore
 enregistrées (Mosquitto, Zigbee2MQTT) ne sont pas dans la sauvegarde.
 
+### Utilisateur REST (NAS, une fois)
+
+Le REST Server tourne avec `--append-only --private-repos` ; ses utilisateurs sont dans
+`PASSWORD_FILE=/config/.htpasswd` (conteneur `rest-server`). Créer `docker-prod` avec le
+mot de passe du secret `restic_rest_password_prod`, saisi à l'invite (sans écho) :
+```sh
+N=$(sudo docker ps --format '{{.Names}}' | grep -i rest)
+sudo docker exec "$N" cut -d: -f1 /config/.htpasswd            # utilisateurs existants (noms seulement)
+sudo docker exec -it "$N" create_user docker-prod              # mot de passe demandé à l'invite
+```
+Si le REST Server ne prend pas le nouvel utilisateur en compte (401), le redémarrer en
+dehors des sauvegardes. Vérification depuis `docker-prod-01`, sans restic (mot de passe
+demandé par `curl`) : `curl -s -o /dev/null -w '%{http_code}\n' -u docker-prod
+https://restic.reminat.com/docker-prod/config` ; attendu **404** (authentifié, repository
+absent) ; 401 = identifiants refusés ; 403 = chemin refusé.
+
 ### Première mise en service
 
+L'existence du repository est vérifiée **séparément** de l'initialisation :
 ```sh
-sudo /usr/local/sbin/restic-core init                       # une seule fois
+sudo /usr/local/sbin/restic-core status
+```
+| Résultat | Code | Signification | Suite |
+|---|---|---|---|
+| `PRÉSENT` | 0 | repository existant, mot de passe accepté | pas d'initialisation |
+| `ABSENT` | 10 | aucun repository à cette adresse | `init` autorisé |
+| `ERREUR` | 12 | repository existant, mot de passe du repository refusé | s'arrêter, vérifier `restic_password_prod` |
+| `INCERTAIN` | autre | réseau, authentification REST, droits… (erreur affichée) | s'arrêter, analyser l'erreur |
+
+`init` refait lui-même cette vérification et refuse (code 2) si l'absence n'est pas
+confirmée (code 10). Il reste une commande explicite, jamais lancée automatiquement :
+```sh
+sudo /usr/local/sbin/restic-core init                       # seulement après « ABSENT »
 sudo systemctl start restic-backup-core.service             # Portainer arrêté le temps de la copie
 systemctl show -p Result,ExecMainStatus restic-backup-core.service
 journalctl -u restic-backup-core.service --since "-15min" --no-pager | tail -20

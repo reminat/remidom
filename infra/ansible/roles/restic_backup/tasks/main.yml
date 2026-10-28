@@ -6,14 +6,21 @@
         that:
           - restic_backup_name is match('^[a-z0-9][a-z0-9-]*$')
           - restic_backup_host is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
-          - restic_backup_repository is match('^rest:https?://[^\s]+/$')
-          - restic_backup_password | length >= 20
+          - restic_backup_rest_url is match('^https?://[A-Za-z0-9.-]+(:[0-9]+)?$')
+          - restic_backup_rest_user is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')
+          - restic_backup_repository_path is match('^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$')
+          - restic_backup_repository_path.split('/')[0] == restic_backup_rest_user
+          - restic_backup_rest_password | length > 0
+          - restic_backup_password | length > 0
+          - "'\n' not in restic_backup_rest_password"
           - "'\n' not in restic_backup_password"
           - restic_backup_paths | length > 0
           - restic_backup_image is match('^[a-z0-9./-]+@sha256:[0-9a-f]{64}$')
         fail_msg: >-
-          Configuration de sauvegarde incomplète : RESTIC_REPOSITORY_URL (rest:https://…/<repo>/) et
-          RESTIC_REPO_PASSWORD (20 caractères minimum) doivent être fournis par deploy.sh (Bitwarden).
+          Configuration de sauvegarde incomplète ou invalide : restic_backup_rest_url,
+          restic_backup_rest_user et restic_backup_repository_path (qui doit commencer par
+          l'utilisateur, --private-repos) dans group_vars ; secrets restic_rest_password_<env> et
+          restic_password_<env> fournis par deploy.sh (Bitwarden).
         quiet: true
       no_log: true
 

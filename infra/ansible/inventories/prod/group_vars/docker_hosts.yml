@@ -26,8 +26,11 @@ proxmox_url: "https://10.10.20.2:8006"
 cf_api_token: "{{ lookup('env', 'CF_DNS_API_TOKEN') }}"
 
 # Sauvegarde Restic de /srv/docker/core vers le REST Server du NAS (repository docker-prod).
-# Secrets : restic_repository_prod et restic_password_prod (Bitwarden Secrets Manager).
+# Secrets (Bitwarden Secrets Manager) : restic_rest_password_prod et restic_password_prod.
 restic_backup_enabled: true
+restic_backup_rest_url: https://restic.reminat.com
+restic_backup_rest_user: docker-prod
+restic_backup_repository_path: docker-prod
 restic_backup_timer_enabled: false   # à activer après la première sauvegarde et le test de restauration
 restic_backup_tags: [core, prod]
 # Sauvegarde à chaud : Mosquitto, Zigbee2MQTT et Node-RED écrivent leurs fichiers par

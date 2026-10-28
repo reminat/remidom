@@ -21,9 +21,22 @@ restic_backup_stop_services: []
 # Même image que la maintenance du NAS (version et digest à changer ensemble).
 restic_backup_image: "restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
 
-# Secrets injectés par deploy.sh depuis Bitwarden Secrets Manager, jamais stockés dans le dépôt.
-restic_backup_repository: "{{ lookup('env', 'RESTIC_REPOSITORY_URL') }}"
+# REST Server : adresse, utilisateur et chemin du repository (non secrets, par environnement).
+# Avec --private-repos, le chemin doit commencer par le nom d'utilisateur.
+restic_backup_rest_url: ""            # ex. https://restic.reminat.com
+restic_backup_rest_user: ""
+restic_backup_repository_path: ""
+
+# Secrets injectés par deploy.sh depuis Bitwarden Secrets Manager, jamais stockés dans le dépôt :
+# restic_rest_password_<env> (mot de passe REST) et restic_password_<env> (mot de passe du repository).
+restic_backup_rest_password: "{{ lookup('env', 'RESTIC_REST_PASSWORD') }}"
 restic_backup_password: "{{ lookup('env', 'RESTIC_REPO_PASSWORD') }}"
+
+# URL restic assemblée ; le mot de passe REST est encodé (« : », « @ », « / », « % »…).
+restic_backup_repository: >-
+  rest:{{ restic_backup_rest_url | urlsplit('scheme') }}://{{ restic_backup_rest_user }}:{{
+  restic_backup_rest_password | urlencode | replace('/', '%2F') }}@{{
+  restic_backup_rest_url | urlsplit('netloc') }}/{{ restic_backup_repository_path }}/
 
 restic_backup_config_dir: /etc/restic
 restic_backup_cache_dir: /var/cache/restic

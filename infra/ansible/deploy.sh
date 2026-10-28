@@ -96,7 +96,7 @@ export MQTT_PASSWORD="$(fetch_secret_value "$MQTT_SECRET_REF")"
 Z2M_NETWORK_KEY_SECRET_REF="${Z2M_NETWORK_KEY_SECRET_REF:-zigbee_network_key_${ENV}}"
 export Z2M_NETWORK_KEY="$(fetch_secret_value "$Z2M_NETWORK_KEY_SECRET_REF")"
 export CF_DNS_API_TOKEN="$(fetch_secret_value "$CF_DNS_API_TOKEN_SECRET_REF")"
-export RESTIC_REPOSITORY_URL="$(fetch_optional_secret_value "${RESTIC_REPOSITORY_SECRET_REF:-restic_repository_${ENV}}")"
+export RESTIC_REST_PASSWORD="$(fetch_optional_secret_value "${RESTIC_REST_PASSWORD_SECRET_REF:-restic_rest_password_${ENV}}")"
 export RESTIC_REPO_PASSWORD="$(fetch_optional_secret_value "${RESTIC_PASSWORD_SECRET_REF:-restic_password_${ENV}}")"
 
 cd "$SCRIPT_DIR"

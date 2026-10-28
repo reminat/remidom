@@ -2,6 +2,8 @@
 # Géré par Ansible (rôle restic_backup). Lance restic (image épinglée) pour la sauvegarde
 # « {{ restic_backup_name }} » : repository et mot de passe lus dans {{ restic_backup_config_dir }} (root, 0600).
 #
+#   restic-{{ restic_backup_name }} status          état du repository (présent / absent / erreur), sans rien modifier
+#   restic-{{ restic_backup_name }} init            initialisation, seulement si « status » confirme l'absence
 #   restic-{{ restic_backup_name }} snapshots | check | backup … | ls … | stats …
 #   restic-{{ restic_backup_name }} restore-to <dossier vide> <snapshot> [options de restore]
 #
@@ -14,26 +16,68 @@ CACHE='{{ restic_backup_cache_dir }}/{{ restic_backup_name }}'
 
 extra=""
 caps="--cap-add DAC_READ_SEARCH"
-if [ "${1:-}" = "restore-to" ]; then
-  target="${2:-}"
-  [ -n "$target" ] && [ -d "$target" ] && [ ! -L "$target" ] && [ -z "$(ls -A -- "$target")" ] || {
-    echo "restore-to : un dossier existant et vide est requis" >&2; exit 2; }
-  case "$target" in /srv/docker/*|/|/etc*|/usr*|/var/lib/docker*) echo "restore-to : cible refusée : $target" >&2; exit 2 ;; esac
-  shift 2
-  set -- restore "$@" --target /restore
-  extra="-v $target:/restore"
-  caps="--cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER"
-fi
 
-# shellcheck disable=SC2086
-exec /usr/bin/docker run --rm --pull never --read-only \
-  --tmpfs /tmp:rw,noexec,nosuid,size=256m \
-  --cap-drop ALL $caps --security-opt no-new-privileges \
-  --hostname '{{ restic_backup_host }}' \
-  --env-file "$CONF.env" \
-  -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password -v "$CONF.password:/run/secrets/restic_password:ro" \
-  -e RESTIC_CACHE_DIR=/cache -v "$CACHE:/cache" \
+run_restic() {
+  # shellcheck disable=SC2086
+  /usr/bin/docker run --rm --pull never --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+    --cap-drop ALL $caps --security-opt no-new-privileges \
+    --hostname '{{ restic_backup_host }}' \
+    --env-file "$CONF.env" \
+    -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password -v "$CONF.password:/run/secrets/restic_password:ro" \
+    -e RESTIC_CACHE_DIR=/cache -v "$CACHE:/cache" \
 {% for path in restic_backup_paths %}
-  -v '{{ path }}:{{ path }}:ro' \
+    -v '{{ path }}:{{ path }}:ro' \
 {% endfor %}
-  $extra "$IMAGE" "$@"
+    $extra "$IMAGE" "$@"
+}
+
+# Codes de restic 0.19.1 : 10 = repository absent, 12 = mot de passe refusé, 1 = autre erreur
+# (réseau, authentification REST, droits…). Seul 10 permet d'affirmer l'absence.
+repository_status() {
+  set +e
+  out=$(run_restic cat config 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  case "$rc" in
+    0)  echo "PRÉSENT : repository existant, mot de passe accepté" ;;
+    10) echo "ABSENT : aucun repository à cette adresse (initialisation possible avec « init »)" ;;
+    12) echo "ERREUR : repository existant, mais le mot de passe du repository est refusé" ;;
+    *)  echo "INCERTAIN (code $rc) : état inconnu, ne pas initialiser ; erreur :" ;;
+  esac
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 10 ] || printf '%s\n' "$out" | tail -n 5 >&2
+  return "$rc"
+}
+
+case "${1:-}" in
+  status)
+    repository_status
+    exit $?
+    ;;
+  init)
+    shift
+    set +e
+    repository_status
+    rc=$?
+    set -e
+    if [ "$rc" -ne 10 ]; then
+      echo "init refusé : l'absence du repository n'est pas confirmée (code $rc)" >&2
+      exit 2
+    fi
+    run_restic init "$@"
+    exit $?
+    ;;
+  restore-to)
+    target="${2:-}"
+    [ -n "$target" ] && [ -d "$target" ] && [ ! -L "$target" ] && [ -z "$(ls -A -- "$target")" ] || {
+      echo "restore-to : un dossier existant et vide est requis" >&2; exit 2; }
+    case "$target" in /srv/docker/*|/|/etc*|/usr*|/var/lib/docker*) echo "restore-to : cible refusée : $target" >&2; exit 2 ;; esac
+    shift 2
+    extra="-v $target:/restore"
+    caps="--cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER"
+    run_restic restore "$@" --target /restore
+    exit $?
+    ;;
+esac
+
+run_restic "$@"
