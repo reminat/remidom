@@ -10,17 +10,22 @@
           - restic_backup_rest_user is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')
           - restic_backup_repository_path is match('^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$')
           - restic_backup_repository_path.split('/')[0] == restic_backup_rest_user
+          - restic_backup_paths | length > 0
+          - restic_backup_image is match('^[a-z0-9./-]+@sha256:[0-9a-f]{64}$')
+        fail_msg: >-
+          Configuration de sauvegarde invalide : restic_backup_rest_url (https://hôte[:port]),
+          restic_backup_rest_user et restic_backup_repository_path, qui doit commencer par
+          l'utilisateur (--private-repos), dans group_vars/docker_hosts.yml.
+        quiet: true
+
+    # Message fixe : rien n'est affiché des valeurs (no_log), seulement leur présence.
+    - name: Check Restic secrets presence
+      ansible.builtin.assert:
+        that:
           - restic_backup_rest_password | length > 0
           - restic_backup_password | length > 0
           - "'\n' not in restic_backup_rest_password"
           - "'\n' not in restic_backup_password"
-          - restic_backup_paths | length > 0
-          - restic_backup_image is match('^[a-z0-9./-]+@sha256:[0-9a-f]{64}$')
-        fail_msg: >-
-          Configuration de sauvegarde incomplète ou invalide : restic_backup_rest_url,
-          restic_backup_rest_user et restic_backup_repository_path (qui doit commencer par
-          l'utilisateur, --private-repos) dans group_vars ; secrets restic_rest_password_<env> et
-          restic_password_<env> fournis par deploy.sh (Bitwarden).
         quiet: true
       no_log: true
 
