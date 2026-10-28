@@ -5,18 +5,26 @@ Exécuté en root par une tâche planifiée DSM. Restic tourne dans un conteneur
 Docker (image épinglée), repository monté en lecture seule, sans réseau.
 Le mot de passe est monté comme fichier : ce script ne le lit jamais.
 
-Compatible Python 3.8 (version fournie par DSM 7).
+Compatible Python 3.8 (version fournie par DSM 7). À lancer avec « python3 -I ».
 """
 
-import argparse
-import datetime as dt
-import fcntl
-import json
-import os
-import re
-import subprocess
 import sys
-import time
+
+# Garde-fou placé avant tout autre import : sans -I (mode isolé), Python chercherait
+# d'abord les modules dans le dossier du script ; un json.py déposé à côté serait
+# alors exécuté en root. « sys » est intégré à l'interpréteur et ne peut être substitué.
+if __name__ == "__main__" and not sys.flags.isolated:
+    sys.stderr.write("refusé : lancer ce script avec « python3 -I » (mode isolé)\n")
+    sys.exit(2)
+
+import argparse  # noqa: E402
+import datetime as dt  # noqa: E402
+import fcntl  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+import subprocess  # noqa: E402
+import time  # noqa: E402
 
 ALLOWED_MODES = ("dry-run",)
 DOCKER_BIN = "/usr/local/bin/docker"
@@ -36,7 +44,7 @@ EXIT_RESTIC = 4
 EXIT_TIMEOUT = 5
 EXIT_LOCKED = 75
 
-REQUIRED_KEYS = ("name", "mode", "image", "repository", "password_file", "state_dir",
+REQUIRED_KEYS = ("name", "mode", "image", "expected_restic_version", "repository", "password_file", "state_dir",
                  "log_dir", "groups", "retention", "window",
                  "timeout_minutes", "thresholds")
 
@@ -67,8 +75,12 @@ def load_config(path):
         if not os.path.isabs(cfg[key]):
             raise ConfigError("%s doit être un chemin absolu" % key)
     validate_groups(cfg["groups"])
-    if not re.match(r"^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+(@sha256:[0-9a-f]{64})?$", cfg["image"]):
-        raise ConfigError("image invalide : %r" % cfg["image"])
+    image = cfg["image"]
+    if not re.match(r"^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$", image) \
+            or not ("@sha256:" in image or re.search(r":[A-Za-z0-9._-]+$", image)):
+        raise ConfigError("image invalide : %r (attendu nom:tag ou nom@sha256:…)" % image)
+    if not re.match(r"^\d+\.\d+\.\d+$", cfg["expected_restic_version"]):
+        raise ConfigError("expected_restic_version invalide : %r" % cfg["expected_restic_version"])
     parse_window(cfg["window"])
     return cfg
 
@@ -159,7 +171,8 @@ def check_safe(args):
         raise StepError("--no-lock obligatoire (repository en lecture seule)")
 
 
-def docker_command(cfg, container_name, restic_args):
+def docker_base(cfg, container_name):
+    """Options communes à tous les conteneurs : isolement et montages en lecture seule."""
     return [
         DOCKER_BIN, "run", "--rm", "--name", container_name,
         "--pull", "never",
@@ -173,8 +186,37 @@ def docker_command(cfg, container_name, restic_args):
         "-e", "RESTIC_REPOSITORY=%s" % CONTAINER_REPO,
         "-e", "RESTIC_PASSWORD_FILE=%s" % CONTAINER_PASSWORD,
         "-e", "TMPDIR=/tmp",
-        cfg["image"],
-    ] + restic_args
+    ]
+
+
+def docker_command(cfg, container_name, restic_args):
+    return docker_base(cfg, container_name) + [cfg["image"]] + restic_args
+
+
+def mounts_command(cfg, container_name):
+    """Même conteneur, mais affiche ses points de montage au lieu de lancer restic."""
+    return docker_base(cfg, container_name) + ["--entrypoint", "/bin/cat", cfg["image"], "/proc/self/mounts"]
+
+
+def readonly_problems(mounts_text):
+    """Vérifie, dans le conteneur réel, que la racine, le repository et le secret sont en lecture seule."""
+    options = {}
+    for line in mounts_text.splitlines():
+        fields = line.split()
+        if len(fields) >= 4:
+            options[fields[1]] = fields[3].split(",")
+    problems = []
+    for mountpoint in ("/", CONTAINER_REPO, CONTAINER_PASSWORD):
+        if mountpoint not in options:
+            problems.append("%s : point de montage absent" % mountpoint)
+        elif "ro" not in options[mountpoint]:
+            problems.append("%s : monté sans « ro » (%s)" % (mountpoint, ",".join(options[mountpoint])))
+    return problems
+
+
+def parse_restic_version(output):
+    m = re.match(r"^restic (\d+\.\d+\.\d+)\b", output.strip())
+    return m.group(1) if m else None
 
 
 class Runner:
@@ -184,24 +226,34 @@ class Runner:
         self.log = log
         self.counter = 0
 
-    def restic(self, subcommand, *extra):
-        args = build_restic_args(subcommand, extra)
+    def _name(self):
         self.counter += 1
-        name = "restic-maint-%s-%d-%d" % (re.sub(r"[^a-z0-9-]", "-", self.cfg["name"]), os.getpid(), self.counter)
+        return "restic-maint-%s-%d-%d" % (re.sub(r"[^a-z0-9-]", "-", self.cfg["name"]), os.getpid(), self.counter)
+
+    def _exec(self, cmd, name, label):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
-            raise StepTimeout("délai global dépassé avant « restic %s »" % subcommand)
-        self.log("restic %s" % " ".join(args))
+            raise StepTimeout("délai global dépassé avant « %s »" % label)
         try:
-            proc = subprocess.run(docker_command(self.cfg, name, args), stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, timeout=remaining)
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=remaining)
         except subprocess.TimeoutExpired:
             subprocess.run([DOCKER_BIN, "kill", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            raise StepTimeout("délai global dépassé pendant « restic %s »" % subcommand)
+            raise StepTimeout("délai global dépassé pendant « %s »" % label)
         stderr = proc.stderr.decode("utf-8", "replace").strip()
         if proc.returncode != 0:
-            raise StepError("restic %s a échoué (code %d) : %s" % (subcommand, proc.returncode, stderr[-2000:]))
+            raise StepError("%s a échoué (code %d) : %s" % (label, proc.returncode, stderr[-2000:]))
         return proc.stdout.decode("utf-8", "replace")
+
+    def mounts(self):
+        name = self._name()
+        self.log("vérification des montages du conteneur")
+        return self._exec(mounts_command(self.cfg, name), name, "lecture des montages")
+
+    def restic(self, subcommand, *extra):
+        args = build_restic_args(subcommand, extra)
+        name = self._name()
+        self.log("restic %s" % " ".join(args))
+        return self._exec(docker_command(self.cfg, name, args), name, "restic %s" % subcommand)
 
 
 def parse_json_output(text):
@@ -419,6 +471,7 @@ def run(cfg, opts, log, lines):
     started = dt.datetime.now(dt.timezone.utc)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     report = {"name": cfg["name"], "mode": cfg["mode"], "image": cfg["image"],
+              "expected_restic_version": cfg["expected_restic_version"],
               "started": started.isoformat(), "findings": [], "summary": None, "status": None}
 
     def finish(status, code):
@@ -445,7 +498,20 @@ def run(cfg, opts, log, lines):
 
     runner = Runner(cfg, time.monotonic() + 60 * cfg["timeout_minutes"], log)
     try:
-        log(runner.restic("version").strip())
+        problems = readonly_problems(runner.mounts())
+        if problems:
+            for p in problems:
+                log("montage refusé : %s" % p)
+            return finish("unsafe_mounts", EXIT_CONFIG)
+        report["mounts_readonly"] = True
+        log("montages en lecture seule vérifiés : /, %s, %s" % (CONTAINER_REPO, CONTAINER_PASSWORD))
+
+        version_output = runner.restic("version").strip()
+        log(version_output)
+        report["restic_version"] = parse_restic_version(version_output)
+        if report["restic_version"] != cfg["expected_restic_version"]:
+            log("version restic %r inattendue (attendu %s)" % (report["restic_version"], cfg["expected_restic_version"]))
+            return finish("unexpected_version", EXIT_RESTIC)
         snapshots = parse_json_output(runner.restic("snapshots", "--json")) or []
         log("%d snapshots lus" % len(snapshots))
         locks = runner.restic("list", "locks").split()

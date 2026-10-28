@@ -12,7 +12,8 @@
       - restic_maintenance_groups | length > 0
       - restic_maintenance_groups | rejectattr('host', 'defined') | list | length == 0
       - restic_maintenance_groups | rejectattr('paths', 'defined') | list | length == 0
-      - restic_maintenance_image_digest == '' or restic_maintenance_image_digest is match('^@sha256:[0-9a-f]{64}$')
+      - restic_maintenance_restic_version is match('^[0-9]+[.][0-9]+[.][0-9]+$')
+      - restic_maintenance_image_digest == '' or restic_maintenance_image_digest is match('^sha256:[0-9a-f]{64}$')
     fail_msg: >-
       Configuration incomplète ou mode refusé : seul dry-run est autorisé, et nom, repository,
       secret et groupes attendus doivent être définis dans group_vars/nas.yml.

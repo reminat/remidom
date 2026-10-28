@@ -1,8 +1,12 @@
 # Seul mode accepté dans cette version (le script refuse toute autre valeur).
 restic_maintenance_mode: dry-run
-restic_maintenance_image: restic/restic:0.19.1
-# Optionnel : épingler le digest relevé sur le NAS, ex. "@sha256:<64 hex>".
-restic_maintenance_image_digest: ""
+# Image restic : version et digest vont ensemble (les changer dans la même PR).
+restic_maintenance_image_repo: restic/restic
+restic_maintenance_restic_version: "0.19.1"
+# Digest de l'index multi-architecture publié sur Docker Hub pour restic/restic:0.19.1
+# (identique sur toute installation), contrôlé le 28/10/2026 : Docker Hub et image locale
+# du NAS. Vide = référence par tag (non recommandé).
+restic_maintenance_image_digest: "sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
 
 restic_maintenance_src: "{{ playbook_dir }}/../../../services/synology/restic-maintenance"
 restic_maintenance_base_dir: /volume1/docker/restic-maintenance

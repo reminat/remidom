@@ -1,7 +1,10 @@
 {{ {
   "name": restic_maintenance_name,
   "mode": restic_maintenance_mode,
-  "image": restic_maintenance_image ~ restic_maintenance_image_digest,
+  "image": (restic_maintenance_image_repo ~ '@' ~ restic_maintenance_image_digest)
+           if restic_maintenance_image_digest
+           else (restic_maintenance_image_repo ~ ':' ~ restic_maintenance_restic_version),
+  "expected_restic_version": restic_maintenance_restic_version,
   "repository": restic_maintenance_repository,
   "password_file": restic_maintenance_password_file,
   "state_dir": restic_maintenance_state_dir,
