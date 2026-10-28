@@ -10,7 +10,7 @@ on:
         required: true
         default: test
         type: choice
-        options: [test]
+        options: [test, prod]
       apply:
         description: Appliquer les changements (sinon --check --diff)
         required: true

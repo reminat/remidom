@@ -1,0 +1,16 @@
+# Connexion au NAS Synology (DSM 7), commune à tous les environnements : un seul NAS.
+# Les valeurs propres à chaque repository sont dans inventories/<env>/group_vars/nas.yml.
+ansible_python_interpreter: /usr/bin/python3
+ansible_remote_tmp: /tmp
+
+# Clé d'hôte vérifiée contre le fichier versionné (ansible.cfg désactive la vérification
+# pour les autres hôtes ; elle est réactivée ici pour le NAS uniquement).
+ansible_host_key_checking: true
+ansible_ssh_common_args: "-o UserKnownHostsFile={{ playbook_dir }}/../nas_known_hosts -o StrictHostKeyChecking=yes"
+# La clé de déploiement est restreinte par no-pty : ne jamais demander de terminal (-tt).
+ansible_ssh_use_tty: false
+
+# Transfert des fichiers par SSH avec dd des deux côtés (ansible-core >= 2.17 sur le
+# runner). SFTP a échoué lors du test (« subsystem request failed on channel 0 »),
+# cause non établie : voir services/synology/restic-maintenance/README.md.
+ansible_ssh_transfer_method: piped
