@@ -12,7 +12,7 @@ n'est accessible qu'en lecture :
 | Configuration | `mode` doit valoir `dry-run`, sinon arrêt (code 2) avant tout appel à Docker ; le rôle Ansible refuse aussi toute autre valeur. Chemins et paramètres de rétention validés strictement (aucune valeur ne peut ajouter ou modifier un argument). |
 | Commandes | Liste blanche (`version`, `snapshots`, `list`, `check`, `forget`) ; `forget` sans `--dry-run`, `prune`, `unlock`, `key`… sont refusés avant exécution. |
 | Système de fichiers | Repository et secret montés en **lecture seule** (`:ro`, `docker_base()`) ; conteneur `--read-only`, sans réseau, `--cap-drop ALL` (+ `DAC_READ_SEARCH`), `no-new-privileges`. **C'est la protection principale.** |
-| Vérification à l'exécution | Avant tout appel à restic, un conteneur lancé avec les mêmes options lit `/proc/self/mounts` ; l'option `ro` est exigée sur `/`, `/repo` et `/run/secrets/restic_password`, sinon arrêt (`unsafe_mounts`, code 2). Portée exacte : voir « Limites du contrôle des montages ». |
+| Vérification à l'exécution | Une barrière (busybox `sh`/`awk` de l'image) s'exécute **dans chaque conteneur restic**, avant restic : elle lit les montages de ce conteneur et exige `ro` sur `/`, `/repo`, le secret et **tout sous-montage de `/repo`**, sinon refus (code 97) et arrêt (`unsafe_mounts`, code 2). Un pré-contrôle identique, fait en Python sur un conteneur préalable, produit un message détaillé. Portée exacte : voir « Contrôle des montages ». |
 | Restic | `forget` est toujours lancé avec `--dry-run`. `--no-lock`, ajouté à toutes les commandes, évite seulement d'écrire un fichier de verrou dans le repository (ce qu'un montage en lecture seule interdirait de toute façon) : ce n'est **pas** un équivalent de `--dry-run`. |
 | Image | Référence par digest (`restic/restic@sha256:…`) avec `--pull never`, puis contrôle de `restic version` (`unexpected_version`, code 4). Le digest désigne une image précise ; il ne prouve à lui seul ni sa provenance ni son innocuité. |
 | Interpréteur | Le script refuse de démarrer sans `python3 -I` : sans mode isolé, un module (`json.py`…) déposé à côté du script serait importé en root. |
@@ -352,17 +352,43 @@ Points à vérifier lors de ce premier lancement :
 - `check` sans verrou peut signaler des erreurs transitoires si une sauvegarde tourne en
   même temps : relancer hors sauvegarde avant de conclure.
 
-### Limites du contrôle des montages
+### Contrôle des montages
 
-Le contrôle lit `/proc/self/mounts` dans un conteneur créé avec exactement les mêmes
-options que les conteneurs restic (`docker_base()`), juste avant eux. Il établit que, pour
-ce conteneur, le noyau a appliqué l'option `ro` aux points de montage `/`, `/repo` et
-`/run/secrets/restic_password`. Il n'établit pas : que les conteneurs restic suivants ont
-reçu les mêmes montages (c'est seulement attendu, puisque les options sont identiques) ;
-que la source de `/repo` est bien le repository configuré ; l'absence de sous-montages
-inscriptibles sous `/repo` (avec Docker 24, un montage `ro` n'est pas récursif). La
-protection effective reste le montage `:ro` lui-même, que le conteneur ne peut pas
-remonter en écriture (`CAP_SYS_ADMIN` retirée, `no-new-privileges`).
+Deux contrôles, avec la même règle : l'option `ro` est exigée sur `/`, `/repo`,
+`/run/secrets/restic_password` et sur tout point de montage situé sous `/repo/` ; pour un
+point de montage répété, seule la dernière ligne (le montage visible) compte.
+
+1. **Pré-contrôle** (`readonly_problems()`, Python) : un conteneur lancé avec les mêmes
+   options affiche `/proc/self/mounts`. Il donne un diagnostic lisible et évite de lancer
+   restic si la configuration de Docker est en cause.
+2. **Barrière dans chaque conteneur restic** (`GATE_SCRIPT`) : le conteneur démarre par
+   `/bin/sh -c`, lit **ses propres** montages avec `awk`, et ne fait `exec /usr/bin/restic`
+   que si la règle est respectée ; sinon il sort en code 97 avec le marqueur
+   `RESTIC_GATE_REFUSED`, sans avoir lancé restic. C'est elle qui apporte la garantie :
+   le contrôle porte sur le conteneur même qui exécute restic, et non sur un conteneur
+   voisin supposé identique. L'image définit `/entrypoint.sh`, qui fait seulement
+   `exec nice -n 0 /usr/bin/restic` ; la barrière le remplace et appelle restic
+   directement.
+
+Pourquoi les sous-montages : avec Docker 24 (version du NAS), un montage `-v …:ro` n'est
+pas récursivement en lecture seule ; un système de fichiers monté sur l'hôte sous le
+repository resterait inscriptible dans le conteneur. Constaté le 28/10/2026 sur une VM
+de test (Docker 28.0.4, noyau 6.8) : avec `-v …:ro`, un tmpfs monté sous la source
+apparaît `ro` (Docker récent rend le montage récursif) ; avec `bind-recursive=writable`
+(comportement non récursif, celui de Docker 24), il apparaît `rw` et la barrière refuse.
+Passer à `--mount type=bind,…,readonly` ne réglerait pas la question sur Docker 24 (le
+mode récursif `bind-recursive` n'existe qu'à partir de Docker 25) : la syntaxe actuelle
+est conservée, et la barrière couvre le cas.
+
+Limites :
+- la règle ne vérifie pas l'**origine** de `/repo` (que la source est bien le repository
+  configuré), seulement que tout ce qui est visible sous `/repo` est en lecture seule ;
+- la barrière dépend de `/bin/sh` et de `awk` dans l'image ; en leur absence, le
+  conteneur échoue (refus par défaut), sans lancer restic ;
+- l'image, et donc la barrière elle-même, est désignée par son digest : une image
+  différente au même digest est impossible, mais le digest ne prouve pas la provenance ;
+- le démon Docker et le noyau sont de confiance ; `CAP_SYS_ADMIN` retirée et
+  `no-new-privileges` empêchent le conteneur de remonter quoi que ce soit en écriture.
 
 ## Tâche planifiée DSM (à créer, **désactivée**)
 
