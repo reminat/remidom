@@ -21,6 +21,11 @@ import restic_maintenance as rm  # noqa: E402
 
 IMAGE = "restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
 NOW = dt.datetime(2026, 10, 27, 2, 0, tzinfo=dt.timezone.utc)
+MOUNTS_OK = """overlay / overlay ro,relatime,lowerdir=/x 0 0
+tmpfs /tmp tmpfs rw,nosuid,noexec,relatime,size=524288k 0 0
+/dev/mapper/vg1-volume_1 /repo btrfs ro,relatime,space_cache=v2 0 0
+/dev/mapper/vg1-volume_1 /run/secrets/restic_password btrfs ro,relatime 0 0
+"""
 HOST = "docker-test-01"
 PATHS = ["/srv/docker/core"]
 TAGS = ["core", "test"]
@@ -240,7 +245,8 @@ class SafetyTest(unittest.TestCase):
         c = rm.docker_command(cfg(), "n", ["--no-lock", "snapshots"])
         joined = " ".join(c)
         self.assertIn("/volume1/Restic/docker-test:/repo:ro", joined)
-        self.assertEqual(c[-3:], [IMAGE, "--no-lock", "snapshots"])
+        self.assertEqual(c[c.index("--entrypoint"):], ["--entrypoint", "/bin/sh", IMAGE, "-c", rm.GATE_SCRIPT,
+                                                       "restic-gate", "--no-lock", "snapshots"])
         self.assertIn("restic_password_test:/run/secrets/restic_password:ro", joined)
         for flag in ("--network none", "--read-only", "--cap-drop ALL", "--pull never", "no-new-privileges"):
             self.assertIn(flag, joined)
@@ -258,6 +264,24 @@ class MountAndVersionTest(unittest.TestCase):
         # « ro » doit être une option entière, pas une sous-chaîne (ex. « errors=remount-ro »)
         tricky = MOUNTS_OK.replace("/repo btrfs ro,relatime", "/repo btrfs rw,errors=remount-ro")
         self.assertEqual(len(rm.readonly_problems(tricky)), 1)
+
+    def test_submounts_under_repo(self):
+        rw_sub = MOUNTS_OK + "/dev/sdb1 /repo/data ext4 rw,relatime 0 0\n"
+        self.assertEqual(rm.readonly_problems(rw_sub), ["/repo/data : monté sans « ro » (rw,relatime)"])
+        deep = MOUNTS_OK + "/dev/sdb1 /repo/a/b/c ext4 rw 0 0\n"
+        self.assertEqual(len(rm.readonly_problems(deep)), 1)
+        spaced = MOUNTS_OK + "/dev/sdb1 /repo/a\\040b ext4 rw 0 0\n"
+        self.assertEqual(rm.readonly_problems(spaced), ["/repo/a b : monté sans « ro » (rw)"])
+        self.assertEqual(rm.readonly_problems(MOUNTS_OK + "/dev/sdb1 /repo/data ext4 ro 0 0\n"), [])
+        # hors de /repo : non concerné
+        self.assertEqual(rm.readonly_problems(MOUNTS_OK + "/dev/sdb1 /repository ext4 rw 0 0\n"), [])
+        self.assertEqual(rm.readonly_problems(MOUNTS_OK + "/dev/sdb1 /repo\\040x ext4 rw 0 0\n"), [])
+
+    def test_last_mount_wins(self):
+        over_rw = MOUNTS_OK + "/dev/sdb1 /repo btrfs rw 0 0\n"   # surmontage inscriptible
+        self.assertEqual(len(rm.readonly_problems(over_rw)), 1)
+        rw_then_ro = MOUNTS_OK.replace("/repo btrfs ro,", "/repo btrfs rw,") + "/dev/sdb1 /repo btrfs ro 0 0\n"
+        self.assertEqual(rm.readonly_problems(rw_then_ro), [])
 
     def test_parse_restic_version(self):
         self.assertEqual(rm.parse_restic_version("restic 0.19.1 compiled with go1.26.4 on linux/amd64\n"), "0.19.1")
@@ -438,6 +462,70 @@ class StateValidationTest(TrustedUser, unittest.TestCase):
         self.assertEqual(codes(f, "INFO"), [])
 
 
+class GateScriptTest(unittest.TestCase):
+    """La barrière shell/awk doit décider exactement comme readonly_problems(), avec dash/gawk
+    et avec busybox (interpréteur de l'image)."""
+
+    CASES = {
+        "ok": MOUNTS_OK,
+        "racine rw": MOUNTS_OK.replace("overlay / overlay ro,", "overlay / overlay rw,"),
+        "repo rw": MOUNTS_OK.replace("/repo btrfs ro,", "/repo btrfs rw,"),
+        "secret absent": "\n".join(l for l in MOUNTS_OK.splitlines() if "restic_password" not in l) + "\n",
+        "repo absent": "\n".join(l for l in MOUNTS_OK.splitlines() if " /repo " not in l) + "\n",
+        "sous-montage rw": MOUNTS_OK + "/dev/sdb1 /repo/data ext4 rw,relatime 0 0\n",
+        "sous-montage ro": MOUNTS_OK + "/dev/sdb1 /repo/data ext4 ro,relatime 0 0\n",
+        "sous-montage profond rw": MOUNTS_OK + "/dev/sdb1 /repo/a/b ext4 rw 0 0\n",
+        "sous-montage avec espace rw": MOUNTS_OK + "/dev/sdb1 /repo/a\\040b ext4 rw 0 0\n",
+        "voisin /repository rw": MOUNTS_OK + "/dev/sdb1 /repository ext4 rw 0 0\n",
+        "surmontage rw": MOUNTS_OK + "/dev/sdb1 /repo btrfs rw 0 0\n",
+        "rw puis ro": MOUNTS_OK.replace("/repo btrfs ro,", "/repo btrfs rw,") + "/dev/sdb1 /repo btrfs ro 0 0\n",
+        "faux ro (remount-ro)": MOUNTS_OK.replace("/repo btrfs ro,relatime", "/repo btrfs rw,errors=remount-ro"),
+        "vide": "",
+    }
+
+    def run_gate(self, shell, mounts_text):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        mounts = os.path.join(d, "mounts")
+        with open(mounts, "w") as f:
+            f.write(mounts_text)
+        script = rm.GATE_SCRIPT.replace("/proc/self/mounts", mounts).replace(
+            "exec /usr/bin/restic", "exec echo RESTIC_LANCE")
+        return subprocess.run(shell + ["-c", script, "restic-gate", "--no-lock", "version"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def check_shell(self, shell):
+        for name, text in self.CASES.items():
+            proc = self.run_gate(shell, text)
+            expected_ok = rm.readonly_problems(text) == []
+            if expected_ok:
+                self.assertEqual(proc.returncode, 0, (shell, name, proc.stderr))
+                self.assertEqual(proc.stdout.decode().strip(), "RESTIC_LANCE --no-lock version", (shell, name))
+            else:
+                self.assertEqual(proc.returncode, rm.GATE_EXIT, (shell, name))
+                self.assertIn(rm.GATE_MARKER, proc.stderr.decode(), (shell, name))
+                self.assertEqual(proc.stdout, b"", (shell, name))
+
+    def test_dash_gawk(self):
+        self.check_shell(["sh"])
+
+    def test_busybox(self):
+        bindir = busybox_shell()
+        if not bindir:
+            self.skipTest("busybox absent")
+        self.addCleanup(shutil.rmtree, bindir)
+        env_path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + env_path
+        self.addCleanup(os.environ.__setitem__, "PATH", env_path)
+        self.check_shell([os.path.join(bindir, "sh")])
+
+    def test_expected_verdicts(self):
+        refused = {n for n, t in self.CASES.items() if rm.readonly_problems(t)}
+        self.assertEqual(refused, {"racine rw", "repo rw", "secret absent", "repo absent", "sous-montage rw",
+                                   "sous-montage profond rw", "sous-montage avec espace rw", "surmontage rw",
+                                   "faux ro (remount-ro)", "vide"})
+
+
 class IsolatedModeTest(unittest.TestCase):
     """Le script doit refuser de démarrer sans « python3 -I », avant d'importer quoi que ce soit."""
 
@@ -557,29 +645,60 @@ class ConfigTest(unittest.TestCase):
 
 
 FAKE_DOCKER = r'''#!{python}
-import json, os, sys
+import json, os, subprocess, sys
 args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps(args) + "\n")
 if args[0] == "kill":
     sys.exit(0)
-image = args.index("{image}")
 with open(os.environ["FAKE_FIXTURES"]) as fx:
     fixtures = json.load(fx)
-if "--entrypoint" in args:
-    out = fixtures["mounts"]
-else:
-    sub = [a for a in args[image + 1:] if not a.startswith("-")][0]
-    out = fixtures.get(sub, "")
+entry = args[args.index("--entrypoint") + 1]
+if entry == "/bin/cat":
+    sys.stdout.write(fixtures["mounts"])
+    sys.exit(0)
+# /bin/sh -c <barrière> restic-gate <args restic> : la barrière réelle est exécutée,
+# avec les montages simulés du conteneur restic et un faux binaire restic.
+script = args[args.index("-c") + 1]
+rargs = args[args.index("restic-gate") + 1:]
+mounts = os.path.join(os.environ["FAKE_DIR"], "gate-mounts")
+with open(mounts, "w") as f:
+    f.write(fixtures.get("gate_mounts", fixtures["mounts"]))
+script = script.replace("/proc/self/mounts", mounts).replace(
+    "exec /usr/bin/restic", "exec %s %s" % (sys.executable, os.environ["FAKE_RESTIC"]))
+shell = json.loads(os.environ.get("FAKE_SH", '["sh"]'))
+proc = subprocess.run(shell + ["-c", script, "restic-gate"] + rargs)
+sys.exit(proc.returncode)
+'''
+
+FAKE_RESTIC = r'''import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_RESTIC_LOG"], "a") as f:
+    f.write(json.dumps(args) + "\n")
+with open(os.environ["FAKE_FIXTURES"]) as fx:
+    fixtures = json.load(fx)
+sub = [a for a in args if not a.startswith("-")][0]
+out = fixtures.get(sub, "")
 sys.stdout.write(out if isinstance(out, str) else json.dumps(out))
+code = fixtures.get("exits", {}).get(sub, 0)
+if code:
+    sys.stderr.write("erreur restic simulée\\n")
+sys.exit(code)
 '''
 
 
-MOUNTS_OK = """overlay / overlay ro,relatime,lowerdir=/x 0 0
-tmpfs /tmp tmpfs rw,nosuid,noexec,relatime,size=524288k 0 0
-/dev/mapper/vg1-volume_1 /repo btrfs ro,relatime,space_cache=v2 0 0
-/dev/mapper/vg1-volume_1 /run/secrets/restic_password btrfs ro,relatime 0 0
-"""
+def busybox_shell():
+    # Interpréteur identique à l'image (busybox sh + busybox awk), si disponible.
+    import shutil as sh
+    busybox = sh.which("busybox")
+    if not busybox:
+        return None
+    bindir = tempfile.mkdtemp()
+    for tool in ("sh", "awk"):
+        os.symlink(busybox, os.path.join(bindir, tool))
+    return bindir
+
+
 
 
 class EndToEndTest(TrustedUser, unittest.TestCase):
@@ -607,7 +726,13 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         os.chmod(docker, stat.S_IRWXU)
         self._orig = rm.DOCKER_BIN
         rm.DOCKER_BIN = docker
-        os.environ.update(FAKE_LOG=self.log, FAKE_FIXTURES=self.fixtures)
+        self.restic_log = os.path.join(self.tmp, "restic.log")
+        fake_restic = os.path.join(self.tmp, "fake_restic.py")
+        with open(fake_restic, "w") as f:
+            f.write(FAKE_RESTIC)
+        os.environ.update(FAKE_LOG=self.log, FAKE_FIXTURES=self.fixtures, FAKE_DIR=self.tmp,
+                          FAKE_RESTIC=fake_restic, FAKE_RESTIC_LOG=self.restic_log)
+        os.environ.pop("FAKE_SH", None)
         self.config = os.path.join(self.tmp, "config.json")
         c = cfg(repository=self.repo, password_file=self.secret, private_dir=self.private)
         with open(self.config, "w") as f:
@@ -616,11 +741,16 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
     def tearDown(self):
         rm.DOCKER_BIN = self._orig
 
-    def run_with(self, snapshots, forget, mounts=None, version="restic 0.19.1 compiled with go1.26.4 on linux/amd64"):
+    def run_with(self, snapshots, forget, mounts=None, version="restic 0.19.1 compiled with go1.26.4 on linux/amd64",
+                 gate_mounts=None, exits=None):
+        fixtures = {"version": version, "snapshots": snapshots, "list": "",
+                    "check": "no errors were found", "forget": forget,
+                    "mounts": MOUNTS_OK if mounts is None else mounts, "exits": exits or {}}
+        if gate_mounts is not None:
+            fixtures["gate_mounts"] = gate_mounts
         with open(self.fixtures, "w") as f:
-            json.dump({"version": version, "snapshots": snapshots, "list": "",
-                       "check": "no errors were found", "forget": forget,
-                       "mounts": MOUNTS_OK if mounts is None else mounts}, f)
+            json.dump(fixtures, f)
+        open(self.restic_log, "w").close()
         open(self.log, "w").close()
         code = rm.main(["--config", self.config, "--ignore-window"])
         with open(self.log) as f:
@@ -634,20 +764,25 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         forget = groups(core) + groups([s[-1]], paths=["/tmp/restic-test"])
         code, calls = self.run_with(s, forget)
         self.assertEqual(code, rm.EXIT_OK)
-        self.assertIn("--entrypoint", calls[0])  # montages vérifiés avant tout appel à restic
+        self.assertEqual(calls[0][calls[0].index("--entrypoint") + 1], "/bin/cat")  # pré-contrôle d'abord
         subs = []
         for call in calls:
             joined = " ".join(call)
             self.assertIn("%s:/repo:ro" % self.repo, joined)
             self.assertIn("--read-only", call)
             self.assertNotIn("prune", call)
-            if "--entrypoint" in call:
+            if call[call.index("--entrypoint") + 1] == "/bin/cat":
                 continue
-            self.assertIn("--no-lock", call)
-            subs.append([a for a in call[call.index(IMAGE) + 1:] if not a.startswith("-")][0])
-            if "forget" in call:
-                self.assertIn("--dry-run", call)
+            # chaque conteneur restic passe par la barrière, puis restic
+            self.assertEqual(call[call.index(IMAGE):call.index("restic-gate") + 1],
+                             [IMAGE, "-c", rm.GATE_SCRIPT, "restic-gate"])
+            rargs = call[call.index("restic-gate") + 1:]
+            self.assertIn("--no-lock", rargs)
+            subs.append([a for a in rargs if not a.startswith("-")][0])
+            if "forget" in rargs:
+                self.assertIn("--dry-run", rargs)
         self.assertEqual(subs, ["version", "snapshots", "list", "check", "forget"])
+        self.assertEqual([[a for a in c if not a.startswith("-")][0] for c in self.restic_calls()], subs)
         self.assertTrue(os.path.exists(os.path.join(self.private, "state", "state.json")))
 
         forged = snap("b", now - dt.timedelta(days=4))
@@ -668,6 +803,10 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
             code, calls = self.run_with([], [])
         self.assertEqual(code, rm.EXIT_LOCKED)
         self.assertEqual(calls, [])
+
+    def restic_calls(self):
+        with open(self.restic_log) as f:
+            return [json.loads(line) for line in f]
 
     def state_path(self):
         return os.path.join(self.private, "state", "state.json")
@@ -717,14 +856,53 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         code, calls = self.run_with([], [], mounts=rw)
         self.assertEqual(code, rm.EXIT_CONFIG)
         self.assertEqual(len(calls), 1)  # aucun appel à restic après l'échec du contrôle
-        self.assertIn("--entrypoint", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--entrypoint") + 1], "/bin/cat")
+        self.assertEqual(self.restic_calls(), [])
+
+    def test_gate_refuses_writable_submount_even_if_precheck_passed(self):
+        # Le pré-contrôle voit des montages sûrs, mais le conteneur restic a un sous-montage
+        # inscriptible : la barrière l'arrête avant restic.
+        gate = MOUNTS_OK + "/dev/sdb1 /repo/data ext4 rw,relatime 0 0\n"
+        for shell in self.shells():
+            os.environ["FAKE_SH"] = json.dumps(shell)
+            code, calls = self.run_with([], [], gate_mounts=gate)
+            self.assertEqual(code, rm.EXIT_CONFIG, shell)
+            self.assertEqual(self.restic_calls(), [], shell)
+            self.assertEqual(len(calls), 2, shell)  # pré-contrôle + premier conteneur restic refusé
+            with open(self.latest_report()) as f:
+                report = json.load(f)
+            self.assertEqual(report["status"], "unsafe_mounts")
+            self.assertTrue(any("/repo/data" in line for line in report["log"]), shell)
+
+    def test_gate_refuses_missing_secret_mount(self):
+        gate = "\n".join(l for l in MOUNTS_OK.splitlines() if "restic_password" not in l) + "\n"
+        code, _ = self.run_with([], [], gate_mounts=gate)
+        self.assertEqual(code, rm.EXIT_CONFIG)
+        self.assertEqual(self.restic_calls(), [])
+
+    def test_restic_exit_97_is_not_mistaken_for_gate(self):
+        # restic qui sort lui-même en 97 (sans le marqueur de la barrière) reste une erreur restic.
+        code, _ = self.run_with([], [], exits={"snapshots": 97})
+        self.assertEqual(code, rm.EXIT_RESTIC)
+        with open(self.latest_report()) as f:
+            self.assertEqual(json.load(f)["status"], "restic_error")
+
+    def shells(self):
+        shells = [["sh"]]
+        bindir = busybox_shell()
+        if bindir:
+            self.addCleanup(shutil.rmtree, bindir)
+            shells.append([os.path.join(bindir, "sh")])
+        return shells
+
+    def latest_report(self):
+        logs = os.path.join(self.private, "logs")
+        return os.path.join(logs, sorted(r for r in os.listdir(logs) if r.startswith("report-"))[-1])
 
     def test_unexpected_restic_version_aborts(self):
         code, calls = self.run_with([], [], version="restic 0.18.0 compiled with go1.24 on linux/amd64")
         self.assertEqual(code, rm.EXIT_RESTIC)
-        subs = [c for c in calls if "--entrypoint" not in c]
-        self.assertEqual(len(subs), 1)  # seulement « restic version », pas de lecture des snapshots
-        self.assertIn("version", subs[0])
+        self.assertEqual(self.restic_calls(), [["--no-lock", "--no-cache", "version"]])  # rien d'autre
 
     def test_refuses_non_dry_run_config(self):
         with open(self.config) as f:

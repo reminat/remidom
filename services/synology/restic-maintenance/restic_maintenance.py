@@ -71,6 +71,10 @@ class StepTimeout(Exception):
     pass
 
 
+class UnsafeMounts(Exception):
+    pass
+
+
 # --------------------------------------------------------------------------- config
 
 def load_config(path):
@@ -422,8 +426,37 @@ def docker_base(cfg, container_name):
     ]
 
 
+# Barrière exécutée dans chaque conteneur restic, avant restic : lit les montages de CE
+# conteneur et refuse (code GATE_EXIT) si /, /repo, le secret ou tout sous-montage de /repo
+# n'est pas en lecture seule. Même règle que readonly_problems() ; busybox sh/awk de l'image.
+GATE_EXIT = 97
+GATE_MARKER = "RESTIC_GATE_REFUSED"
+GATE_AWK = r"""
+{
+  mp = $2
+  if (mp == "/" || mp == repo || mp == secret || index(mp, repo "/") == 1) {
+    n = split($4, opts, ","); ro = 0
+    for (i = 1; i <= n; i++) if (opts[i] == "ro") ro = 1
+    state[mp] = ro
+  }
+}
+END {
+  bad = 0
+  if (!("/" in state) || !(repo in state) || !(secret in state)) { print "montage attendu absent" > "/dev/stderr"; bad = 1 }
+  for (m in state) if (!state[m]) { print "montage sans ro : " m > "/dev/stderr"; bad = 1 }
+  exit bad
+}
+"""
+GATE_SCRIPT = (
+    "awk -v repo=%s -v secret=%s '%s' /proc/self/mounts || { echo %s >&2; exit %d; }\n"
+    "exec /usr/bin/restic \"$@\"\n" % (CONTAINER_REPO, CONTAINER_PASSWORD, GATE_AWK, GATE_MARKER, GATE_EXIT)
+)
+
+
 def docker_command(cfg, container_name, restic_args):
-    return docker_base(cfg, container_name) + [cfg["image"]] + restic_args
+    """Conteneur restic : la barrière de montages s'exécute d'abord, puis « exec restic »."""
+    return docker_base(cfg, container_name) + ["--entrypoint", "/bin/sh", cfg["image"],
+                                               "-c", GATE_SCRIPT, "restic-gate"] + restic_args
 
 
 def mounts_command(cfg, container_name):
@@ -432,18 +465,21 @@ def mounts_command(cfg, container_name):
 
 
 def readonly_problems(mounts_text):
-    """Vérifie, dans le conteneur réel, que la racine, le repository et le secret sont en lecture seule."""
+    """Exige l'option ro sur /, /repo, le secret et tout sous-montage de /repo.
+    Pour un point de montage répété, seule la dernière ligne (le montage visible) compte."""
     options = {}
     for line in mounts_text.splitlines():
         fields = line.split()
-        if len(fields) >= 4:
-            options[fields[1]] = fields[3].split(",")
-    problems = []
-    for mountpoint in ("/", CONTAINER_REPO, CONTAINER_PASSWORD):
-        if mountpoint not in options:
-            problems.append("%s : point de montage absent" % mountpoint)
-        elif "ro" not in options[mountpoint]:
-            problems.append("%s : monté sans « ro » (%s)" % (mountpoint, ",".join(options[mountpoint])))
+        if len(fields) < 4:
+            continue
+        mp = fields[1]
+        if mp in ("/", CONTAINER_REPO, CONTAINER_PASSWORD) or mp.startswith(CONTAINER_REPO + "/"):
+            options[mp] = fields[3].split(",")
+    problems = ["%s : point de montage absent" % mp
+                for mp in ("/", CONTAINER_REPO, CONTAINER_PASSWORD) if mp not in options]
+    for mp in sorted(options):
+        if "ro" not in options[mp]:
+            problems.append("%s : monté sans « ro » (%s)" % (unescape_mount(mp), ",".join(options[mp])))
     return problems
 
 
@@ -473,6 +509,8 @@ class Runner:
             subprocess.run([DOCKER_BIN, "kill", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             raise StepTimeout("délai global dépassé pendant « %s »" % label)
         stderr = proc.stderr.decode("utf-8", "replace").strip()
+        if proc.returncode == GATE_EXIT and GATE_MARKER in stderr:
+            raise UnsafeMounts("%s : barrière du conteneur : %s" % (label, stderr[-500:]))
         if proc.returncode != 0:
             raise StepError("%s a échoué (code %d) : %s" % (label, proc.returncode, stderr[-2000:]))
         return proc.stdout.decode("utf-8", "replace")
@@ -748,6 +786,9 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
             runner.restic("check")
             log("check : OK")
         forget_groups = parse_json_output(runner.restic("forget", *forget_args(cfg["retention"]))) or []
+    except UnsafeMounts as exc:
+        log(str(exc))
+        return finish("unsafe_mounts", EXIT_CONFIG)
     except StepTimeout as exc:
         log(str(exc))
         return finish("timeout", EXIT_TIMEOUT)
