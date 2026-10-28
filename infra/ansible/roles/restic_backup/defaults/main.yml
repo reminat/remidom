@@ -1,0 +1,29 @@
+# Sauvegarde Restic d'un hôte Docker vers le REST Server du NAS (repository append-only).
+# Désactivée par défaut : activer par environnement dans group_vars/docker_hosts.yml.
+restic_backup_enabled: false
+# Timer quotidien : à n'activer qu'après une première sauvegarde et un test de restauration.
+restic_backup_timer_enabled: false
+restic_backup_on_calendar: "*-*-* 02:30:00"
+
+restic_backup_name: core
+restic_backup_host: "{{ inventory_hostname }}"
+restic_backup_paths:
+  - /srv/docker/core
+restic_backup_excludes:
+  - /srv/docker/core/mosquitto/log
+restic_backup_tags: []
+
+# Services arrêtés pendant la sauvegarde (cohérence des bases : Mosquitto, Zigbee2MQTT,
+# Node-RED, Portainer/BoltDB), puis redémarrés même en cas d'échec. Vide = aucun arrêt.
+restic_backup_compose_dir: /srv/docker/core
+restic_backup_stop_services: []
+
+# Même image que la maintenance du NAS (version et digest à changer ensemble).
+restic_backup_image: "restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
+
+# Secrets injectés par deploy.sh depuis Bitwarden Secrets Manager, jamais stockés dans le dépôt.
+restic_backup_repository: "{{ lookup('env', 'RESTIC_REPOSITORY_URL') }}"
+restic_backup_password: "{{ lookup('env', 'RESTIC_REPO_PASSWORD') }}"
+
+restic_backup_config_dir: /etc/restic
+restic_backup_cache_dir: /var/cache/restic

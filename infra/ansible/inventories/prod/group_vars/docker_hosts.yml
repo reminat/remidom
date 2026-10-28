@@ -25,6 +25,13 @@ code_url: "http://10.10.20.10:8080"
 proxmox_url: "https://10.10.20.2:8006"
 cf_api_token: "{{ lookup('env', 'CF_DNS_API_TOKEN') }}"
 
+# Sauvegarde Restic de /srv/docker/core vers le REST Server du NAS (repository docker-prod).
+# Secrets : restic_repository_prod et restic_password_prod (Bitwarden Secrets Manager).
+restic_backup_enabled: true
+restic_backup_timer_enabled: false   # à activer après la première sauvegarde et le test de restauration
+restic_backup_tags: [core, prod]
+restic_backup_stop_services: [zigbee2mqtt, nodered, portainer, mosquitto]
+
 # GitHub Actions self-hosted runner
 github_runner_repo: reminat/remidom
 github_runner_name: docker-prod

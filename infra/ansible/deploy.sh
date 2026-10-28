@@ -83,10 +83,21 @@ fetch_secret_value() {
   bws secret get "$id" | jq -r '.value'
 }
 
+# Secret facultatif : vide s'il n'existe pas (le rôle concerné vérifie sa présence s'il est activé).
+fetch_optional_secret_value() {
+  local id
+  id="$(resolve_secret_id "$1")"
+  if [ -n "${id:-}" ]; then
+    bws secret get "$id" | jq -r '.value'
+  fi
+}
+
 export MQTT_PASSWORD="$(fetch_secret_value "$MQTT_SECRET_REF")"
 Z2M_NETWORK_KEY_SECRET_REF="${Z2M_NETWORK_KEY_SECRET_REF:-zigbee_network_key_${ENV}}"
 export Z2M_NETWORK_KEY="$(fetch_secret_value "$Z2M_NETWORK_KEY_SECRET_REF")"
 export CF_DNS_API_TOKEN="$(fetch_secret_value "$CF_DNS_API_TOKEN_SECRET_REF")"
+export RESTIC_REPOSITORY_URL="$(fetch_optional_secret_value "${RESTIC_REPOSITORY_SECRET_REF:-restic_repository_${ENV}}")"
+export RESTIC_REPO_PASSWORD="$(fetch_optional_secret_value "${RESTIC_PASSWORD_SECRET_REF:-restic_password_${ENV}}")"
 
 cd "$SCRIPT_DIR"
 ansible-playbook -i "${INVENTORY}" playbooks/docker-host.yml "$@"

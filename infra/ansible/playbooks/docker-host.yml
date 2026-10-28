@@ -5,5 +5,7 @@
     - common
     - docker
     - compose_deploy
+    - role: restic_backup
+      tags: restic_backup
     - role: github_runner
       tags: github_runner

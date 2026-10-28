@@ -1,0 +1,18 @@
+# Géré par Ansible (rôle restic_backup).
+[Unit]
+Description=Sauvegarde Restic « {{ restic_backup_name }} » ({{ restic_backup_paths | join(', ') }})
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+{% if restic_backup_stop_services %}
+# Arrêt des services à données vivantes pendant la copie, redémarrage même en cas d'échec.
+ExecStartPre=/usr/bin/docker compose --project-directory {{ restic_backup_compose_dir }} stop {{ restic_backup_stop_services | join(' ') }}
+{% endif %}
+ExecStart=/usr/local/sbin/restic-{{ restic_backup_name }} backup --host {{ restic_backup_host }}{% for tag in restic_backup_tags %} --tag {{ tag }}{% endfor %}{% for path in restic_backup_excludes %} --exclude {{ path }}{% endfor %} {{ restic_backup_paths | join(' ') }}
+{% if restic_backup_stop_services %}
+ExecStopPost=/usr/bin/docker compose --project-directory {{ restic_backup_compose_dir }} start {{ restic_backup_stop_services | join(' ') }}
+{% endif %}
+TimeoutStartSec=2h
