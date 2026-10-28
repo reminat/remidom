@@ -50,7 +50,7 @@
       - restic_maintenance_dir.stat.isdir
       - restic_maintenance_dir.stat.writeable
     fail_msg: >-
-      Prérequis manquant pour {{ ansible_user }} : /usr/local/bin/docker doit exister et
+      Prérequis manquant pour {{ ansible_user | default("le compte de connexion") }} : /usr/local/bin/docker doit exister et
       {{ restic_maintenance_deploy_dir }} doit être créé au préalable par un administrateur
       et accessible en écriture (voir README, « Préparation du NAS »).
     quiet: true
