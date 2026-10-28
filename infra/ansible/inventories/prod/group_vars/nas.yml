@@ -1,0 +1,14 @@
+# Connexion au NAS : playbooks/group_vars/nas.yml (commune aux environnements).
+
+# Maintenance Restic du repository docker-prod (dry-run uniquement : aucune suppression).
+# Même politique de rétention et mêmes seuils que le test (valeurs par défaut du rôle).
+restic_maintenance_name: docker-prod
+restic_maintenance_repository: /volume1/Restic/docker-prod
+restic_maintenance_password_file: /volume1/docker/restic-maintenance/secrets/restic_password_prod
+
+# Groupe attendu : la sauvegarde de docker-prod-01 (rôle restic_backup, tags core,prod).
+restic_maintenance_groups:
+  - name: core
+    host: docker-prod-01
+    paths: [/srv/docker/core]
+    tags: [core, prod]

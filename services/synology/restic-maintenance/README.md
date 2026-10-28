@@ -36,7 +36,9 @@ processus `ContainerManager` : ils ne sont jamais exécutés directement (voir �
 lancement manuel »).
 
 Configuration : `infra/ansible/roles/restic_maintenance/defaults/main.yml` (valeurs communes)
-et `infra/ansible/inventories/<env>/group_vars/nas.yml` (repository, secret, groupes
+et `infra/ansible/inventories/<env>/group_vars/nas.yml` (repository, secret, groupes ; un
+fichier par environnement : `docker-test`, `docker-prod`). La connexion au NAS, identique
+pour tous, est dans `infra/ansible/playbooks/group_vars/nas.yml`
 attendus).
 
 ### Groupes attendus
@@ -207,7 +209,7 @@ Ansible n'utilise pas `sudo` : ces étapes sont manuelles. Ne modifier ni les AC
      `ls -l /var/services/homes/remi/.ssh/authorized_keys` (attendu : `.ssh` 0700,
      `authorized_keys` 0600) ;
    - détruire la copie locale de la clé privée une fois le secret créé.
-4. **Clé d'hôte** : `infra/ansible/inventories/test/nas_known_hosts` contient la clé
+4. **Clé d'hôte** : `infra/ansible/nas_known_hosts` (commun aux environnements) contient la clé
    d'hôte ED25519 du NAS ; Ansible refuse la connexion si elle ne correspond pas
    (`ansible_host_key_checking: true`, uniquement pour le NAS). Empreinte comparée sur le
    NAS le 28/10/2026 (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`). Si DSM
@@ -216,7 +218,7 @@ Ansible n'utilise pas `sudo` : ces étapes sont manuelles. Ne modifier ni les AC
    `ls -l /usr/local/bin/docker`, `sudo docker version --format '{{.Server.Version}}'`
    (20.10 minimum pour `--pull never`).
 6. **Transfert de fichiers** : Ansible transfère les fichiers en mode `piped`
-   (`ansible_ssh_transfer_method: piped` dans `group_vars/nas.yml`) : flux SSH avec `dd`
+   (`ansible_ssh_transfer_method: piped` dans `playbooks/group_vars/nas.yml`) : flux SSH avec `dd`
    de chaque côté, sans SFTP ni SCP. Prérequis : `dd` présent sur le runner et sur le NAS,
    et `piped` proposé par la version d'ansible-core du runner (2.17.14 constatée), ce que
    `ansible-doc -t connection ssh` confirme. Constaté le 28/10/2026 : `/usr/bin/dd`
@@ -493,6 +495,71 @@ exit $?
 Les empreintes stockées dans la tâche sont modifiables par un administrateur dans DSM :
 après chaque déploiement qui modifie ces fichiers, les mettre à jour à partir des
 références du workflow. Mêmes limites que ci-dessus.
+
+## Repository `docker-prod`
+
+Même script, même rôle, même procédure que `docker-test` ; seules les valeurs de
+`inventories/prod/group_vars/nas.yml` changent :
+
+| Élément | `docker-test` | `docker-prod` |
+|---|---|---|
+| Repository (local au NAS) | `/volume1/Restic/docker-test` | `/volume1/Restic/docker-prod` |
+| Secret sur le NAS (root, 0600) | `secrets/restic_password_test` | `secrets/restic_password_prod` (copie de `restic_password_prod`, Bitwarden) |
+| Fichiers déployés | `/volume1/docker/restic-maintenance/docker-test/` | `/volume1/docker/restic-maintenance/docker-prod/` |
+| Stockage privé | `/root/restic-maintenance/docker-test` | `/root/restic-maintenance/docker-prod` |
+| Groupes attendus | `core` (`docker-test-01`, tags `core,test`) + `validation` figé | `core` (`docker-prod-01`, `/srv/docker/core`, tags `core,prod`) |
+| Rétention évaluée, seuils, fenêtre, délai | valeurs par défaut du rôle | identiques (aucune politique propre à la prod) |
+| Mode | dry-run uniquement | dry-run uniquement : aucun `forget` réel, aucun `prune` |
+| Workflow | environnement GitHub `test` (runner `docker-test-01`) | environnement GitHub `prod` (runner `docker-prod`, approbation requise) |
+
+Le contrôle `stale` (aucun snapshot de moins de 48 h) signale aussi l'arrêt de la
+sauvegarde quotidienne de `docker-prod-01` (timer 02:30), qui n'a pas de notification
+propre.
+
+### Prérequis (manuels, une fois)
+
+1. **Clé de déploiement pour l'environnement GitHub `prod`** : une paire dédiée, la clé
+   privée dans le secret `NAS_SSH_KEY` de l'environnement `prod`, la clé publique dans
+   `authorized_keys` de `remi` sur le NAS, restreinte au runner de prod :
+   `from="10.10.20.52",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty`.
+2. **Dossier de déploiement** : `sudo mkdir /volume1/docker/restic-maintenance/docker-prod`,
+   inscriptible par `remi` par héritage des ACL (comme `docker-test`).
+3. **Secret sur le NAS**, sans l'afficher : coller la valeur de `restic_password_prod`
+   (copiée depuis Bitwarden) puis Ctrl-D :
+   ```sh
+   sudo sh -c 'umask 077; cat > /volume1/docker/restic-maintenance/secrets/restic_password_prod'
+   sudo stat -c '%a %U:%G %s octets %n' /volume1/docker/restic-maintenance/secrets/restic_password_prod
+   ```
+   Un saut de ligne final est sans effet (restic l'ignore).
+4. **Lecture du repository avec les restrictions du script** : la commande de l'étape 8
+   de « Préparation du NAS », avec `docker-prod` et `restic_password_prod`.
+
+### Déploiement et premier lancement
+
+1. Workflow **NAS — Restic maintenance**, environnement `prod`, `apply` décoché
+   (`--check --diff`), puis coché ; empreintes de référence affichées.
+2. Premier lancement manuel avec le bloc de « Premier lancement manuel », en remplaçant
+   `docker-test` par `docker-prod` dans `SRC` et les empreintes par celles du workflow
+   `prod`, avec `--init-baseline` ; validation de la référence (identifiants comparés à
+   `restic snapshots`).
+3. Tâche DSM `restic-maintenance-docker-prod (dry-run)`, même script que pour
+   `docker-test` (chemins `docker-prod`), créée **désactivée**, puis activée après un
+   lancement manuel concluant.
+
+### Planification proposée
+
+| Heure | Tâche | Repository |
+|---|---|---|
+| 02:30 | sauvegarde `restic-backup-core.timer` (docker-prod-01) | `docker-prod` |
+| 03:02 | sauvegarde de `docker-test-01` | `docker-test` |
+| 03:30 | maintenance dry-run (DSM, proposée, pas encore créée) | `docker-test` |
+| **03:45** | **maintenance dry-run (DSM, proposée)** | `docker-prod` |
+| 05:00 | snapshots Btrfs | — |
+| 06:00 | Hyper Backup | — |
+
+03:45 laisse plus d'une heure après la sauvegarde de prod et reste dans la fenêtre
+`01:00–04:30` ; les deux maintenances portent sur des repositories distincts et ont
+chacune leur verrou.
 
 ## Risques
 
