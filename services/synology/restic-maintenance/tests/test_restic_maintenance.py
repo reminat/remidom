@@ -196,16 +196,19 @@ class AnalyzeTest(unittest.TestCase):
         f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s), NOW, state)
         self.assertEqual(codes(f), [])
 
-    def test_removal_thresholds(self):
-        s = daily(40)
-        f, summary = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s[:25], s[25:]), NOW, None)
-        self.assertEqual(codes(f), ["remove_count", "remove_percent"])
+    def test_removal_thresholds_are_warnings_in_dry_run(self):
+        # 15 candidats anciens (45 à 59 jours) sur 60 : au-delà des seuils (10, 20 %), sans anomalie en dry-run.
+        s = daily(60)
+        f, summary = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s[:45], s[45:]), NOW, None)
+        self.assertEqual(codes(f), [])
+        self.assertEqual(codes(f, "WARN"), ["remove_count", "remove_percent"])
         self.assertEqual(summary["would_remove"], 15)
 
     def test_min_keep_per_group(self):
-        s = daily(10)
-        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s[:5], s[5:]), NOW, None)
-        self.assertIn("min_keep", codes(f))
+        recent = daily(5)
+        old = [snap("%064x" % (700 + i), NOW - dt.timedelta(days=35 + i)) for i in range(5)]
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), recent + old, groups(recent, old), NOW, None)
+        self.assertEqual(codes(f), ["min_keep"])
 
     def test_validation_group_kept_alone_is_not_min_keep(self):
         # Le groupe de validation ne contient qu'un snapshot, conservé : pas d'alerte min_keep.
@@ -217,6 +220,148 @@ class AnalyzeTest(unittest.TestCase):
         s = daily(10)
         f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s[:8]), NOW, None)
         self.assertIn("forget_mismatch", codes(f))
+
+
+def at(sid, when, paths=None, tags=None):
+    """Snapshot dont l'horodatage garde son décalage d'origine (comme dans le repository)."""
+    return {"id": sid, "time": when, "hostname": HOST, "paths": paths or PATHS, "tags": TAGS if tags is None else tags}
+
+
+def hexid(label):
+    import hashlib
+    return hashlib.sha256(label.encode()).hexdigest()
+
+
+def paris_0302(day):
+    """Sauvegarde planifiée à 03:02, heure de Paris (CEST +02:00 jusqu'au 25/10/2026, puis CET +01:00)."""
+    offset = "+01:00" if day >= dt.date(2026, 10, 25) else "+02:00"
+    return "%sT03:02:00.123456789%s" % (day.isoformat(), offset)
+
+
+def observed_repository(manual=True):
+    """Modèle du repository docker-test lors des deux dry-runs du 28/10/2026 : sauvegardes quotidiennes
+    core du 20/09 au 28/10 (39) + sauvegarde manuelle 2d8aab12 (second dry-run) + snapshot de validation.
+    Candidats observés : core du 21 au 26/09 et du 28/09 ; tous les autres sont conservés."""
+    days = [dt.date(2026, 9, 20) + dt.timedelta(days=i) for i in range(39)]
+    core = [at(hexid(d.isoformat()), paris_0302(d)) for d in days]
+    if manual:
+        core.append(at("2d8aab12" + hexid("manuel")[8:], "2026-10-28T12:41:07.5+01:00"))
+    removed_days = {dt.date(2026, 9, n) for n in (21, 22, 23, 24, 25, 26, 28)}
+    remove = [s for s, d in zip(core, days) if d in removed_days]
+    keep = [s for s in core if s not in remove]
+    valid = at(VALIDATION_ID, "2026-09-12T18:04:00+02:00", paths=["/tmp/restic-test"], tags=["validation"])
+    forget = [{"host": HOST, "paths": PATHS, "tags": None, "keep": keep, "remove": remove},
+              {"host": HOST, "paths": ["/tmp/restic-test"], "tags": None, "keep": [valid], "remove": []}]
+    return core + [valid], forget
+
+
+def utc(text):
+    return rm.parse_time_with_offset(text).astimezone(dt.timezone.utc)
+
+
+class KeepWithinGuardTest(unittest.TestCase):
+    def group(self, keep, remove):
+        return [{"host": HOST, "paths": PATHS, "keep": keep, "remove": remove}]
+
+    def young(self, keep, remove, now, within="30d"):
+        return [f["message"][:8] for f in rm.young_removals(self.group(keep, remove), within, utc(now))]
+
+    def test_observed_candidates_second_run(self):
+        snaps, forget = observed_repository(manual=True)
+        now = utc("2026-10-28T12:50:00+01:00")
+        self.assertEqual(rm.young_removals(forget, "30d", now), [])
+        removed = sorted(s["time"][:10] for g in forget for s in g["remove"])
+        self.assertEqual(removed, ["2026-09-%02d" % d for d in (21, 22, 23, 24, 25, 26, 28)])
+        # dans analyze aussi : aucune anomalie due aux candidats
+        f, summary = rm.analyze(cfg(), snaps, forget, now, None, policy_now=now)
+        self.assertNotIn("young_removal", codes(f))
+        self.assertEqual((summary["would_keep"], summary["would_remove"]), (34, 7))
+
+    def test_observed_candidates_first_run(self):
+        # Sans la sauvegarde manuelle : référence = 28/10 03:02+01:00 = 02:02Z ; limite = 28/09 03:02+01:00 = 02:02Z.
+        # Le candidat du 28/09 (03:02+02:00 = 01:02Z) est antérieur d'une heure : suppression conforme.
+        snaps, forget = observed_repository(manual=False)
+        self.assertEqual(rm.young_removals(forget, "30d", utc("2026-10-28T03:30:00+01:00")), [])
+
+    def test_29_september_would_be_flagged(self):
+        snaps, forget = observed_repository(manual=True)
+        sept29 = [s for s in forget[0]["keep"] if s["time"].startswith("2026-09-29")]
+        forget[0]["remove"] = forget[0]["remove"] + sept29
+        forget[0]["keep"] = [s for s in forget[0]["keep"] if s not in sept29]
+        found = rm.young_removals(forget, "30d", utc("2026-10-28T12:50:00+01:00"))
+        self.assertEqual([f["code"] for f in found], ["young_removal"])
+        self.assertIn("2026-09-29", found[0]["message"])
+
+    def test_offsets_are_compared_as_instants(self):
+        # Référence 28/10 03:02+01:00 (02:02Z) ; limite 28/09 02:02Z. Un candidat 28/09 03:30+02:00 (01:30Z)
+        # précède la limite : conforme, alors qu'une comparaison d'heures locales (03:30 > 03:02) le signalerait.
+        keep = [at("a" * 64, "2026-10-28T03:02:00+01:00")]
+        self.assertEqual(self.young(keep, [at("b" * 64, "2026-09-28T03:30:00+02:00")], "2026-10-28T04:00:00+01:00"), [])
+        self.assertEqual(self.young(keep, [at("c" * 64, "2026-09-28T02:05:00Z")], "2026-10-28T04:00:00+01:00"), ["c" * 8])
+
+    def test_exact_cutoff_is_not_kept(self):
+        keep = [at("a" * 64, "2026-10-28T03:02:00+01:00")]
+        now = "2026-10-28T04:00:00+01:00"
+        self.assertEqual(self.young(keep, [at("b" * 64, "2026-09-28T03:02:00+01:00")], now), [])   # = limite
+        self.assertEqual(self.young(keep, [at("c" * 64, "2026-09-28T03:02:01+01:00")], now), ["c" * 8])
+
+    def test_group_with_old_latest(self):
+        # Sauvegardes arrêtées depuis 60 jours : la limite suit le dernier snapshot du groupe, pas l'heure actuelle.
+        keep = [at("a" * 64, "2026-08-29T03:02:00+02:00")]
+        now = "2026-10-28T12:00:00+01:00"
+        self.assertEqual(self.young(keep, [at("b" * 64, "2026-07-20T03:02:00+02:00")], now), [])
+        self.assertEqual(self.young(keep, [at("c" * 64, "2026-08-10T03:02:00+02:00")], now), ["c" * 8])
+
+    def test_future_snapshots_ignored_for_latest(self):
+        keep = [at("a" * 64, "2026-10-28T03:02:00+01:00"), at("f" * 64, "2030-01-01T00:00:00Z")]
+        remove = [at("b" * 64, "2026-09-20T03:02:00+02:00")]
+        self.assertEqual(self.young(keep, remove, "2026-10-28T12:00:00+01:00"), [])
+
+    def test_no_past_snapshot_means_any_removal_is_flagged(self):
+        keep = [at("f" * 64, "2030-01-01T00:00:00Z")]
+        self.assertEqual(self.young(keep, [at("b" * 64, "2026-01-01T00:00:00Z")], "2026-10-28T12:00:00+01:00"), ["b" * 8])
+
+    def test_snapshot_at_policy_now_is_not_reference(self):
+        # restic : référence strictement antérieure à son heure d'exécution
+        keep = [at("a" * 64, "2026-10-28T12:00:00+01:00"), at("d" * 64, "2026-10-01T12:00:00+02:00")]
+        remove = [at("b" * 64, "2026-09-15T12:00:00+02:00")]
+        self.assertEqual(self.young(keep, remove, "2026-10-28T12:00:00+01:00"), ["b" * 8])
+        self.assertEqual(self.young(keep, remove, "2026-10-28T12:00:01+01:00"), [])
+
+    def test_months_and_hours(self):
+        keep = [at("a" * 64, "2026-03-31T10:00:00+02:00")]
+        now = "2026-04-01T00:00:00+02:00"
+        # Go AddDate : 31/03 - 1 mois = 31/02, normalisé en 03/03
+        self.assertEqual(self.young(keep, [at("b" * 64, "2026-03-03T10:00:00+02:00")], now, "1m"), [])
+        self.assertEqual(self.young(keep, [at("c" * 64, "2026-03-03T10:00:01+02:00")], now, "1m"), ["c" * 8])
+        keep = [at("a" * 64, "2026-10-28T12:00:00+01:00")]
+        now = "2026-10-28T13:00:00+01:00"
+        self.assertEqual(self.young(keep, [at("b" * 64, "2026-10-27T00:00:00+01:00")], now, "1d12h"), [])
+        self.assertEqual(self.young(keep, [at("c" * 64, "2026-10-27T00:00:01+01:00")], now, "1d12h"), ["c" * 8])
+
+    def test_go_add_date(self):
+        def add(text, y, m, d):
+            return rm.go_add_date(dt.datetime.fromisoformat(text), y, m, d).isoformat()
+        self.assertEqual(add("2026-03-31T10:00:00+02:00", 0, -1, 0), "2026-03-03T10:00:00+02:00")
+        self.assertEqual(add("2024-02-29T00:00:00+00:00", 1, 0, 0), "2025-03-01T00:00:00+00:00")
+        self.assertEqual(add("2026-01-31T00:00:00+01:00", 0, 1, 0), "2026-03-03T00:00:00+01:00")
+        self.assertEqual(add("2026-01-05T08:00:00+01:00", 0, 0, -30), "2025-12-06T08:00:00+01:00")
+        self.assertEqual(add("2026-10-28T03:02:00+01:00", 0, 0, -30), "2026-09-28T03:02:00+01:00")
+
+    def test_zero_duration_disables_guard(self):
+        keep = [at("a" * 64, "2026-10-28T03:02:00+01:00")]
+        self.assertEqual(self.young(keep, [at("b" * 64, "2026-10-27T03:02:00+01:00")], "2026-10-28T04:00:00+01:00", "0d"), [])
+
+    def test_invalid_time_in_forget_output(self):
+        found = rm.young_removals(self.group([], [{"id": "b" * 64, "time": "hier"}]), "30d", utc("2026-10-28T04:00:00+01:00"))
+        self.assertEqual([f["code"] for f in found], ["forget_time_invalid"])
+
+    def test_parse_duration(self):
+        self.assertEqual(rm.parse_duration("1y6m"), {"y": 1, "m": 6, "d": 0, "h": 0})
+        self.assertEqual(rm.parse_duration("1d12h"), {"y": 0, "m": 0, "d": 1, "h": 12})
+        for bad in ("1d2d", "30", "d", "30x", "", "30d ", "-30d", 30):
+            with self.assertRaises(ValueError, msg=bad):
+                rm.parse_duration(bad)
 
 
 class SafetyTest(unittest.TestCase):
@@ -618,7 +763,8 @@ class ConfigTest(unittest.TestCase):
                dict(base, keep_within="-1d"), dict(base, keep_within=""), dict(base, keep_within="30"),
                dict(base, keep_within=30), dict(base, keep_daily="14"), dict(base, keep_daily="--unsafe-allow-remove-all"),
                dict(base, keep_daily=True), dict(base, keep_daily=-1), dict(base, keep_daily=1.5),
-               dict(base, keep_weekly=10001), dict(base, keep_last=3), {k: v for k, v in base.items() if k != "keep_monthly"}]
+               dict(base, keep_weekly=10001), dict(base, keep_last=3), {k: v for k, v in base.items() if k != "keep_monthly"},
+               dict(base, keep_within="1d2d")]
         for retention in bad:
             with self.assertRaises(rm.ConfigError, msg=retention):
                 rm.load_config(self.write(cfg(retention=retention)))
@@ -903,6 +1049,27 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         self.assertTrue(any("sans effet" in line for line in r["log"]))
         with open(self.state_path(), "rb") as f:
             self.assertEqual(f.read(), b"{invalide")
+
+    def test_volume_warnings_do_not_block_dry_run(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        core = daily(60, end=now - dt.timedelta(hours=1))
+        s = core + [validation()]
+        forget = groups(core[:45], core[45:]) + groups([s[-1]], paths=["/tmp/restic-test"])
+        code, _ = self.run_with(s, forget, init=True)
+        self.assertEqual(code, rm.EXIT_OK)
+        r = self.report()
+        self.assertEqual(r["status"], "baseline_created")
+        self.assertEqual(sorted(f["code"] for f in r["findings"] if f["level"] == "WARN"), ["remove_count", "remove_percent"])
+        self.assertEqual([f for f in r["findings"] if f["level"] == "ERROR"], [])
+
+    def test_young_removal_is_an_anomaly(self):
+        s, forget = self.clean_repo()
+        core = forget[0]["keep"]
+        forget[0] = {"host": HOST, "paths": PATHS, "tags": None, "keep": core[:-1], "remove": core[-1:]}
+        code, _ = self.run_with(s, forget, init=True)
+        self.assertEqual(code, rm.EXIT_ANOMALY)
+        self.assertIn("young_removal", [f["code"] for f in self.report()["findings"]])
+        self.assertFalse(os.path.exists(self.state_path()))
 
     def test_invalid_state_is_kept_and_reported(self):
         now = dt.datetime.now(dt.timezone.utc)
