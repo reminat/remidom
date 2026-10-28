@@ -16,10 +16,14 @@ CACHE='{{ restic_backup_cache_dir }}/{{ restic_backup_name }}'
 
 extra=""
 caps="--cap-add DAC_READ_SEARCH"
+prefix=""
+name="restic-{{ restic_backup_name }}-$$"
+# Délai maximal de « status » : sans réponse du serveur, restic réessaie pendant 15 minutes.
+STATUS_TIMEOUT=120
 
 run_restic() {
   # shellcheck disable=SC2086
-  /usr/bin/docker run --rm --pull never --read-only \
+  $prefix /usr/bin/docker run --rm --name "$name" --pull never --read-only \
     --tmpfs /tmp:rw,noexec,nosuid,size=256m \
     --cap-drop ALL $caps --security-opt no-new-privileges \
     --hostname '{{ restic_backup_host }}' \
@@ -36,8 +40,14 @@ run_restic() {
 # (réseau, authentification REST, droits…). Seul 10 permet d'affirmer l'absence.
 repository_status() {
   set +e
+  prefix="timeout $STATUS_TIMEOUT"
   out=$(run_restic cat config 2>&1 >/dev/null)
   rc=$?
+  prefix=""
+  if [ "$rc" -eq 124 ]; then
+    /usr/bin/docker rm -f "$name" >/dev/null 2>&1
+    out="aucune réponse en ${STATUS_TIMEOUT} s (réseau, REST Server ou Traefik indisponible ?)"
+  fi
   set -e
   case "$rc" in
     0)  echo "PRÉSENT : repository existant, mot de passe accepté" ;;
