@@ -133,8 +133,10 @@ def validate_retention(retention):
     if not isinstance(retention, dict) or set(retention) != expected:
         raise ConfigError("retention doit contenir exactement %s" % ", ".join(sorted(expected)))
     within = retention["keep_within"]
-    if not isinstance(within, str) or not re.match(r"^([0-9]{1,5}[ymdh]){1,4}$", within):
-        raise ConfigError("keep_within invalide : %r (ex. 30d, 1y6m)" % (within,))
+    try:
+        parse_duration(within)
+    except ValueError:
+        raise ConfigError("keep_within invalide : %r (ex. 30d, 1y6m ; chaque unité au plus une fois)" % (within,))
     for key in ("keep_daily", "keep_weekly", "keep_monthly"):
         if not is_int(retention[key], 0, 10000):
             raise ConfigError("%s invalide : %r (entier entre 0 et 10000)" % (key, retention[key]))
@@ -385,6 +387,80 @@ def read_state(state_fd, now, max_skew):
 
 # --------------------------------------------------------------------------- restic
 
+def parse_duration(text):
+    """Durée restic (« 30d », « 1y6m », « 1d12h ») -> dict y/m/d/h. Chaque unité au plus une fois :
+    restic écraserait silencieusement une unité répétée."""
+    if not isinstance(text, str):
+        raise ValueError("durée non textuelle")
+    parts = re.findall(r"([0-9]{1,5})([ymdh])", text)
+    units = [u for _, u in parts]
+    if not parts or "".join(n + u for n, u in parts) != text or len(set(units)) != len(units):
+        raise ValueError("durée invalide : %r" % text)
+    duration = dict.fromkeys("ymdh", 0)
+    for number, unit in parts:
+        duration[unit] = int(number)
+    return duration
+
+
+def parse_time_with_offset(value):
+    """Comme parse_time, mais conserve le décalage d'origine (+02:00…), comme restic dans le conteneur."""
+    m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d)$", value)
+    if not m:
+        raise ValueError("horodatage illisible : %r" % value)
+    frac = (m.group(2) or ".0")[1:7].ljust(6, "0")
+    tz = "+00:00" if m.group(3) == "Z" else m.group(3)
+    return dt.datetime.fromisoformat("%s.%s%s" % (m.group(1), frac, tz))
+
+
+def go_add_date(t, years, months, days):
+    """Équivalent de time.AddDate de Go : calcul sur l'heure locale du décalage de t, débordements
+    normalisés (31 mars - 1 mois = 3 mars). Exact pour un décalage fixe, cas des dates restic ici
+    (le conteneur ne définit pas de fuseau)."""
+    month_index = t.year * 12 + (t.month - 1) + years * 12 + months
+    first = t.replace(year=month_index // 12, month=month_index % 12 + 1, day=1)
+    return first + dt.timedelta(days=t.day - 1 + days)
+
+
+def keep_within_cutoff(latest, duration):
+    """Limite de --keep-within : un snapshot est conservé s'il est strictement postérieur."""
+    return go_add_date(latest, -duration["y"], -duration["m"], -duration["d"]) - dt.timedelta(hours=duration["h"])
+
+
+def young_removals(forget_groups, keep_within, policy_now):
+    """Candidats à la suppression que --keep-within aurait dû conserver.
+
+    Règle de restic 0.19.1, groupe par groupe : référence = snapshot le plus récent strictement antérieur
+    à l'exécution de restic ; limite = référence - durée (calendaire, dans le décalage de la référence) ;
+    conservé si strictement postérieur à la limite. policy_now est pris juste après « forget » : il ne
+    peut que retarder la référence, donc seulement réduire les signalements (jamais en créer à tort).
+    Retourne une liste de constats (findings)."""
+    duration = parse_duration(keep_within)
+    if not any(duration.values()):
+        return []
+    findings = []
+    for g in forget_groups:
+        label = "%s %s" % (g.get("host"), g.get("paths"))
+        try:
+            snaps = [(s.get("id", "?"), parse_time_with_offset(s["time"]))
+                     for s in (g.get("keep") or []) + (g.get("remove") or [])]
+            removed = [(s.get("id", "?"), parse_time_with_offset(s["time"])) for s in (g.get("remove") or [])]
+        except (KeyError, TypeError, ValueError) as exc:
+            findings.append(finding("ERROR", "forget_time_invalid", "groupe %s : %s" % (label, exc)))
+            continue
+        past = [t for _, t in snaps if t < policy_now]
+        latest = max(past) if past else None
+        cutoff = keep_within_cutoff(latest, duration) if latest else None
+        for sid, t in removed:
+            if cutoff is None or t > cutoff:
+                findings.append(finding("ERROR", "young_removal",
+                                        "%s (%s) proposé à la suppression alors que --keep-within %s le conserve"
+                                        " (groupe %s, référence %s, limite %s)"
+                                        % (sid[:8], t.isoformat(), keep_within, label,
+                                           latest.isoformat() if latest else "aucune",
+                                           cutoff.isoformat() if cutoff else "aucune")))
+    return findings
+
+
 def parse_time(value):
     """Convertit un horodatage restic (nanosecondes, fuseau) en datetime UTC."""
     m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d)$", value)
@@ -572,7 +648,7 @@ def max_in_window(times, window):
     return best
 
 
-def analyze(cfg, snapshots, forget_groups, now, state, state_error=None):
+def analyze(cfg, snapshots, forget_groups, now, state, state_error=None, policy_now=None):
     """Analyse pure : ne fait aucune entrée/sortie. Retourne (findings, summary)."""
     th = cfg["thresholds"]
     findings = []
@@ -666,10 +742,14 @@ def analyze(cfg, snapshots, forget_groups, now, state, state_error=None):
         findings.append(finding("ERROR", "forget_mismatch",
                                 "forget couvre %d snapshots, le repository en contient %d" % (kept + removed, total)))
     percent = (100.0 * removed / total) if total else 0.0
+    # En dry-run, rien n'est supprimé : les candidats s'accumulent normalement d'une exécution à
+    # l'autre. Ces seuils, faits pour encadrer une suppression réelle, ne sont alors qu'informatifs.
+    volume_level = "WARN" if cfg["mode"] == "dry-run" else "ERROR"
     if removed > th["max_remove_count"]:
-        findings.append(finding("ERROR", "remove_count", "%d suppressions estimées (max %d)" % (removed, th["max_remove_count"])))
+        findings.append(finding(volume_level, "remove_count", "%d suppressions estimées (max %d)" % (removed, th["max_remove_count"])))
     if percent > th["max_remove_percent"]:
-        findings.append(finding("ERROR", "remove_percent", "%.1f %% de suppressions estimées (max %d %%)" % (percent, th["max_remove_percent"])))
+        findings.append(finding(volume_level, "remove_percent", "%.1f %% de suppressions estimées (max %d %%)" % (percent, th["max_remove_percent"])))
+    findings.extend(young_removals(forget_groups, cfg["retention"]["keep_within"], policy_now or now))
     groups = []
     for g in forget_groups:
         k, r = len(g.get("keep") or []), len(g.get("remove") or [])
@@ -806,6 +886,7 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
             runner.restic("check")
             log("check : OK")
         forget_groups = parse_json_output(runner.restic("forget", *forget_args(cfg["retention"]))) or []
+        policy_now = dt.datetime.now(dt.timezone.utc)  # borne supérieure de l'heure utilisée par restic
     except UnsafeMounts as exc:
         log(str(exc))
         return finish("unsafe_mounts", EXIT_CONFIG)
@@ -816,7 +897,7 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
         log(str(exc))
         return finish("restic_error", EXIT_RESTIC)
 
-    findings, summary = analyze(cfg, snapshots, forget_groups, started, state, state_error)
+    findings, summary = analyze(cfg, snapshots, forget_groups, started, state, state_error, policy_now)
     report["findings"].extend(findings)
     report["summary"] = summary
 

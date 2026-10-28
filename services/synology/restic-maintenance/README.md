@@ -89,9 +89,23 @@ compte pas dans leurs rafales. La disparition d'un identifiant figé est une ano
    | `backdated_snapshot` | snapshot **nouveau** depuis la dernière exécution validée mais daté de plus de `backdate_tolerance_hours` avant elle. Un faux snapshot antidaté pourrait sinon remplacer le vrai comme « dernier du jour ». |
    | `snapshots_disappeared` | snapshot présent à la dernière exécution validée et absent maintenant (le repository est censé être append-only) |
    | `state_invalid` | `state.json` présent mais inutilisable (JSON invalide, plus de 1 Mio, structure ou valeurs incorrectes, `last_run` dans le futur, fichier non régulier, lien symbolique, droits ou propriétaire inattendus). Les comparaisons sont abandonnées et la référence existante **n'est pas remplacée**. |
-   | `remove_count`, `remove_percent` | suppressions estimées au-delà de `max_remove_count` / `max_remove_percent` |
+   | `remove_count`, `remove_percent` | suppressions estimées au-delà de `max_remove_count` / `max_remove_percent`. **En dry-run, simple avertissement (`WARN`)** : rien n'étant supprimé, les candidats s'accumulent normalement d'une exécution à l'autre (environ un par jour). Ces seuils redeviendront bloquants pour une éventuelle suppression réelle. |
+   | `young_removal` | un snapshot proposé à la suppression alors que `--keep-within` devrait le conserver : même règle que restic 0.19.1, groupe par groupe (voir ci-dessous). Ne doit jamais arriver ; signale une politique, une horloge ou des données incohérentes. |
+   | `forget_time_invalid` | horodatage illisible dans la sortie de `forget` |
    | `min_keep` | groupe qui tomberait sous `min_keep_per_group` snapshots conservés |
    | `forget_mismatch` | `forget` ne couvre pas exactement les snapshots listés |
+
+   **Garde `young_removal`**, alignée sur restic 0.19.1 (`internal/data/snapshot_policy.go`) :
+   pour chaque groupe (hôte + chemins), la référence est le snapshot le plus récent
+   **strictement antérieur** à l'exécution de `forget` (les snapshots datés dans le futur
+   sont ignorés) ; la limite est `référence − keep_within`, calculée comme `time.AddDate` de
+   Go (calendaire, dans le décalage horaire de la référence, débordements normalisés :
+   31 mars − 1 mois = 3 mars) ; un snapshot **strictement postérieur** à la limite doit être
+   conservé. Les dates sont comparées comme des instants, quel que soit leur décalage
+   (+02:00 en été, +01:00 en hiver). Un groupe dont les sauvegardes sont arrêtées garde sa
+   limite relative à son dernier snapshot, et non à l'heure actuelle. Si aucun snapshot
+   n'est antérieur à l'exécution, toute suppression proposée est signalée. Avec
+   `keep_within` nul, la garde est inactive (restic n'applique alors pas cette règle).
 
    La détection repose sur l'**identifiant** des snapshots mémorisé à chaque exécution
    validée (`state/state.json`), jamais sur les dates de modification des fichiers du
@@ -104,6 +118,7 @@ compte pas dans leurs rafales. La disparition d'un identifiant figé est une ano
    | `state.json` absent, sans `--init-baseline` | **aucune référence créée**, statut `baseline_required` (code 6) |
    | `state.json` absent, avec `--init-baseline` | référence créée (sans jamais remplacer un fichier apparu entre-temps), statut `baseline_created` (code 0), ligne `RÉFÉRENCE CRÉÉE : …` |
    | `state.json` invalide, avec ou sans `--init-baseline` | anomalie `state_invalid` (code 1), fichier conservé tel quel |
+   | uniquement des avertissements (`WARN`, par exemple `remove_count` en dry-run) | statut `ok` (code 0), référence mise à jour ; aucun e-mail DSM (« fin anormale » seulement) : relire régulièrement les rapports |
    | référence valide présente, avec `--init-baseline` | refus `baseline_exists` (code 7) dès le début, référence intacte |
 
    Le rapport indique aussi `baseline` : `absent`, `present`, `invalid` ou `created`.
