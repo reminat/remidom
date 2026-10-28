@@ -31,7 +31,8 @@ restic_backup_enabled: true
 restic_backup_rest_url: https://restic.reminat.com
 restic_backup_rest_user: docker-prod
 restic_backup_repository_path: docker-prod
-restic_backup_timer_enabled: false   # à activer après la première sauvegarde et le test de restauration
+# Première sauvegarde (75eeb351), restic check et restauration sur disque validés le 28/10/2026.
+restic_backup_timer_enabled: true    # quotidien à 02:30 (restic_backup_on_calendar)
 restic_backup_tags: [core, prod]
 # Sauvegarde à chaud : Mosquitto, Zigbee2MQTT et Node-RED écrivent leurs fichiers par
 # remplacement atomique (copie cohérente). Seul Portainer (base BoltDB modifiée sur place)
