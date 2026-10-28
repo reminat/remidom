@@ -166,6 +166,12 @@ plus les données** :
   référence n'est mise à jour lors d'un échec.
 - **Lancement manuel** : `--read-data` force une lecture intégrale pour une exécution
   (par exemple pour valider le dispositif sans attendre le dimanche).
+- **En cas de pack endommagé**, restic propose `restic repair packs …` : ce script ne le
+  lance jamais (commande refusée). Diagnostiquer d'abord (disque, snapshots Btrfs, copie
+  Hyper Backup) ; toute réparation est une opération manuelle séparée.
+- **Validé** le 28/10/2026 sur une VM jetable (restic 0.19.1, 74 Mio) : lecture intégrale en
+  3 s ; après altération de 4 Kio d'un pack, le contrôle de structure répond OK mais la
+  lecture des données échoue (code 4) en nommant le pack.
 
 ## Mise à jour des empreintes dans les tâches DSM
 
