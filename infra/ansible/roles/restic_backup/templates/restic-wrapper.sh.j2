@@ -38,17 +38,16 @@ run_restic() {
 
 # Codes de restic 0.19.1 : 10 = repository absent, 12 = mot de passe refusé, 1 = autre erreur
 # (réseau, authentification REST, droits…). Seul 10 permet d'affirmer l'absence.
+# Retourne le code de restic ; l'appelant le récupère avec « || rc=$? » (compatible set -e).
 repository_status() {
-  set +e
+  rc=0
   prefix="timeout $STATUS_TIMEOUT"
-  out=$(run_restic cat config 2>&1 >/dev/null)
-  rc=$?
+  out=$(run_restic cat config 2>&1 >/dev/null) || rc=$?
   prefix=""
   if [ "$rc" -eq 124 ]; then
-    /usr/bin/docker rm -f "$name" >/dev/null 2>&1
+    /usr/bin/docker rm -f "$name" >/dev/null 2>&1 || true
     out="aucune réponse en ${STATUS_TIMEOUT} s (réseau, REST Server ou Traefik indisponible ?)"
   fi
-  set -e
   case "$rc" in
     0)  echo "PRÉSENT : repository existant, mot de passe accepté" ;;
     10) echo "ABSENT : aucun repository à cette adresse (initialisation possible avec « init »)" ;;
@@ -61,21 +60,21 @@ repository_status() {
 
 case "${1:-}" in
   status)
-    repository_status
-    exit $?
+    rc=0
+    repository_status || rc=$?
+    exit "$rc"
     ;;
   init)
     shift
-    set +e
-    repository_status
-    rc=$?
-    set -e
+    rc=0
+    repository_status || rc=$?
     if [ "$rc" -ne 10 ]; then
       echo "init refusé : l'absence du repository n'est pas confirmée (code $rc)" >&2
       exit 2
     fi
-    run_restic init "$@"
-    exit $?
+    rc=0
+    run_restic init "$@" || rc=$?
+    exit "$rc"
     ;;
   restore-to)
     target="${2:-}"
@@ -85,8 +84,9 @@ case "${1:-}" in
     shift 2
     extra="-v $target:/restore"
     caps="--cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER"
-    run_restic restore "$@" --target /restore
-    exit $?
+    rc=0
+    run_restic restore "$@" --target /restore || rc=$?
+    exit "$rc"
     ;;
 esac
 
