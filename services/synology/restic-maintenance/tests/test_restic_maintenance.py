@@ -4,7 +4,9 @@
 """
 
 import datetime as dt
+import fcntl
 import json
+import re
 import os
 import shutil
 import stat
@@ -35,7 +37,7 @@ def cfg(**overrides):
         "name": "docker-test", "mode": "dry-run", "image": IMAGE, "expected_restic_version": "0.19.1",
         "repository": "/volume1/Restic/docker-test",
         "password_file": "/volume1/docker/restic-maintenance/secrets/restic_password_test",
-        "state_dir": "/tmp/state", "log_dir": "/tmp/logs",
+        "private_dir": "/root/restic-maintenance/docker-test",
         "groups": GROUPS,
         "retention": {"keep_within": "30d", "keep_daily": 14, "keep_weekly": 8, "keep_monthly": 12},
         "window": {"start": "01:00", "end": "04:30"},
@@ -75,6 +77,15 @@ def real_repo(end=NOW - dt.timedelta(hours=1)):
 
 def codes(findings, level="ERROR"):
     return sorted(f["code"] for f in findings if f["level"] == level)
+
+
+class TrustedUser:
+    """En test, l'utilisateur courant remplace root comme propriétaire de confiance."""
+
+    def setUp(self):
+        self._uids, rm.TRUSTED_UIDS = rm.TRUSTED_UIDS, (0, os.geteuid())
+        self.addCleanup(setattr, rm, "TRUSTED_UIDS", self._uids)
+        super().setUp()
 
 
 class AnalyzeTest(unittest.TestCase):
@@ -258,6 +269,175 @@ class MountAndVersionTest(unittest.TestCase):
         self.assertEqual(c[-4:], ["--entrypoint", "/bin/cat", IMAGE, "/proc/self/mounts"])
 
 
+class PrivateStorageTest(TrustedUser, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.base = tempfile.mkdtemp()  # /tmp/xxx : 0700, propriétaire courant, parent /tmp sticky
+        self.addCleanup(shutil.rmtree, self.base)
+
+    def test_creates_missing_levels_in_0700(self):
+        fd = rm.open_private_dir(self.base + "/a/b")
+        os.close(fd)
+        for d in ("a", "a/b"):
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.base, d)).st_mode) & 0o077, 0)
+
+    def test_refuses_symlink_at_any_level(self):
+        target = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, target)
+        os.symlink(target, self.base + "/lien")
+        for path in (self.base + "/lien", self.base + "/lien/sous"):
+            with self.assertRaises(rm.UnsafePath, msg=path):
+                rm.open_private_dir(path)
+        self.assertEqual(os.listdir(target), [])
+
+    def test_refuses_file_group_writable_and_untrusted_owner(self):
+        open(self.base + "/fichier", "w").close()
+        with self.assertRaises(rm.UnsafePath):
+            rm.open_private_dir(self.base + "/fichier")
+        os.mkdir(self.base + "/ouvert", 0o770)
+        os.chmod(self.base + "/ouvert", 0o770)
+        with self.assertRaises(rm.UnsafePath):
+            rm.open_private_dir(self.base + "/ouvert/x")
+        rm.TRUSTED_UIDS = (0,)  # l'utilisateur courant n'est plus de confiance
+        with self.assertRaises(rm.UnsafePath):
+            rm.open_private_dir(self.base + "/y")
+
+    def test_refuses_acl_and_synoacl(self):
+        orig_x, orig_m = rm.acl_xattrs, rm.mount_options_for
+        try:
+            rm.acl_xattrs = lambda fd: ["system.posix_acl_access"]
+            with self.assertRaises(rm.UnsafePath):
+                rm.open_private_dir(self.base + "/acl")
+            rm.acl_xattrs = orig_x
+            rm.mount_options_for = lambda p: ("/volume1", "btrfs", ["rw", "synoacl"])
+            with self.assertRaises(rm.UnsafePath):
+                rm.open_private_dir(self.base + "/syno")
+        finally:
+            rm.acl_xattrs, rm.mount_options_for = orig_x, orig_m
+
+    def test_operations_stay_on_verified_directory(self):
+        # Après ouverture, remplacer le chemin par un lien vers un autre dossier ne détourne pas
+        # les écritures : elles restent relatives au descripteur vérifié.
+        fd = rm.open_private_dir(self.base + "/priv")
+        try:
+            other = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, other)
+            os.rename(self.base + "/priv", self.base + "/priv-deplace")
+            os.symlink(other, self.base + "/priv")
+            rm.write_json_at(fd, "state.json", {"x": 1})
+            self.assertEqual(os.listdir(other), [])
+            self.assertTrue(os.path.exists(self.base + "/priv-deplace/state.json"))
+        finally:
+            os.close(fd)
+
+    def test_write_replaces_symlink_without_following(self):
+        fd = rm.open_private_dir(self.base + "/priv")
+        try:
+            victim = self.base + "/victime"
+            with open(victim, "w") as f:
+                f.write("intact")
+            os.symlink(victim, self.base + "/priv/report-20260101-000000.json")
+            rm.write_json_at(fd, "report-20260101-000000.json", {"x": 1})
+            with open(victim) as f:
+                self.assertEqual(f.read(), "intact")
+            self.assertFalse(os.path.islink(self.base + "/priv/report-20260101-000000.json"))
+            self.assertEqual([n for n in os.listdir(fd) if n.endswith(".tmp")], [])
+        finally:
+            os.close(fd)
+
+    def test_lock_symlink_refused(self):
+        fd = rm.open_private_dir(self.base + "/priv")
+        try:
+            victim = self.base + "/victime"
+            with open(victim, "w") as f:
+                f.write("intact")
+            os.symlink(victim, self.base + "/priv/lock")
+            with self.assertRaises(OSError):
+                rm.open_lock(fd)
+            with open(victim) as f:
+                self.assertEqual(f.read(), "intact")
+        finally:
+            os.close(fd)
+
+    def test_rotation_only_removes_reports(self):
+        fd = rm.open_private_dir(self.base + "/logs")
+        try:
+            for i in range(5):
+                rm.write_json_at(fd, "report-2026010%d-000000.json" % i, {})
+            open(self.base + "/logs/autre.json", "w").close()
+            rm.rotate_reports(fd, 2)
+            self.assertEqual(sorted(os.listdir(fd)), ["autre.json", "report-20260103-000000.json",
+                                                      "report-20260104-000000.json"])
+        finally:
+            os.close(fd)
+
+
+class StateValidationTest(TrustedUser, unittest.TestCase):
+    SKEW = dt.timedelta(minutes=60)
+
+    def setUp(self):
+        super().setUp()
+        self.base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.base)
+        self.fd = rm.open_private_dir(self.base + "/state")
+        self.addCleanup(os.close, self.fd)
+
+    def put(self, content, mode=0o600):
+        path = self.base + "/state/state.json"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "wb") as f:
+            f.write(content if isinstance(content, bytes) else json.dumps(content).encode())
+        os.chmod(path, mode)
+
+    def read(self):
+        return rm.read_state(self.fd, NOW, self.SKEW)
+
+    def test_absent(self):
+        self.assertEqual(self.read(), (None, None))
+
+    def test_valid(self):
+        state = {"last_run": (NOW - dt.timedelta(days=1)).isoformat(), "snapshot_ids": ["a" * 64, "b" * 64]}
+        self.put(state)
+        self.assertEqual(self.read(), (state, None))
+
+    def test_invalid_contents(self):
+        good = {"last_run": (NOW - dt.timedelta(days=1)).isoformat(), "snapshot_ids": ["a" * 64]}
+        cases = [
+            b"{tronque", b"\xff\xfe", b"null", b"[]",
+            dict(good, extra=1), {"last_run": good["last_run"]},
+            dict(good, last_run=12), dict(good, last_run="hier"),
+            dict(good, last_run=(NOW + dt.timedelta(days=2)).isoformat()),
+            dict(good, snapshot_ids="a" * 64), dict(good, snapshot_ids=["A" * 64]),
+            dict(good, snapshot_ids=["a" * 63]), dict(good, snapshot_ids=[1]),
+            dict(good, snapshot_ids=["a" * 64, "a" * 64]),
+        ]
+        for content in cases:
+            self.put(content)
+            state, error = self.read()
+            self.assertIsNone(state, content)
+            self.assertTrue(error, content)
+
+    def test_too_large(self):
+        self.put(b" " * (rm.MAX_STATE_BYTES + 1))
+        self.assertIn("volumineux", self.read()[1])
+
+    def test_unsafe_file(self):
+        self.put({"last_run": NOW.isoformat(), "snapshot_ids": []}, mode=0o644)
+        self.assertIn("inattendu", self.read()[1])
+        os.remove(self.base + "/state/state.json")
+        os.symlink("/etc/hostname", self.base + "/state/state.json")
+        self.assertIn("inaccessible", self.read()[1])
+        os.remove(self.base + "/state/state.json")
+        os.mkdir(self.base + "/state/state.json")
+        self.assertTrue(self.read()[1])
+
+    def test_invalid_state_gives_anomaly_without_baseline(self):
+        s = daily(10)
+        f, _ = rm.analyze(cfg(groups=GROUPS[:1]), s, groups(s), NOW, None, "state.json n'est pas un JSON valide")
+        self.assertEqual(codes(f), ["state_invalid"])
+        self.assertEqual(codes(f, "INFO"), [])
+
+
 class IsolatedModeTest(unittest.TestCase):
     """Le script doit refuser de démarrer sans « python3 -I », avant d'importer quoi que ce soit."""
 
@@ -316,6 +496,38 @@ class ConfigTest(unittest.TestCase):
                 rm.load_config(self.write(cfg(groups=groups_)))
         self.assertEqual(rm.load_config(self.write(cfg()))["groups"], GROUPS)
 
+    def test_paths_strict(self):
+        for key, bad in (("repository", "/volume1/Restic/a:b"), ("repository", "/volume1/Restic/a,b"),
+                         ("repository", "/volume1/Restic/a b"), ("repository", "/volume1/Restic/../etc"),
+                         ("repository", "/volume1/Restic/./x"), ("repository", "volume1/Restic"),
+                         ("repository", "/volume1/Restic/"), ("repository", "/srv/restic"),
+                         ("password_file", "/volume1/x:/etc/shadow"), ("password_file", "/tmp/secret"),
+                         ("private_dir", "/volume1/docker/restic-maintenance/state"), ("private_dir", "/volumeX"),
+                         ("private_dir", "/root/../tmp"), ("private_dir", "relatif"), ("private_dir", 7)):
+            with self.assertRaises(rm.ConfigError, msg=(key, bad)):
+                rm.load_config(self.write(cfg(**{key: bad})))
+
+    def test_retention_values_cannot_inject_arguments(self):
+        base = cfg()["retention"]
+        bad = [dict(base, keep_within="30d --prune"), dict(base, keep_within="--prune"),
+               dict(base, keep_within="-1d"), dict(base, keep_within=""), dict(base, keep_within="30"),
+               dict(base, keep_within=30), dict(base, keep_daily="14"), dict(base, keep_daily="--unsafe-allow-remove-all"),
+               dict(base, keep_daily=True), dict(base, keep_daily=-1), dict(base, keep_daily=1.5),
+               dict(base, keep_weekly=10001), dict(base, keep_last=3), {k: v for k, v in base.items() if k != "keep_monthly"}]
+        for retention in bad:
+            with self.assertRaises(rm.ConfigError, msg=retention):
+                rm.load_config(self.write(cfg(retention=retention)))
+        args = rm.forget_args(rm.load_config(self.write(cfg(retention=dict(base, keep_within="1y6m"))))["retention"])
+        self.assertEqual(args[args.index("--keep-within") + 1], "1y6m")
+
+    def test_other_parameters(self):
+        th = cfg()["thresholds"]
+        for kw in ({"name": "Docker test"}, {"name": "../x"}, {"timeout_minutes": 0}, {"timeout_minutes": "120"},
+                   {"keep_reports": 0}, {"run_check": "yes"}, {"thresholds": dict(th, max_remove_percent=101)},
+                   {"thresholds": dict(th, max_age_hours="48")}, {"thresholds": dict(th, x=1)}, {"thresholds": {k: v for k, v in th.items() if k != "max_age_hours"}}):
+            with self.assertRaises(rm.ConfigError, msg=kw):
+                rm.load_config(self.write(cfg(**kw)))
+
     def test_image_reference(self):
         for ok in (IMAGE, "restic/restic:0.19.1", "restic/restic:0.19.1@" + IMAGE.split("@")[1]):
             self.assertEqual(rm.load_config(self.write(cfg(image=ok)))["image"], ok)
@@ -370,11 +582,18 @@ tmpfs /tmp tmpfs rw,nosuid,noexec,relatime,size=524288k 0 0
 """
 
 
-class EndToEndTest(unittest.TestCase):
+class EndToEndTest(TrustedUser, unittest.TestCase):
     """Exécute main() avec un faux binaire docker qui enregistre ses arguments."""
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.private = os.path.join(tempfile.mkdtemp(), "private")
+        self.addCleanup(shutil.rmtree, os.path.dirname(self.private))
+        # Le dossier de test joue le rôle du volume de données (/volumeN/).
+        self._volume_re, rm.DATA_VOLUME_RE = rm.DATA_VOLUME_RE, re.compile("^" + re.escape(self.tmp) + "/")
+        self.addCleanup(setattr, rm, "DATA_VOLUME_RE", self._volume_re)
         self.repo = os.path.join(self.tmp, "repo")
         os.mkdir(self.repo)
         self.secret = os.path.join(self.tmp, "secret")
@@ -390,8 +609,7 @@ class EndToEndTest(unittest.TestCase):
         rm.DOCKER_BIN = docker
         os.environ.update(FAKE_LOG=self.log, FAKE_FIXTURES=self.fixtures)
         self.config = os.path.join(self.tmp, "config.json")
-        c = cfg(repository=self.repo, password_file=self.secret,
-                state_dir=os.path.join(self.tmp, "state"), log_dir=os.path.join(self.tmp, "logs"))
+        c = cfg(repository=self.repo, password_file=self.secret, private_dir=self.private)
         with open(self.config, "w") as f:
             json.dump(c, f)
 
@@ -430,25 +648,69 @@ class EndToEndTest(unittest.TestCase):
             if "forget" in call:
                 self.assertIn("--dry-run", call)
         self.assertEqual(subs, ["version", "snapshots", "list", "check", "forget"])
-        self.assertTrue(os.path.exists(os.path.join(self.tmp, "state", "state.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.private, "state", "state.json")))
 
         forged = snap("b", now - dt.timedelta(days=4))
         code, _ = self.run_with(s + [forged], groups(core + [forged]) + forget[1:])
         self.assertEqual(code, rm.EXIT_ANOMALY)
-        reports = sorted(os.listdir(os.path.join(self.tmp, "logs")))
-        with open(os.path.join(self.tmp, "logs", reports[-1])) as f:
+        reports = sorted(r for r in os.listdir(os.path.join(self.private, "logs")) if r.startswith("report-"))
+        with open(os.path.join(self.private, "logs", reports[-1])) as f:
             last = json.load(f)
         self.assertEqual(last["status"], "anomaly")
         self.assertIn("backdated_snapshot", [f["code"] for f in last["findings"]])
 
     def test_concurrent_run_refused(self):
-        import fcntl
-        os.makedirs(os.path.join(self.tmp, "state"))
-        with open(os.path.join(self.tmp, "state", "lock"), "w") as held:
+        os.makedirs(os.path.join(self.private, "state"), mode=0o700)
+        os.chmod(self.private, 0o700)
+        fd = os.open(os.path.join(self.private, "state", "lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(fd) as held:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
             code, calls = self.run_with([], [])
         self.assertEqual(code, rm.EXIT_LOCKED)
         self.assertEqual(calls, [])
+
+    def state_path(self):
+        return os.path.join(self.private, "state", "state.json")
+
+    def write_state(self, content):
+        os.makedirs(os.path.join(self.private, "state"), mode=0o700, exist_ok=True)
+        os.chmod(self.private, 0o700)
+        fd = os.open(self.state_path(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+
+    def test_invalid_state_is_kept_and_reported(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        core = daily(20, end=now - dt.timedelta(hours=1))
+        s = core + [validation()]
+        forget = groups(core) + groups([s[-1]], paths=["/tmp/restic-test"])
+        for content in (b"{pas du json", b'{"last_run": 1, "snapshot_ids": []}', b"[" + b"0" * (2 * 1024 * 1024) + b"]"):
+            self.write_state(content)
+            code, _ = self.run_with(s, forget)
+            self.assertEqual(code, rm.EXIT_ANOMALY, content[:30])
+            with open(self.state_path(), "rb") as f:
+                self.assertEqual(f.read(), content, "la référence existante a été remplacée")
+
+    def test_symlinked_lock_is_refused_and_target_untouched(self):
+        victim = os.path.join(self.tmp, "victime.txt")
+        with open(victim, "w") as f:
+            f.write("CONTENU IMPORTANT")
+        os.makedirs(os.path.join(self.private, "state"), mode=0o700)
+        os.chmod(self.private, 0o700)
+        os.symlink(victim, os.path.join(self.private, "state", "lock"))
+        code, calls = self.run_with([], [])
+        self.assertEqual(code, rm.EXIT_CONFIG)
+        self.assertEqual(calls, [])
+        with open(victim) as f:
+            self.assertEqual(f.read(), "CONTENU IMPORTANT")
+
+    def test_private_dir_symlink_is_refused(self):
+        elsewhere = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, elsewhere)
+        os.symlink(elsewhere, self.private)
+        code, calls = self.run_with([], [])
+        self.assertEqual(code, rm.EXIT_CONFIG)
+        self.assertEqual(os.listdir(elsewhere), [])
 
     def test_writable_repository_mount_aborts_before_restic(self):
         rw = MOUNTS_OK.replace("/repo btrfs ro,", "/repo btrfs rw,")

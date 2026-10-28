@@ -5,7 +5,8 @@ restic_maintenance_image_repo: restic/restic
 restic_maintenance_restic_version: "0.19.1"
 # Digest de l'index multi-architecture publié sur Docker Hub pour restic/restic:0.19.1
 # (identique sur toute installation), contrôlé le 28/10/2026 : Docker Hub et image locale
-# du NAS. Vide = référence par tag (non recommandé).
+# du NAS. Il identifie l'image attendue ; il ne prouve ni sa provenance ni son innocuité
+# (pas de vérification de signature). Vide = référence par tag (non recommandé).
 restic_maintenance_image_digest: "sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
 
 restic_maintenance_src: "{{ playbook_dir }}/../../../services/synology/restic-maintenance"
@@ -22,10 +23,10 @@ restic_maintenance_groups: []
 
 # Répertoire des fichiers déployés (créé au préalable, accessible en écriture au compte Ansible).
 restic_maintenance_deploy_dir: "{{ restic_maintenance_base_dir }}/{{ restic_maintenance_name }}"
-# État et rapports : créés en root (0700) par le script. Les ACL Synology peuvent toutefois
-# y donner accès aux administrateurs (dont le compte Ansible) : voir README, « Risques ».
-restic_maintenance_state_dir: "{{ restic_maintenance_base_dir }}/state/{{ restic_maintenance_name }}"
-restic_maintenance_log_dir: "{{ restic_maintenance_base_dir }}/logs/{{ restic_maintenance_name }}"
+# Stockage privé (état, rapports, verrou) : hors des volumes de données régis par les ACL
+# Synology. Créé et vérifié par le script lui-même (root, 0700, sans lien symbolique ni ACL),
+# qui refuse de démarrer sinon. Non sauvegardé par Hyper Backup : voir README.
+restic_maintenance_private_dir: "/root/restic-maintenance/{{ restic_maintenance_name }}"
 restic_maintenance_keep_reports: 90
 
 restic_maintenance_retention:

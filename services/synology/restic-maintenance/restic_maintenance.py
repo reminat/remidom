@@ -23,6 +23,7 @@ import fcntl  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import stat  # noqa: E402
 import subprocess  # noqa: E402
 import time  # noqa: E402
 
@@ -44,9 +45,18 @@ EXIT_RESTIC = 4
 EXIT_TIMEOUT = 5
 EXIT_LOCKED = 75
 
-REQUIRED_KEYS = ("name", "mode", "image", "expected_restic_version", "repository", "password_file", "state_dir",
-                 "log_dir", "groups", "retention", "window",
-                 "timeout_minutes", "thresholds")
+REQUIRED_KEYS = ("name", "mode", "image", "expected_restic_version", "repository", "password_file",
+                 "private_dir", "groups", "retention", "window", "timeout_minutes", "thresholds")
+THRESHOLD_KEYS = ("max_future_skew_minutes", "max_age_hours", "max_snapshots_per_24h", "backdate_tolerance_hours",
+                  "max_remove_count", "max_remove_percent", "min_keep_per_group")
+
+# Stockage privé (état, rapports, verrou) : propriétaires admis pour chaque niveau du chemin.
+TRUSTED_UIDS = (0,)
+MAX_STATE_BYTES = 1024 * 1024
+MAX_STATE_IDS = 100000
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+# Volumes de données DSM (ACL Synology) : repository et secret y sont, le stockage privé jamais.
+DATA_VOLUME_RE = re.compile(r"^/volume[0-9]+/")
 
 
 class ConfigError(Exception):
@@ -71,9 +81,19 @@ def load_config(path):
         raise ConfigError("clés manquantes dans la configuration : %s" % ", ".join(missing))
     if cfg["mode"] not in ALLOWED_MODES:
         raise ConfigError("mode %r refusé : seul 'dry-run' est autorisé" % cfg["mode"])
-    for key in ("repository", "password_file", "state_dir", "log_dir"):
-        if not os.path.isabs(cfg[key]):
-            raise ConfigError("%s doit être un chemin absolu" % key)
+    if not isinstance(cfg["name"], str) or not re.match(r"^[a-z0-9][a-z0-9-]{0,62}$", cfg["name"]):
+        raise ConfigError("name invalide : %r" % cfg["name"])
+    validate_path("repository", cfg["repository"], on_volume=True)
+    validate_path("password_file", cfg["password_file"], on_volume=True)
+    validate_path("private_dir", cfg["private_dir"], on_volume=False)
+    validate_retention(cfg["retention"])
+    validate_thresholds(cfg["thresholds"])
+    if not is_int(cfg["timeout_minutes"], 1, 1440):
+        raise ConfigError("timeout_minutes invalide : %r" % cfg["timeout_minutes"])
+    if not is_int(cfg.get("keep_reports", 90), 1, 10000):
+        raise ConfigError("keep_reports invalide : %r" % cfg.get("keep_reports"))
+    if not isinstance(cfg.get("run_check", True), bool):
+        raise ConfigError("run_check doit être un booléen")
     validate_groups(cfg["groups"])
     image = cfg["image"]
     if not re.match(r"^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$", image) \
@@ -83,6 +103,44 @@ def load_config(path):
         raise ConfigError("expected_restic_version invalide : %r" % cfg["expected_restic_version"])
     parse_window(cfg["window"])
     return cfg
+
+
+def is_int(value, low, high):
+    """Entier véritable (pas un booléen, pas une chaîne) compris entre low et high."""
+    return type(value) is int and low <= value <= high
+
+
+def validate_path(key, value, on_volume):
+    """Chemin absolu, composants simples : ni « . », « .. », espace, « : » ou « , »."""
+    if not isinstance(value, str) or not re.match(r"^(/[A-Za-z0-9._-]+)+$", value) \
+            or any(part in (".", "..") for part in value.split("/")[1:]):
+        raise ConfigError("%s invalide : %r" % (key, value))
+    volume = DATA_VOLUME_RE.match(value) is not None
+    if on_volume and not volume:
+        raise ConfigError("%s doit être sous /volumeN/ : %r" % (key, value))
+    if not on_volume and (volume or value.startswith("/volume")):
+        raise ConfigError("%s ne doit pas être sur un volume de données (ACL Synology) : %r" % (key, value))
+
+
+def validate_retention(retention):
+    expected = {"keep_within", "keep_daily", "keep_weekly", "keep_monthly"}
+    if not isinstance(retention, dict) or set(retention) != expected:
+        raise ConfigError("retention doit contenir exactement %s" % ", ".join(sorted(expected)))
+    within = retention["keep_within"]
+    if not isinstance(within, str) or not re.match(r"^([0-9]{1,5}[ymdh]){1,4}$", within):
+        raise ConfigError("keep_within invalide : %r (ex. 30d, 1y6m)" % (within,))
+    for key in ("keep_daily", "keep_weekly", "keep_monthly"):
+        if not is_int(retention[key], 0, 10000):
+            raise ConfigError("%s invalide : %r (entier entre 0 et 10000)" % (key, retention[key]))
+
+
+def validate_thresholds(thresholds):
+    if not isinstance(thresholds, dict) or set(thresholds) != set(THRESHOLD_KEYS):
+        raise ConfigError("thresholds doit contenir exactement %s" % ", ".join(THRESHOLD_KEYS))
+    for key in THRESHOLD_KEYS:
+        high = 100 if key == "max_remove_percent" else 100000
+        if not is_int(thresholds[key], 0, high):
+            raise ConfigError("seuil %s invalide : %r" % (key, thresholds[key]))
 
 
 def validate_groups(groups):
@@ -137,6 +195,181 @@ def in_window(window, now_local):
     if start <= end:
         return start <= minute < end
     return minute >= start or minute < end  # fenêtre à cheval sur minuit
+
+
+# --------------------------------------------------------------------------- stockage privé
+
+class UnsafePath(Exception):
+    pass
+
+
+def unescape_mount(field):
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def mount_options_for(path):
+    """Options (montage + superbloc) du système de fichiers qui contient path, via /proc/self/mountinfo."""
+    best = None
+    with open("/proc/self/mountinfo") as f:
+        for line in f:
+            left, _, right = line.partition(" - ")
+            a, b = left.split(), right.split()
+            if len(a) < 6 or len(b) < 3:
+                continue
+            mountpoint = unescape_mount(a[4])
+            inside = mountpoint == "/" or path == mountpoint or path.startswith(mountpoint.rstrip("/") + "/")
+            if inside and (best is None or len(mountpoint) >= len(best[0])):
+                best = (mountpoint, b[0], a[5].split(",") + b[2].split(","))
+    return best
+
+
+def acl_xattrs(fd):
+    """Attributs étendus portant des ACL (POSIX ou Synology) sur un répertoire ouvert."""
+    try:
+        names = os.listxattr(fd)
+    except OSError:
+        return []
+    return [n for n in names if n.startswith("system.posix_acl") or "syno" in n.lower()]
+
+
+def check_dir(fd, label, last):
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        raise UnsafePath("%s n'est pas un répertoire" % label)
+    if st.st_uid not in TRUSTED_UIDS:
+        raise UnsafePath("%s appartient à l'uid %d" % (label, st.st_uid))
+    writable_by_others = st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    if last and st.st_mode & 0o077:
+        raise UnsafePath("%s doit être en 0700 (actuellement %o)" % (label, stat.S_IMODE(st.st_mode)))
+    # Un parent inscriptible par d'autres n'est admis que s'il a le bit sticky : ses entrées
+    # appartenant à un propriétaire de confiance ne peuvent alors être ni renommées ni supprimées.
+    if writable_by_others and not (st.st_mode & stat.S_ISVTX):
+        raise UnsafePath("%s est inscriptible par le groupe ou les autres (%o)" % (label, stat.S_IMODE(st.st_mode)))
+    acl = acl_xattrs(fd)
+    if acl:
+        raise UnsafePath("%s porte des ACL (%s)" % (label, ", ".join(acl)))
+
+
+def open_private_dir(path):
+    """Ouvre path niveau par niveau depuis « / », sans suivre de lien symbolique, en vérifiant
+    chaque niveau ; crée en 0700 les niveaux manquants. Retourne un descripteur du dernier
+    niveau : toutes les opérations ultérieures sont relatives à ce descripteur."""
+    mount = mount_options_for(path)
+    if mount and "synoacl" in mount[2]:
+        raise UnsafePath("%s est sur un système de fichiers avec ACL Synology (%s)" % (path, mount[0]))
+    fd = os.open("/", DIR_FLAGS)
+    try:
+        check_dir(fd, "/", last=False)
+        parts = path.strip("/").split("/")
+        current = ""
+        for i, part in enumerate(parts):
+            current += "/" + part
+            try:
+                child = os.open(part, DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                os.mkdir(part, 0o700, dir_fd=fd)
+                child = os.open(part, DIR_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                raise UnsafePath("%s : %s (lien symbolique ou fichier ?)" % (current, exc.strerror))
+            os.close(fd)
+            fd = child
+            check_dir(fd, current, last=(i == len(parts) - 1))
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def check_private_file(fd, label):
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid not in TRUSTED_UIDS or st.st_nlink != 1 or st.st_mode & 0o077:
+        raise UnsafePath("%s : fichier inattendu (type, propriétaire, liens ou droits)" % label)
+    return st
+
+
+def write_json_at(dir_fd, name, data):
+    """Écriture atomique relative à dir_fd : fichier temporaire unique (O_EXCL, O_NOFOLLOW), puis renommage."""
+    tmp = ".%s.%s.tmp" % (name, os.urandom(8).hex())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+    os.fsync(dir_fd)
+
+
+def rotate_reports(log_fd, keep):
+    reports = sorted(f for f in os.listdir(log_fd) if re.match(r"^report-\d{8}-\d{6}\.json$", f))
+    for old in reports[:-keep]:
+        os.unlink(old, dir_fd=log_fd)
+
+
+def open_lock(state_fd):
+    fd = os.open("lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=state_fd)
+    try:
+        check_private_file(fd, "lock")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+# --------------------------------------------------------------------------- état
+
+def validate_state(obj, now, max_skew):
+    if not isinstance(obj, dict) or set(obj) != {"last_run", "snapshot_ids"}:
+        return "structure inattendue (clés last_run et snapshot_ids exactement)"
+    if not isinstance(obj["last_run"], str):
+        return "last_run n'est pas une chaîne"
+    try:
+        last_run = parse_time(obj["last_run"])
+    except ValueError:
+        return "last_run illisible"
+    if last_run > now + max_skew:
+        return "last_run dans le futur"
+    ids = obj["snapshot_ids"]
+    if not isinstance(ids, list) or len(ids) > MAX_STATE_IDS:
+        return "snapshot_ids n'est pas une liste de taille raisonnable"
+    if any(not isinstance(i, str) or not re.match(r"^[0-9a-f]{64}$", i) for i in ids):
+        return "identifiant de snapshot invalide"
+    if len(set(ids)) != len(ids):
+        return "identifiants en double"
+    return None
+
+
+def read_state(state_fd, now, max_skew):
+    """Retourne (état, None), (None, None) si absent, ou (None, erreur) si invalide."""
+    try:
+        fd = os.open("state.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=state_fd)
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, "state.json inaccessible : %s" % exc.strerror
+    try:
+        st = check_private_file(fd, "state.json")  # avant fdopen : refuse dossier, FIFO, lien multiple…
+    except UnsafePath as exc:
+        os.close(fd)
+        return None, str(exc)
+    with os.fdopen(fd, "rb") as f:
+        if st.st_size > MAX_STATE_BYTES:
+            return None, "state.json trop volumineux (%d octets)" % st.st_size
+        data = f.read(MAX_STATE_BYTES + 1)
+    if len(data) > MAX_STATE_BYTES:
+        return None, "state.json trop volumineux"
+    try:
+        obj = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None, "state.json n'est pas un JSON valide"
+    error = validate_state(obj, now, max_skew)
+    return (None, error) if error else (obj, None)
 
 
 # --------------------------------------------------------------------------- restic
@@ -294,7 +527,7 @@ def max_in_window(times, window):
     return best
 
 
-def analyze(cfg, snapshots, forget_groups, now, state):
+def analyze(cfg, snapshots, forget_groups, now, state, state_error=None):
     """Analyse pure : ne fait aucune entrée/sortie. Retourne (findings, summary)."""
     th = cfg["thresholds"]
     findings = []
@@ -354,7 +587,10 @@ def analyze(cfg, snapshots, forget_groups, now, state):
                                     % (g["name"], peak, th["max_snapshots_per_24h"])))
 
     # Comparaison avec la dernière exécution validée (état local, hors repository).
-    if state:
+    if state_error:
+        findings.append(finding("ERROR", "state_invalid", "référence inutilisable, conservée telle quelle : %s"
+                                % state_error))
+    elif state:
         previous = set(state.get("snapshot_ids", []))
         last_run = parse_time(state["last_run"])
         tolerance = dt.timedelta(hours=th["backdate_tolerance_hours"])
@@ -413,27 +649,6 @@ def analyze(cfg, snapshots, forget_groups, now, state):
 
 # --------------------------------------------------------------------------- main
 
-def load_state(path):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return None
-
-
-def write_json_atomic(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-    os.replace(tmp, path)
-
-
-def rotate_reports(log_dir, keep):
-    reports = sorted(f for f in os.listdir(log_dir) if re.match(r"^report-\d{8}-\d{6}\.json$", f))
-    for old in reports[:-keep] if keep > 0 else []:
-        os.remove(os.path.join(log_dir, old))
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Maintenance Restic (dry-run uniquement)")
     parser.add_argument("--config", required=True)
@@ -454,20 +669,32 @@ def main(argv=None):
         print("CONFIG: %s" % exc, file=sys.stderr)
         return EXIT_CONFIG
 
-    for d in (cfg["state_dir"], cfg["log_dir"]):
-        os.makedirs(d, mode=0o700, exist_ok=True)
-
-    with open(os.path.join(cfg["state_dir"], "lock"), "w") as lock_file:
+    os.umask(0o077)
+    fds = []
+    try:
         try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            state_fd = open_private_dir(cfg["private_dir"] + "/state")
+            fds.append(state_fd)
+            log_fd = open_private_dir(cfg["private_dir"] + "/logs")
+            fds.append(log_fd)
+            lock_fd = open_lock(state_fd)
+            fds.append(lock_fd)
+        except (UnsafePath, OSError) as exc:
+            print("STOCKAGE: %s" % exc, file=sys.stderr)
+            return EXIT_CONFIG
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             print("une maintenance %s est déjà en cours" % cfg["name"], file=sys.stderr)
             return EXIT_LOCKED
-        return run(cfg, opts, log, lines)
+        return run(cfg, opts, log, lines, state_fd, log_fd)
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
 
 
-def run(cfg, opts, log, lines):
-    """Exécution sous verrou exclusif."""
+def run(cfg, opts, log, lines, state_fd, log_fd):
+    """Exécution sous verrou exclusif ; état et rapports relatifs aux descripteurs vérifiés."""
     started = dt.datetime.now(dt.timezone.utc)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     report = {"name": cfg["name"], "mode": cfg["mode"], "image": cfg["image"],
@@ -478,8 +705,8 @@ def run(cfg, opts, log, lines):
         report["status"] = status
         report["finished"] = dt.datetime.now(dt.timezone.utc).isoformat()
         report["log"] = lines
-        write_json_atomic(os.path.join(cfg["log_dir"], "report-%s.json" % stamp), report)
-        rotate_reports(cfg["log_dir"], cfg.get("keep_reports", 90))
+        write_json_at(log_fd, "report-%s.json" % stamp, report)
+        rotate_reports(log_fd, cfg.get("keep_reports", 90))
         log("statut : %s" % status)
         return code
 
@@ -528,8 +755,9 @@ def run(cfg, opts, log, lines):
         log(str(exc))
         return finish("restic_error", EXIT_RESTIC)
 
-    state_path = os.path.join(cfg["state_dir"], "state.json")
-    findings, summary = analyze(cfg, snapshots, forget_groups, started, load_state(state_path))
+    state, state_error = read_state(state_fd, started,
+                                    dt.timedelta(minutes=cfg["thresholds"]["max_future_skew_minutes"]))
+    findings, summary = analyze(cfg, snapshots, forget_groups, started, state, state_error)
     report["findings"].extend(findings)
     report["summary"] = summary
 
@@ -541,9 +769,10 @@ def run(cfg, opts, log, lines):
     if any(f["level"] == "ERROR" for f in report["findings"]):
         return finish("anomaly", EXIT_ANOMALY)
 
-    # La référence n'est mise à jour qu'après une exécution sans anomalie.
-    write_json_atomic(state_path, {"last_run": started.isoformat(),
-                                   "snapshot_ids": sorted(sn["id"] for sn in snapshots)})
+    # La référence n'est créée ou mise à jour qu'après une exécution sans anomalie
+    # (un état invalide produit une anomalie : il n'est donc jamais remplacé).
+    write_json_at(state_fd, "state.json", {"last_run": started.isoformat(),
+                                           "snapshot_ids": sorted(sn["id"] for sn in snapshots)})
     return finish("ok", EXIT_OK)
 
 

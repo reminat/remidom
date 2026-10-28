@@ -55,6 +55,49 @@
       et accessible en écriture (voir README, « Préparation du NAS »).
     quiet: true
 
+# Références calculées sur le runner, à partir du dépôt et des variables de ce déploiement :
+# même template, mêmes variables (celles de l'hôte NAS, conservées par delegate_to).
+- name: Create a local temporary file for the expected configuration
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .config.json
+  delegate_to: localhost
+  check_mode: false
+  changed_when: false
+  register: restic_maintenance_expected_tmp
+
+- name: Compute expected checksums on the runner
+  block:
+    - name: Render the expected configuration on the runner
+      ansible.builtin.template:
+        src: "{{ restic_maintenance_src }}/config.json.j2"
+        dest: "{{ restic_maintenance_expected_tmp.path }}"
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+
+    - name: Checksum of the expected configuration
+      ansible.builtin.stat:
+        path: "{{ restic_maintenance_expected_tmp.path }}"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      register: restic_maintenance_expected_cfg
+
+    - name: Checksum of the script in the repository
+      ansible.builtin.stat:
+        path: "{{ restic_maintenance_src }}/restic_maintenance.py"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      register: restic_maintenance_expected_py
+  always:
+    - name: Remove the local temporary file
+      ansible.builtin.file:
+        path: "{{ restic_maintenance_expected_tmp.path }}"
+        state: absent
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+
 - name: Deploy Restic maintenance script
   ansible.builtin.copy:
     src: "{{ restic_maintenance_src }}/restic_maintenance.py"
@@ -74,9 +117,17 @@
     - config.json
   register: restic_maintenance_checksums
 
-- name: Show checksums to pin in the DSM task
+- name: Show reference checksums (computed on the runner)
   ansible.builtin.debug:
-    msg: "{{ item.stat.checksum | default('(inconnu en mode check)') }}  {{ item.item }}"
-  loop: "{{ restic_maintenance_checksums.results }}"
-  loop_control:
-    label: "{{ item.item }}"
+    msg:
+      - "{{ restic_maintenance_expected_py.stat.checksum }}  restic_maintenance.py"
+      - "{{ restic_maintenance_expected_cfg.stat.checksum }}  config.json"
+
+- name: Verify that the deployed files match the references
+  ansible.builtin.assert:
+    that:
+      - restic_maintenance_checksums.results[0].stat.checksum == restic_maintenance_expected_py.stat.checksum
+      - restic_maintenance_checksums.results[1].stat.checksum == restic_maintenance_expected_cfg.stat.checksum
+    fail_msg: "Les fichiers présents sur le NAS ne correspondent pas aux références calculées sur le runner."
+    success_msg: "Fichiers déployés identiques aux références calculées sur le runner."
+  when: not ansible_check_mode

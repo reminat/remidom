@@ -4,17 +4,19 @@ Maintenance des repositories Restic exécutée **localement sur le NAS**, et non
 REST Server (qui reste en append-only pour les clients). Le mot de passe du repository
 ne quitte jamais le NAS.
 
-**Version actuelle : dry-run uniquement.** Rien n'est supprimé, et rien ne peut l'être :
+**Version actuelle : dry-run uniquement.** Le script ne supprime rien, et le repository
+n'est accessible qu'en lecture :
 
 | Protection | Mécanisme |
 |---|---|
-| Configuration | `mode` doit valoir `dry-run`, sinon le script s'arrête (code 2) avant tout appel à Docker. Le rôle Ansible refuse aussi toute autre valeur. |
+| Configuration | `mode` doit valoir `dry-run`, sinon arrêt (code 2) avant tout appel à Docker ; le rôle Ansible refuse aussi toute autre valeur. Chemins et paramètres de rétention validés strictement (aucune valeur ne peut ajouter ou modifier un argument). |
 | Commandes | Liste blanche (`version`, `snapshots`, `list`, `check`, `forget`) ; `forget` sans `--dry-run`, `prune`, `unlock`, `key`… sont refusés avant exécution. |
 | Système de fichiers | Repository et secret montés en **lecture seule** (`:ro`, `docker_base()`) ; conteneur `--read-only`, sans réseau, `--cap-drop ALL` (+ `DAC_READ_SEARCH`), `no-new-privileges`. **C'est la protection principale.** |
-| Vérification à l'exécution | Avant tout appel à restic, le script lance le même conteneur pour lire `/proc/self/mounts` et exige l'option `ro` sur `/`, `/repo` et `/run/secrets/restic_password` ; sinon arrêt (statut `unsafe_mounts`, code 2). |
-| Restic | `--no-lock` : aucun verrou écrit. Restic 0.19.1 n'accepte `--no-lock` pour `forget` qu'avec `--dry-run`, et passe alors le repository en mode dry-run. |
-| Image | Référence par digest (`restic/restic@sha256:…`) avec `--pull never`, puis contrôle de `restic version` (statut `unexpected_version`, code 4). |
+| Vérification à l'exécution | Avant tout appel à restic, un conteneur lancé avec les mêmes options lit `/proc/self/mounts` ; l'option `ro` est exigée sur `/`, `/repo` et `/run/secrets/restic_password`, sinon arrêt (`unsafe_mounts`, code 2). Portée exacte : voir « Limites du contrôle des montages ». |
+| Restic | `forget` est toujours lancé avec `--dry-run`. `--no-lock`, ajouté à toutes les commandes, évite seulement d'écrire un fichier de verrou dans le repository (ce qu'un montage en lecture seule interdirait de toute façon) : ce n'est **pas** un équivalent de `--dry-run`. |
+| Image | Référence par digest (`restic/restic@sha256:…`) avec `--pull never`, puis contrôle de `restic version` (`unexpected_version`, code 4). Le digest désigne une image précise ; il ne prouve à lui seul ni sa provenance ni son innocuité. |
 | Interpréteur | Le script refuse de démarrer sans `python3 -I` : sans mode isolé, un module (`json.py`…) déposé à côté du script serait importé en root. |
+| Stockage privé | État, rapports et verrou dans un dossier réservé à root hors des volumes de données, ouvert sans suivre de lien symbolique et vérifié à chaque niveau (voir « Stockage privé »). |
 
 ## Fichiers
 
@@ -22,15 +24,16 @@ ne quitte jamais le NAS.
 |---|---|---|
 | `restic_maintenance.py` | `/volume1/docker/restic-maintenance/<nom>/restic_maintenance.py` | déposé par le compte Ansible (`remi`) |
 | `config.json.j2` | `/volume1/docker/restic-maintenance/<nom>/config.json` | déposé par le compte Ansible |
-| — | `/volume1/docker/restic-maintenance/state/<nom>/` (verrou, état) | root, 0700, créé par le script (voir « Risques » : ACL) |
-| — | `/volume1/docker/restic-maintenance/logs/<nom>/report-*.json` | root, 0700, créé par le script |
+| — | `/root/restic-maintenance/<nom>/state/` (`lock`, `state.json`) | root, 0700, créé et vérifié par le script |
+| — | `/root/restic-maintenance/<nom>/logs/` (`report-*.json`) | root, 0700, créé et vérifié par le script |
 | — | `/volume1/docker/restic-maintenance/secrets/` | root, **ne pas modifier** |
 
 Droits constatés le 28/10/2026 sur `docker-test/` (`synoacltool -get`) : propriétaire
 root, affiché `drwxrwxrwx+` mais régi par les ACL : écriture pour `administrators`,
 `ContainerManager`, le propriétaire et root ; lecture seule pour `everyone` ; refus pour
-`srv`. Ces fichiers ne sont donc **pas** protégés contre un administrateur ou un processus
-`ContainerManager` : voir « Premier lancement manuel ».
+`srv`. Les fichiers déployés ne sont donc **pas** protégés contre un administrateur ou un
+processus `ContainerManager` : ils ne sont jamais exécutés directement (voir « Premier
+lancement manuel »).
 
 Configuration : `infra/ansible/roles/restic_maintenance/defaults/main.yml` (valeurs communes)
 et `infra/ansible/inventories/<env>/group_vars/nas.yml` (repository, secret, groupes
@@ -63,11 +66,13 @@ compte pas dans leurs rafales. La disparition d'un identifiant figé est une ano
 
 ## Déroulé d'une exécution
 
-1. Lecture et validation de `config.json` (mode, chemins, listes autorisées, fenêtre).
-2. Verrou local exclusif (`flock` sur `state/<nom>/lock`) : une seconde exécution sort en code 75.
+1. Lecture et validation stricte de `config.json`.
+2. Ouverture du stockage privé (`private_dir`), verrou exclusif (`state/lock`) : une
+   seconde exécution sort en code 75.
 3. Fenêtre horaire (`window`), sauf `--ignore-window` pour un lancement manuel.
-4. Conteneur `restic/restic:0.19.1`, délai global `timeout_minutes` (conteneur tué au-delà) :
-   `version`, `snapshots --json`, `list locks`, `check` (sans `--read-data`), puis
+4. Contrôle des montages, puis `restic version` (version attendue), puis, dans le délai
+   global `timeout_minutes` (conteneur tué au-delà) : `snapshots --json`, `list locks`,
+   `check` (sans `--read-data`) et
    `forget --dry-run --json --group-by host,paths --keep-within 30d --keep-daily 14 --keep-weekly 8 --keep-monthly 12`.
 5. Contrôles (toute erreur → statut `anomaly`, code 1) :
 
@@ -81,18 +86,66 @@ compte pas dans leurs rafales. La disparition d'un identifiant figé est une ano
    | `burst` | plus de `max_snapshots_per_24h` snapshots d'un même groupe régulier sur 24 h glissantes, sur tout l'historique |
    | `backdated_snapshot` | snapshot **nouveau** depuis la dernière exécution validée mais daté de plus de `backdate_tolerance_hours` avant elle. Un faux snapshot antidaté pourrait sinon remplacer le vrai comme « dernier du jour ». |
    | `snapshots_disappeared` | snapshot présent à la dernière exécution validée et absent maintenant (le repository est censé être append-only) |
+   | `state_invalid` | `state.json` présent mais inutilisable (JSON invalide, plus de 1 Mio, structure ou valeurs incorrectes, `last_run` dans le futur, fichier non régulier, lien symbolique, droits ou propriétaire inattendus). Les comparaisons sont abandonnées et la référence existante **n'est pas remplacée**. |
    | `remove_count`, `remove_percent` | suppressions estimées au-delà de `max_remove_count` / `max_remove_percent` |
    | `min_keep` | groupe qui tomberait sous `min_keep_per_group` snapshots conservés |
    | `forget_mismatch` | `forget` ne couvre pas exactement les snapshots listés |
 
    La détection repose sur l'**identifiant** des snapshots mémorisé à chaque exécution
-   validée (`state/<nom>/state.json`), jamais sur les dates de modification des fichiers
-   du repository, qui ne prouvent rien. La référence n'est mise à jour qu'après une
-   exécution sans anomalie ; la première exécution la crée.
-6. Rapport JSON dans `logs/<nom>/` (90 derniers conservés) et résumé sur la sortie standard.
+   validée (`state/state.json`), jamais sur les dates de modification des fichiers du
+   repository, qui ne prouvent rien. La référence n'est créée ou mise à jour qu'après une
+   exécution sans anomalie ; la première exécution la crée (`baseline`).
+6. Rapport JSON dans `logs/` (90 derniers conservés) et résumé sur la sortie standard.
 
-Codes de sortie : `0` ok, `1` anomalie, `2` configuration, `3` hors fenêtre, `4` erreur
-restic/Docker, `5` délai dépassé, `75` exécution déjà en cours.
+Codes de sortie : `0` ok, `1` anomalie, `2` configuration, stockage ou montages,
+`3` hors fenêtre, `4` erreur restic/Docker ou version inattendue, `5` délai dépassé,
+`75` exécution déjà en cours.
+
+## Stockage privé
+
+`private_dir` (par défaut `/root/restic-maintenance/<nom>`) contient `state/` et `logs/`.
+Le script refuse tout chemin sous `/volumeN/` : les volumes de données sont régis par les
+ACL Synology, qui peuvent donner l'écriture aux administrateurs et à `ContainerManager`.
+
+À chaque exécution, le script :
+- ouvre le chemin **niveau par niveau depuis `/`**, chaque niveau relativement au
+  descripteur du précédent, avec `O_NOFOLLOW | O_DIRECTORY` : un lien symbolique, à
+  n'importe quel niveau, fait échouer l'ouverture ;
+- vérifie chaque niveau sur le descripteur ouvert (`fstat`, donc sans nouvelle résolution
+  de chemin) : répertoire, propriétaire root, pas d'écriture pour le groupe ni les autres
+  (sauf répertoire « sticky », dont les entrées de root ne peuvent être ni renommées ni
+  supprimées par d'autres), aucun attribut étendu d'ACL (`system.posix_acl*` ou nom
+  contenant `syno`) ; le dernier niveau (`state/` ou `logs/`) doit être exactement en
+  0700 ;
+- refuse un système de fichiers monté avec `synoacl` (`/proc/self/mountinfo`) ;
+- crée les niveaux manquants en 0700 (`mkdir` relatif au descripteur du parent vérifié) ;
+- effectue **toutes** les opérations ensuite relativement aux descripteurs vérifiés :
+  verrou ouvert sans troncature ni suivi de lien (`O_NOFOLLOW`), lecture de
+  `state.json` (`O_NOFOLLOW`, contrôle du type, du propriétaire, des droits, du nombre de
+  liens et de la taille avant lecture), écriture via un fichier temporaire au nom
+  aléatoire créé avec `O_EXCL | O_NOFOLLOW` puis `rename` dans le même répertoire, rotation
+  par `unlink` relatif (un lien symbolique est supprimé, jamais suivi).
+
+Garanties : une fois un niveau vérifié, les opérations portent sur ce répertoire précis,
+même si un chemin est ensuite renommé ou remplacé (il n'y a plus de résolution de chemin
+entre le contrôle et l'utilisation). Si tous les niveaux sont réservés à root, personne
+d'autre ne peut d'ailleurs y créer, renommer ou remplacer quoi que ce soit.
+
+Limites :
+- un compte capable de devenir root peut tout modifier ;
+- la détection des ACL repose sur des noms d'attributs étendus et sur l'option `synoacl` ;
+  un mécanisme d'ACL inconnu échapperait au contrôle, d'où l'emplacement hors volume ;
+- `/root` n'est pas sauvegardé par Hyper Backup : perdre `state.json` ramène à une
+  nouvelle référence (`baseline` dans le rapport, à remarquer lors de la relecture) ;
+- les rapports ne sont lisibles qu'avec `sudo`.
+
+**Vérification sur DSM avant le premier lancement** (lecture seule) :
+```sh
+sudo stat -c '%A %a %U:%G %n' / /root          # attendu : root:root, / sans écriture groupe/autres, /root en 0700
+grep -E '^[0-9]+ [0-9]+ [0-9:]+ [^ ]+ / ' /proc/self/mountinfo   # système de fichiers racine : pas de « synoacl »
+sudo /usr/bin/python3 -I -c 'import os; [print(p, os.listxattr(p)) for p in ("/", "/root")]'   # attendu : aucune ACL
+```
+Le script refait ces contrôles à chaque exécution et refuse de démarrer si l'un échoue.
 
 ## Préparation du NAS (une fois, par un administrateur)
 
@@ -101,8 +154,7 @@ Ansible n'utilise pas `sudo` : ces étapes sont manuelles. Ne modifier ni les AC
 
 1. **SSH** : le service SSH de DSM écoute sur le port 4022. Sur DSM, seuls les membres
    du groupe `administrators` peuvent se connecter en SSH.
-2. **Configuration sshd** : l'authentification par clé doit être active et un sous-système
-   SFTP déclaré :
+2. **Configuration sshd** : l'authentification par clé doit être active :
    ```sh
    sudo grep -iE '^\s*(PubkeyAuthentication|AuthorizedKeysFile|StrictModes|Subsystem|AllowUsers|AllowGroups|Match)' /etc/ssh/sshd_config
    ```
@@ -122,16 +174,13 @@ Ansible n'utilise pas `sudo` : ces étapes sont manuelles. Ne modifier ni les AC
      accessible en écriture au groupe ou aux autres : vérifier
      `ls -ld /var/services/homes/remi /var/services/homes/remi/.ssh` et
      `ls -l /var/services/homes/remi/.ssh/authorized_keys` (attendu : `.ssh` 0700,
-     `authorized_keys` 0600).
+     `authorized_keys` 0600) ;
    - détruire la copie locale de la clé privée une fois le secret créé.
 4. **Clé d'hôte** : `infra/ansible/inventories/test/nas_known_hosts` contient la clé
    d'hôte ED25519 du NAS ; Ansible refuse la connexion si elle ne correspond pas
-   (`ansible_host_key_checking: true`, uniquement pour le NAS). Avant le premier
-   déploiement, **comparer l'empreinte** indiquée dans ce fichier avec celle du NAS :
-   ```sh
-   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
-   ```
-   Si DSM régénère ses clés d'hôte, mettre à jour ce fichier par une PR.
+   (`ansible_host_key_checking: true`, uniquement pour le NAS). Empreinte comparée sur le
+   NAS le 28/10/2026 (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`). Si DSM
+   régénère ses clés d'hôte, mettre à jour ce fichier par une PR.
 5. **Python et Docker** : `/usr/bin/python3 --version` (3.8 minimum),
    `ls -l /usr/local/bin/docker`, `sudo docker version --format '{{.Server.Version}}'`
    (20.10 minimum pour `--pull never`).
@@ -166,7 +215,7 @@ Ansible n'utilise pas `sudo` : ces étapes sont manuelles. Ne modifier ni les AC
      -v /volume1/Restic/docker-test:/repo:ro \
      -v /volume1/docker/restic-maintenance/secrets/restic_password_test:/run/secrets/restic_password:ro \
      -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password \
-     restic/restic:0.19.1 --no-lock --no-cache cat config > /dev/null && echo "secret et repository lisibles"
+     restic/restic@sha256:<digest> --no-lock --no-cache cat config > /dev/null && echo "secret et repository lisibles"
    ```
    En cas de `permission denied`, décider entre ajouter `DAC_OVERRIDE` (les montages
    restent en lecture seule) et ajuster l'ACL.
@@ -186,12 +235,15 @@ Ansible n'utilise pas `sudo` : ces étapes sont manuelles. Ne modifier ni les AC
    on linux/amd64`. Pour changer de version : modifier la version **et** le digest dans la
    même PR, après le même contrôle.
 
-   Le digest garantit le contenu exact de l'image. Le contrôle de `restic version` est
-   complémentaire : il détecte un digest mis à jour sans la version attendue (ou
-   l'inverse), protège le cas où le digest serait vidé (référence par tag, qu'un
-   `docker tag` local peut détourner), et inscrit la version réellement exécutée dans
-   chaque rapport. Il ne protège pas contre une image malveillante qui afficherait
-   `0.19.1` : seul le digest le fait.
+   Le digest **identifie** l'image attendue : Docker n'exécutera que l'image dont le
+   contenu correspond à cette empreinte. Il ne prouve pas à lui seul sa provenance ni son
+   innocuité : il a été relevé sur Docker Hub (compte `restic`), sans vérification de
+   signature ; la confiance repose sur le projet restic et sur Docker Hub au moment du
+   relevé. Le contrôle de `restic version` est complémentaire : il détecte un digest mis à
+   jour sans la version attendue (ou l'inverse), protège le cas où le digest serait vidé
+   (référence par tag, qu'un `docker tag` local peut détourner), et inscrit la version
+   réellement exécutée dans chaque rapport. Il ne protège pas contre une image malveillante
+   qui afficherait `0.19.1`.
 10. **Groupes attendus** : `restic_maintenance_groups` dans `group_vars/nas.yml` (le
     playbook refuse une liste vide). En cas d'anomalie, le rapport liste les hôtes et
     chemins réellement présents (`summary.hosts`, `summary.paths`) et le nombre de
@@ -208,98 +260,109 @@ rejeté).
 1. *Actions → NAS — Restic maintenance → Run workflow*, `apply` décoché :
    exécute `ansible-playbook --check --diff` (aucune écriture sur le NAS).
 2. Relire le diff, puis relancer avec `apply` coché.
-3. Le dernier bloc affiche les SHA-256 de `restic_maintenance.py` et `config.json`.
+3. Le bloc « Show reference checksums » affiche les SHA-256 de référence ; la tâche
+   suivante (mode `apply`) vérifie que les fichiers présents sur le NAS leur sont
+   identiques.
 
 Le rôle ne lance ni Docker ni restic et ne crée pas la tâche DSM.
 
-## Risques
+### Empreintes de référence
 
-- **Compte de déploiement administrateur** : DSM réserve SSH aux administrateurs, et
-  `remi` dispose de droits étendus par les ACL Synology, y compris, a priori, sur
-  `/volume1/docker/restic-maintenance` (`secrets/`, `state/`, `logs/`) et sur
-  `/volume1/Restic`. La clé `NAS_SSH_KEY` donne donc ces droits : sa compromission
-  permettrait de modifier les fichiers déployés, l'état de référence ou les rapports,
-  et de contourner l'append-only du REST Server. Atténuations : clé dédiée et
-  révocable, restreinte à `10.10.20.53` sans redirections, clé d'hôte épinglée,
-  exécution depuis une copie réservée à root vérifiée contre des empreintes obtenues
-  hors du NAS (qui empêche d'exécuter un fichier modifié, sans empêcher la
-  modification elle-même ni protéger `state/` et `logs/`), snapshots Btrfs et Hyper
-  Backup comme filet. Les empreintes ne protègent pas contre quelqu'un qui peut aussi
-  modifier la référence ou devenir root. Isoler un compte de déploiement sans droit
-  sur `/volume1/Restic` demanderait de modifier les ACL : décision à prendre
-  ultérieurement.
-- **Référence initiale** : si le repository est déjà altéré lors de la première
-  exécution, l'anomalie est intégrée à la référence.
-- **`check` sans verrou** : erreurs transitoires possibles pendant une sauvegarde.
+Les deux empreintes sont calculées **sur le runner**, avant le dépôt :
+- `restic_maintenance.py` : empreinte du fichier du dépôt extrait par le workflow ;
+- `config.json` : le template est rendu dans un fichier temporaire du runner
+  (`delegate_to: localhost`), avec le même template et les **variables de l'hôte NAS
+  utilisées pour ce déploiement** (la délégation conserve les variables de l'hôte cible).
+  Le filtre `to_nice_json` trie les clés : le rendu est déterministe.
+
+Correspondance avec le déployé : en mode `apply`, le rôle compare l'empreinte relue sur le
+NAS juste après le dépôt avec la référence et échoue en cas de différence. Une différence
+plus tardive (modification sur le NAS) est détectée au lancement, par la vérification de
+la copie.
+
+Hypothèses de confiance restantes : intégrité du runner `docker-test-01`, du code extrait
+(commit relu) et d'Ansible ; affichage fidèle des journaux par GitHub. L'empreinte du
+script peut être recalculée indépendamment sur un poste de confiance
+(`git show <commit>:services/synology/restic-maintenance/restic_maintenance.py | sha256sum`)
+et comparée à celle du journal ; celle de `config.json` demande Ansible pour être
+reproduite hors du runner.
 
 ## Premier lancement manuel
 
 Les fichiers déployés dans `docker-test/` sont modifiables par les administrateurs et
-par `ContainerManager` (ACL). Le lancement en root se fait donc **depuis une copie dans
-un répertoire réservé à root**, vérifiée **après** la copie, puis exécutée en mode isolé.
+par `ContainerManager` (ACL). Ils ne sont jamais exécutés sur place : le bloc ci-dessous
+les copie dans un répertoire temporaire réservé à root, vérifie **la copie**, puis
+l'exécute en mode isolé. Il s'arrête à la première erreur et supprime toujours sa copie.
 
-**Empreintes de référence**, à obtenir **hors du NAS** :
-- `restic_maintenance.py` : depuis le commit relu et mergé, sur un poste de confiance :
-  `git show <commit>:services/synology/restic-maintenance/restic_maintenance.py | sha256sum` ;
-- `config.json` : bloc « Show checksums » du workflow qui l'a déployé (calculé sur le NAS
-  juste après le dépôt).
-
-En SSH sur le NAS, avec un compte administrateur :
+En SSH sur le NAS, avec un compte administrateur, en remplaçant les deux empreintes par
+celles du journal du workflow :
 
 ```sh
-REF_PY=<sha256 de restic_maintenance.py>
-REF_CFG=<sha256 de config.json>
+REF_PY='<sha256 de restic_maintenance.py>'
+REF_CFG='<sha256 de config.json>'
+sudo /bin/sh -eu -s -- "$REF_PY" "$REF_CFG" <<'EOF'
 SRC=/volume1/docker/restic-maintenance/docker-test
-
-# 1. Copie dans un répertoire temporaire réservé à root (0700)
-RUN=$(sudo mktemp -d /root/restic-maint.XXXXXX)
-sudo cp "$SRC/restic_maintenance.py" "$SRC/config.json" "$RUN/"
-
-# 2. Vérification de la COPIE (et non de l'original, qui peut changer entre-temps)
-printf '%s  %s\n' "$REF_PY" "$RUN/restic_maintenance.py" "$REF_CFG" "$RUN/config.json" \
-  | sudo sha256sum -c - || { sudo rm -rf "$RUN"; echo "EMPREINTE DIFFÉRENTE : arrêt"; }
-
-# 3. Lancement isolé depuis la copie (seulement si l'étape 2 a affiché OK pour les deux fichiers)
-sudo /usr/bin/python3 -I "$RUN/restic_maintenance.py" --config "$RUN/config.json" --ignore-window
-echo "code de sortie : $?"
-
-# 4. Rapport, puis suppression de la copie
-sudo ls -l /volume1/docker/restic-maintenance/logs/docker-test/
-sudo rm -rf "$RUN"
+for ref in "$1" "$2"; do
+  case "$ref" in ''|*[!0-9a-f]*) echo "empreinte invalide : $ref" >&2; exit 2 ;; esac
+  [ "${#ref}" -eq 64 ] || { echo "empreinte invalide : $ref" >&2; exit 2; }
+done
+[ ! -L /root ] && [ "$(stat -c '%u %a' /root)" = "0 700" ] || { echo "/root inattendu" >&2; exit 2; }
+umask 077
+RUN=$(mktemp -d /root/restic-maint-run.XXXXXX)
+case "$RUN" in
+  /root/restic-maint-run.??????) ;;
+  *) echo "chemin temporaire inattendu : $RUN" >&2; exit 2 ;;
+esac
+trap 'rm -rf -- "$RUN"' EXIT
+trap 'exit 130' INT TERM
+cp -- "$SRC/restic_maintenance.py" "$SRC/config.json" "$RUN/"
+[ "$(ls -A -- "$RUN" | sort | tr '\n' ' ')" = "config.json restic_maintenance.py " ]
+printf '%s  %s\n' "$1" "$RUN/restic_maintenance.py" "$2" "$RUN/config.json" | sha256sum -c -
+set +e
+/usr/bin/python3 -I "$RUN/restic_maintenance.py" --config "$RUN/config.json" --ignore-window
+code=$?
+echo "code de sortie : $code"
+exit "$code"
+EOF
 ```
 
-Ce que cette procédure apporte :
-- un fichier modifié dans `docker-test/` (par un administrateur, `ContainerManager` ou la
-  clé de déploiement) n'est pas exécuté : l'empreinte de la copie ne correspond plus ;
-- la copie ne peut plus changer entre sa vérification et son exécution (répertoire root
-  0700) ;
-- `-I` ignore tout module déposé à côté du script, et le script refuse de démarrer sans.
+Fonctionnement :
+- `sh -eu` : toute commande en échec (copie, contenu inattendu du répertoire, empreinte)
+  arrête le bloc avant l'exécution ; `-u` refuse une variable non définie ;
+- les empreintes sont passées en arguments (pas d'expansion dans le script) et vérifiées
+  (64 caractères hexadécimaux) ;
+- le répertoire temporaire est créé par `mktemp` sous `/root` (0700, root) ; son chemin est
+  comparé au motif attendu **avant** l'installation du `trap`, qui ne peut donc supprimer
+  que ce répertoire (`rm -rf --` ne suit pas les liens symboliques) ;
+- la vérification porte sur la copie, que personne d'autre que root ne peut plus modifier ;
+- le rapport se lit ensuite avec `sudo ls -l /root/restic-maintenance/docker-test/logs/`.
 
-Ses limites :
-- elle ne vaut que si les empreintes de référence sont fiables : une compromission du
-  dépôt GitHub ou du workflow fausserait aussi la référence ; d'où l'empreinte du script
-  recalculée depuis le commit relu ;
-- elle ne protège pas contre un compte capable de devenir root (un administrateur qui
-  connaît son mot de passe `sudo` peut tout contourner) ;
-- elle ne couvre ni l'interpréteur Python, ni le binaire Docker de Container Manager, ni
-  le démon Docker, ni `state/` et `logs/` (également modifiables via les ACL : la
-  référence des snapshots peut être altérée) ; l'image est couverte par son digest.
-
-**Absence d'écriture dans le repository** : elle repose sur le montage `:ro` du
-repository et du secret dans `docker_base()`, avec `--read-only` pour le reste du
-conteneur, et sur la vérification à l'exécution de `/proc/self/mounts` faite par le script
-avant tout appel à restic (rapport : `mounts_readonly: true`). Le statut
-`unsafe_mounts` arrête tout. `--no-lock` et `--dry-run` sont une seconde barrière, propre
-à restic.
+Limites :
+- tout repose sur des empreintes de référence fiables (voir « Empreintes de référence ») ;
+- un compte capable de devenir root peut contourner l'ensemble ;
+- la copie ne couvre ni l'interpréteur Python, ni Docker (binaire de Container Manager et
+  démon) ; l'image est désignée par son digest ;
+- un fichier source remplacé par un tube nommé ferait attendre `cp` indéfiniment (blocage,
+  sans exécution de code) : interrompre avec Ctrl-C, le `trap` nettoie.
 
 Points à vérifier lors de ce premier lancement :
-- le conteneur lit le repository et le secret malgré `--cap-drop ALL` (constaté lors des
-  tests manuels du 28/10/2026) ;
-- `check` sans verrou peut signaler des erreurs transitoires si une sauvegarde tourne en
-  même temps : relancer hors sauvegarde avant de conclure ;
 - le rapport : `mounts_readonly`, `restic_version`, `summary.per_group` (attendu
   `core` 38 et `validation` 1, ou plus si une sauvegarde a eu lieu), estimation des
-  suppressions par groupe ; la première exécution crée la référence (`baseline`).
+  suppressions par groupe ; la première exécution crée la référence (`baseline`) ;
+- `check` sans verrou peut signaler des erreurs transitoires si une sauvegarde tourne en
+  même temps : relancer hors sauvegarde avant de conclure.
+
+### Limites du contrôle des montages
+
+Le contrôle lit `/proc/self/mounts` dans un conteneur créé avec exactement les mêmes
+options que les conteneurs restic (`docker_base()`), juste avant eux. Il établit que, pour
+ce conteneur, le noyau a appliqué l'option `ro` aux points de montage `/`, `/repo` et
+`/run/secrets/restic_password`. Il n'établit pas : que les conteneurs restic suivants ont
+reçu les mêmes montages (c'est seulement attendu, puisque les options sont identiques) ;
+que la source de `/repo` est bien le repository configuré ; l'absence de sous-montages
+inscriptibles sous `/repo` (avec Docker 24, un montage `ro` n'est pas récursif). La
+protection effective reste le montage `:ro` lui-même, que le conteneur ne peut pas
+remonter en écriture (`CAP_SYS_ADMIN` retirée, `no-new-privileges`).
 
 ## Tâche planifiée DSM (à créer, **désactivée**)
 
@@ -314,23 +377,50 @@ défini par l'utilisateur* :
 | Planification | quotidienne, heure **à définir** dans la fenêtre `window` (après les sauvegardes, fin avant 05:00) |
 | Paramètres de la tâche | « Envoyer les détails d'exécution par e-mail » → « uniquement si le script se termine anormalement » |
 
-Script, selon la même procédure que le lancement manuel (copie réservée à root,
-vérification de la copie, mode isolé) :
+Script : le même bloc que le lancement manuel, sans `sudo` (la tâche s'exécute en root),
+sans `--ignore-window`, avec les empreintes écrites dans la tâche :
 
 ```sh
+set -eu
+REF_PY='<sha256 de restic_maintenance.py>'
+REF_CFG='<sha256 de config.json>'
 SRC=/volume1/docker/restic-maintenance/docker-test
-RUN=$(mktemp -d /root/restic-maint.XXXXXX) || exit 2
-trap 'rm -rf "$RUN"' EXIT
-cp "$SRC/restic_maintenance.py" "$SRC/config.json" "$RUN/" || exit 2
-printf '%s  %s\n' \
-  '<sha256 restic_maintenance.py>' "$RUN/restic_maintenance.py" \
-  '<sha256 config.json>' "$RUN/config.json" | sha256sum -c --quiet - || exit 2
+[ ! -L /root ] && [ "$(stat -c '%u %a' /root)" = "0 700" ]
+umask 077
+RUN=$(mktemp -d /root/restic-maint-run.XXXXXX)
+case "$RUN" in /root/restic-maint-run.??????) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$RUN"' EXIT
+trap 'exit 130' INT TERM
+cp -- "$SRC/restic_maintenance.py" "$SRC/config.json" "$RUN/"
+[ "$(ls -A -- "$RUN" | sort | tr '\n' ' ')" = "config.json restic_maintenance.py " ]
+printf '%s  %s\n' "$REF_PY" "$RUN/restic_maintenance.py" "$REF_CFG" "$RUN/config.json" | sha256sum -c --quiet -
+set +e
 /usr/bin/python3 -I "$RUN/restic_maintenance.py" --config "$RUN/config.json"
+exit $?
 ```
 
-Les empreintes sont stockées dans la tâche DSM (configuration système, modifiable par
-un administrateur dans DSM) : après chaque déploiement qui modifie ces fichiers, les
-mettre à jour à partir de références obtenues hors du NAS. Mêmes limites que ci-dessus.
+Les empreintes stockées dans la tâche sont modifiables par un administrateur dans DSM :
+après chaque déploiement qui modifie ces fichiers, les mettre à jour à partir des
+références du workflow. Mêmes limites que ci-dessus.
+
+## Risques
+
+- **Compte de déploiement administrateur** : DSM réserve SSH aux administrateurs, et
+  `remi` dispose de droits étendus par les ACL Synology sur `/volume1/docker` et, a
+  priori, sur `/volume1/Restic`. La clé `NAS_SSH_KEY` donne ces droits (sans le mot de
+  passe `sudo`) : sa compromission permettrait de modifier les fichiers déployés et de
+  contourner l'append-only du REST Server. Atténuations : clé dédiée et révocable,
+  restreinte à `10.10.20.53` sans redirections, clé d'hôte épinglée ; fichiers déployés
+  jamais exécutés sans vérification de leur copie ; état et rapports hors de portée de ce
+  compte ; snapshots Btrfs et Hyper Backup comme filet. Les empreintes empêchent
+  d'exécuter un fichier modifié, pas de le modifier, et ne protègent pas contre
+  quelqu'un qui peut aussi altérer la référence ou devenir root. Isoler un compte de
+  déploiement sans droit sur `/volume1/Restic` demanderait de modifier les ACL : décision
+  à prendre ultérieurement.
+- **Référence initiale** : si le repository est déjà altéré lors de la création de la
+  référence (premier lancement, ou après perte de `state.json`), l'anomalie y est
+  intégrée.
+- **`check` sans verrou** : erreurs transitoires possibles pendant une sauvegarde.
 
 ## Concurrence
 
