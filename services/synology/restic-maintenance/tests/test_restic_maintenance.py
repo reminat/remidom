@@ -364,6 +364,44 @@ class KeepWithinGuardTest(unittest.TestCase):
                 rm.parse_duration(bad)
 
 
+class ReadDataTest(unittest.TestCase):
+    SUNDAY = dt.date(2026, 11, 1)        # dimanche
+    MONDAY = dt.date(2026, 11, 2)
+
+    def test_full_read_on_configured_day(self):
+        rd = {"weekdays": [7], "parts": 1}
+        self.assertEqual(rm.read_data_args(rd, self.SUNDAY), ["--read-data"])
+        self.assertEqual(rm.read_data_args(rd, self.MONDAY), [])
+        self.assertEqual(rm.read_data_args(rm.NO_READ_DATA, self.SUNDAY), [])
+
+    def test_forced_read(self):
+        self.assertEqual(rm.read_data_args(rm.NO_READ_DATA, self.MONDAY, force=True), ["--read-data"])
+
+    def test_subset_rotation_covers_everything(self):
+        # 4 parties, un dimanche par semaine pendant 4 semaines consécutives : 1/4, 2/4, 3/4, 4/4.
+        rd = {"weekdays": [7], "parts": 4}
+        seen = [rm.read_data_args(rd, self.SUNDAY + dt.timedelta(weeks=w))[0] for w in range(4)]
+        self.assertEqual(sorted(seen), ["--read-data-subset=%d/4" % n for n in (1, 2, 3, 4)])
+
+    def test_subset_rotation_across_year_end(self):
+        # Pas de rupture au 1er janvier : semaines consécutives = parties consécutives.
+        rd = {"weekdays": [7], "parts": 3}
+        days = [dt.date(2026, 12, 20) + dt.timedelta(weeks=w) for w in range(6)]
+        parts = [int(rm.read_data_args(rd, d)[0].split("=")[1].split("/")[0]) for d in days]
+        for a, b in zip(parts, parts[1:]):
+            self.assertEqual(b, a % 3 + 1)
+
+    def test_check_options_allowlist(self):
+        for ok in (["--no-lock", "--no-cache", "check"], ["--no-lock", "--no-cache", "check", "--read-data"],
+                   ["--no-lock", "--no-cache", "check", "--read-data-subset=2/4"]):
+            rm.check_safe(ok)
+        for bad in (["--no-lock", "check", "--read-data", "--read-data-subset=1/2"],
+                    ["--no-lock", "check", "--read-data-subset=10%"], ["--no-lock", "check", "--with-cache"],
+                    ["--no-lock", "check", "--read-data-subset=1/2;x"], ["--no-lock", "check", "--repair"]):
+            with self.assertRaises(rm.StepError, msg=bad):
+                rm.check_safe(bad)
+
+
 class SafetyTest(unittest.TestCase):
     def test_forget_requires_dry_run(self):
         with self.assertRaises(rm.StepError):
@@ -794,6 +832,16 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(rm.ConfigError):
             rm.load_config(self.write(cfg(expected_restic_version="latest")))
 
+    def test_read_data_config(self):
+        self.assertEqual(rm.load_config(self.write(cfg(read_data={"weekdays": [7], "parts": 1})))["read_data"]["parts"], 1)
+        for bad in ({"weekdays": [0], "parts": 1}, {"weekdays": [8], "parts": 1}, {"weekdays": [7, 7], "parts": 1},
+                    {"weekdays": "7", "parts": 1}, {"weekdays": [7], "parts": 0}, {"weekdays": [7], "parts": 53},
+                    {"weekdays": [7], "parts": "1"}, {"weekdays": [7]}, {"weekdays": [7], "parts": 1, "x": 1}):
+            with self.assertRaises(rm.ConfigError, msg=bad):
+                rm.load_config(self.write(cfg(read_data=bad)))
+        with self.assertRaises(rm.ConfigError):
+            rm.load_config(self.write(cfg(read_data={"weekdays": [7], "parts": 1}, run_check=False)))
+
     def test_window(self):
         w = {"start": "23:00", "end": "02:00"}
         self.assertTrue(rm.in_window(w, dt.datetime(2026, 1, 1, 23, 30)))
@@ -903,6 +951,16 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
 
     def tearDown(self):
         rm.DOCKER_BIN = self._orig
+
+    def run_main(self, snapshots, forget, extra_args, exits=None):
+        fixtures = {"version": "restic 0.19.1 compiled with go1.26.4 on linux/amd64", "snapshots": snapshots,
+                    "list": "", "check": "no errors were found", "forget": forget, "mounts": MOUNTS_OK,
+                    "exits": exits or {}}
+        with open(self.fixtures, "w") as f:
+            json.dump(fixtures, f)
+        open(self.restic_log, "w").close()
+        open(self.log, "w").close()
+        return rm.main(["--config", self.config, "--ignore-window"] + extra_args)
 
     def run_with(self, snapshots, forget, mounts=None, version="restic 0.19.1 compiled with go1.26.4 on linux/amd64",
                  gate_mounts=None, exits=None, init=False):
@@ -1132,6 +1190,31 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         code, _ = self.run_with([], [], gate_mounts=gate)
         self.assertEqual(code, rm.EXIT_CONFIG)
         self.assertEqual(self.restic_calls(), [])
+
+    def check_call(self):
+        return [c for c in self.restic_calls() if "check" in c][0]
+
+    def test_forced_read_data(self):
+        s, forget = self.clean_repo()
+        code = self.run_main(s, forget, ["--init-baseline", "--read-data"])
+        self.assertEqual(code, rm.EXIT_OK)
+        self.assertEqual(self.check_call(), ["--no-lock", "--no-cache", "check", "--read-data"])
+        self.assertEqual(self.report()["check"], {"read_data": "--read-data", "ok": True})
+
+    def test_daily_check_without_read_data(self):
+        s, forget = self.clean_repo()
+        code, _ = self.run_with(s, forget, init=True)
+        self.assertEqual(code, rm.EXIT_OK)
+        self.assertEqual(self.check_call(), ["--no-lock", "--no-cache", "check"])
+        self.assertEqual(self.report()["check"], {"read_data": "aucune", "ok": True})
+
+    def test_read_data_failure_is_reported(self):
+        s, forget = self.clean_repo()
+        code = self.run_main(s, forget, ["--init-baseline", "--read-data"], exits={"check": 1})
+        self.assertEqual(code, rm.EXIT_RESTIC)
+        r = self.report()
+        self.assertEqual((r["status"], r["check"]), ("restic_error", {"read_data": "--read-data", "ok": False}))
+        self.assertFalse(os.path.exists(self.state_path()))
 
     def test_restic_exit_97_is_not_mistaken_for_gate(self):
         # restic qui sort lui-même en 97 (sans le marqueur de la barrière) reste une erreur restic.

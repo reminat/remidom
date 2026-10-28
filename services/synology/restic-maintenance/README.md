@@ -76,7 +76,8 @@ compte pas dans leurs rafales. La disparition d'un identifiant figé est une ano
    (`baseline_exists`, code 7, aucun conteneur lancé) si une référence valide existe déjà.
 4. Contrôle des montages, puis `restic version` (version attendue), puis, dans le délai
    global `timeout_minutes` (conteneur tué au-delà) : `snapshots --json`, `list locks`,
-   `check` (sans `--read-data`) et
+   `check` (structure ; **lecture des données** les jours de `read_data`, voir « Vérification
+   des données ») et
    `forget --dry-run --json --group-by host,paths --keep-within 30d --keep-daily 14 --keep-weekly 8 --keep-monthly 12`.
 5. Contrôles (toute erreur → statut `anomaly`, code 1) :
 
@@ -133,6 +134,59 @@ Codes de sortie : `0` ok ou référence créée, `1` anomalie, `2` configuration
 ou montages, `3` hors fenêtre, `4` erreur restic/Docker ou version inattendue, `5` délai
 dépassé, `6` référence absente, `7` référence déjà présente avec `--init-baseline`,
 `75` exécution déjà en cours.
+
+## Vérification des données
+
+Le contrôle quotidien lance `restic check` (structure : index, snapshots, arbres). Les jours
+listés dans `read_data.weekdays` (par défaut **le dimanche**), le même `check` **relit en
+plus les données** :
+
+| `read_data.parts` | Option restic | Couverture |
+|---|---|---|
+| `1` (défaut) | `--read-data` | tous les packs référencés par l'index, à chaque fois |
+| `t > 1` | `--read-data-subset=n/t` | un groupe de packs sur `t` (réparti selon l'identifiant du pack), `n` tournant chaque semaine : tout est relu en `t` semaines, y compris les packs ajoutés entre-temps |
+
+- **Ce que cela vérifie** : chaque pack est relu depuis le disque du NAS, déchiffré et son
+  empreinte contrôlée (corruption, secteurs défectueux, fichier tronqué). **Limites** : les
+  packs non référencés par l'index ne sont pas relus (`check` les signale seulement) ; cela
+  ne prouve pas qu'une restauration complète fonctionne (voir les tests de restauration).
+- **Lecture seule** : même conteneur que le contrôle quotidien (montage `:ro`, barrière de
+  montages, `--no-lock`) ; avec `--no-cache`, `check` n'écrit aucun cache, même dans `/tmp`.
+  La liste blanche n'autorise pour `check` que `--read-data` ou `--read-data-subset=n/t`.
+- **Charge et durée** : environ 70 Mio en prod à ce jour : quelques secondes. Le tout reste
+  borné par le délai global de 120 min ; à titre indicatif, un disque de NAS relit plusieurs
+  centaines de Go dans ce délai. Si le dépôt grossit au point de s'en approcher, passer à
+  `parts: 4` (un quart par semaine) plutôt qu'allonger le délai.
+- **Coordination** : rien de nouveau à planifier : même tâche DSM, même verrou, même fenêtre
+  (03:30 test, 03:45 prod le dimanche, loin de la sauvegarde de 02:30 et avant les
+  snapshots Btrfs de 05:00).
+- **Erreurs** : un échec de `check` (données corrompues ou illisibles) donne le statut
+  `restic_error`, code 4, donc **l'e-mail DSM existant** ; le rapport indique
+  `"check": {"read_data": "--read-data", "ok": false}` et la sortie de restic. Aucune
+  référence n'est mise à jour lors d'un échec.
+- **Lancement manuel** : `--read-data` force une lecture intégrale pour une exécution
+  (par exemple pour valider le dispositif sans attendre le dimanche).
+
+## Mise à jour des empreintes dans les tâches DSM
+
+Les tâches DSM vérifient la copie de `restic_maintenance.py` et `config.json` contre des
+empreintes écrites dans leur script. **Après tout déploiement qui modifie l'un de ces
+fichiers**, la tâche échoue (code 1, e-mail) tant que ses empreintes ne sont pas mises à jour.
+C'est voulu. Procédure, pour chaque environnement déployé :
+
+1. Workflow **NAS — Restic maintenance** en apply : relever les deux lignes du bloc
+   « Show reference checksums » et vérifier l'assertion « Fichiers déployés identiques… ».
+2. Recalculer l'empreinte du script hors du NAS, depuis le commit déployé, et la comparer :
+   `git show <commit>:services/synology/restic-maintenance/restic_maintenance.py | sha256sum`.
+3. DSM → Planificateur de tâches → tâche `restic-maintenance-<nom> (dry-run)` → Modifier →
+   Paramètres de tâche : remplacer les valeurs de `REF_PY` et `REF_CFG` (64 caractères
+   chacune), enregistrer.
+4. Lancer le bloc manuel (sans `--init-baseline`, avec `--ignore-window`) pour vérifier les
+   empreintes et le fonctionnement, ou attendre l'exécution suivante et vérifier
+   l'absence d'e-mail et le rapport.
+
+Entre le déploiement et l'étape 3, l'exécution planifiée échouerait avec un e-mail : faire
+les deux dans la même journée, avant 03:30.
 
 ## Stockage privé
 
