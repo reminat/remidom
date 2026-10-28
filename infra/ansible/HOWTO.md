@@ -289,26 +289,73 @@ vers le REST Server du NAS (repository append-only : le client ne peut rien supp
 | Commande | `sudo /usr/local/sbin/restic-core <commande restic>` (données en lecture seule) |
 | Service, timer | `restic-backup-core.service` (oneshot), `restic-backup-core.timer` (02:30, activé par `restic_backup_timer_enabled`) |
 
-Cohérence des données : le service arrête `zigbee2mqtt`, `nodered`, `portainer` et
-`mosquitto` pendant la copie (bases Mosquitto, Zigbee2MQTT, Node-RED et BoltDB de
-Portainer), puis les redémarre même en cas d'échec (`ExecStopPost`). Traefik reste actif.
+### Cohérence à chaud, service par service
 
-Première mise en service (après le déploiement du rôle) :
+Vérifié dans le code source des versions déployées. « Atomique » : le fichier est écrit à
+côté puis renommé ; une copie voit l'ancienne ou la nouvelle version complète, jamais un
+mélange.
+
+| Service | Fichiers | Écriture | Sauvegarde | À la restauration |
+|---|---|---|---|---|
+| Mosquitto 2.0.22 | `mosquitto/data/mosquitto.db` | atomique (`.new` + `fsync` + `rename`, `persist_write.c`) ; enregistré toutes les 30 min (`autosave_interval` par défaut) et à l'arrêt | à chaud | messages retenus et sessions persistantes à l'état du dernier enregistrement (jusqu'à 30 min avant la sauvegarde) |
+| | `mosquitto/config/*` (dont `passwords`) | statique, modifié au déploiement | à chaud (éviter un déploiement simultané) | identique |
+| Zigbee2MQTT 2.13.0 | `database.db` | atomique (`.tmp` + `fsync` + `rename`, zigbee-herdsman 10.8.0), toutes les 5 min et sur événement | à chaud | appareils connus à l'état du dernier enregistrement |
+| | `coordinator_backup.json` | atomique (`.tmp` + `rename`), quotidien | à chaud | sauvegarde du coordinateur (même adaptateur conseillé) |
+| | `state.json` | **non atomique** (`writeFileSync` toutes les 5 min) | à chaud, risque faible de copie tronquée | état des appareils seulement (simple cache) : s'il est illisible, Zigbee2MQTT repart sans, et les appareils republient leur état |
+| | `configuration.yaml` | rendu par Ansible (clé réseau dans Bitwarden) | à chaud | identique, ou redéployé par Ansible |
+| Node-RED 4.1.8 | `flows.json`, `flows_cred.json`, `.config.*.json` | atomique (`.$$$` + `fsync` + `rename`, `localfilesystem/util.js`) | à chaud | flux au dernier déploiement ; identifiants déchiffrables avec la clé du même dossier |
+| | `node_modules/` | statique | à chaud | identique |
+| Portainer 2.39.1 | `portainer.db` | **BoltDB modifiée sur place** (mmap), écritures périodiques ; verrou exclusif empêchant une lecture cohérente par un autre processus | **arrêt pendant la sauvegarde** | état à l'heure de la sauvegarde |
+| Traefik | `acme/acme.json` | écriture directe, rare (renouvellements) | à chaud, risque faible | au pire, certificats redemandés automatiquement (challenge DNS) |
+
+Seul **Portainer** est donc arrêté (`restic_backup_stop_services: [portainer]`), pour la
+durée de la commande `restic backup` : quelques secondes à quelques dizaines de secondes
+pour 81 Mo (la première sauvegarde lit tout, les suivantes seulement les changements).
+Portainer n'est qu'une interface d'administration : aucun effet sur la domotique. Il est
+redémarré même si la sauvegarde échoue.
+
+Limites : chaque fichier est cohérent, mais les fichiers de services différents sont
+capturés à quelques secondes d'intervalle ; les données écrites en mémoire et pas encore
+enregistrées (Mosquitto, Zigbee2MQTT) ne sont pas dans la sauvegarde.
+
+### Première mise en service
+
 ```sh
 sudo /usr/local/sbin/restic-core init                       # une seule fois
-sudo systemctl start restic-backup-core.service             # arrêt bref des 4 services
+sudo systemctl start restic-backup-core.service             # Portainer arrêté le temps de la copie
 systemctl show -p Result,ExecMainStatus restic-backup-core.service
+journalctl -u restic-backup-core.service --since "-15min" --no-pager | tail -20
+sudo docker compose --project-directory /srv/docker/core ps
 sudo /usr/local/sbin/restic-core snapshots
 sudo /usr/local/sbin/restic-core check
 ```
+Planification : `restic_backup_timer_enabled: true` dans `group_vars/docker_hosts.yml`,
+puis déploiement.
 
-Test de restauration (dans un dossier vide, jamais par-dessus les données) :
+### Restauration
+
+Toujours dans un dossier vide, jamais par-dessus les données :
 ```sh
-sudo mkdir /var/tmp/restauration-test
-sudo /usr/local/sbin/restic-core restore-to /var/tmp/restauration-test latest
-sudo diff -rq --exclude=log /srv/docker/core /var/tmp/restauration-test/srv/docker/core
-sudo rm -rf /var/tmp/restauration-test                      # contient des secrets (clé Zigbee, certificats)
+sudo mkdir /var/tmp/restauration
+sudo /usr/local/sbin/restic-core restore-to /var/tmp/restauration latest   # ou un identifiant de snapshot
+R=/var/tmp/restauration/srv/docker/core
 ```
+
+- **Test de restauration** (sans rien remplacer) :
+  `sudo diff -rq --exclude=log /srv/docker/core "$R"` ; seules des différences sur des
+  fichiers vivants (`mosquitto.db`, `state.json`, `database.db`…) sont attendues.
+- **Restaurer un service** (exemple Node-RED) :
+  ```sh
+  sudo docker compose --project-directory /srv/docker/core stop nodered
+  sudo rsync -aHAX --delete "$R/nodered/" /srv/docker/core/nodered/
+  sudo docker compose --project-directory /srv/docker/core start nodered
+  ```
+  Même schéma pour `mosquitto`, `zigbee2mqtt` (adaptateur Zigbee identique), `portainer`.
+- **Hôte reconstruit** : Terraform puis `./deploy.sh prod` (structure et configuration),
+  arrêt de la pile (`docker compose stop`), restauration des dossiers de données comme
+  ci-dessus, puis `docker compose start`.
+- **Ensuite** : `sudo rm -rf /var/tmp/restauration` (contient des secrets : clé Zigbee,
+  certificats, identifiants Node-RED).
 
 Home Assistant (VM HAOS) n'est pas concerné : il utilise ses propres sauvegardes.
 

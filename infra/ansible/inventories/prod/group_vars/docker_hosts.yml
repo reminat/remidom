@@ -30,7 +30,10 @@ cf_api_token: "{{ lookup('env', 'CF_DNS_API_TOKEN') }}"
 restic_backup_enabled: true
 restic_backup_timer_enabled: false   # à activer après la première sauvegarde et le test de restauration
 restic_backup_tags: [core, prod]
-restic_backup_stop_services: [zigbee2mqtt, nodered, portainer, mosquitto]
+# Sauvegarde à chaud : Mosquitto, Zigbee2MQTT et Node-RED écrivent leurs fichiers par
+# remplacement atomique (copie cohérente). Seul Portainer (base BoltDB modifiée sur place)
+# est arrêté le temps de la sauvegarde : voir HOWTO, « Sauvegarde Restic des hôtes Docker ».
+restic_backup_stop_services: [portainer]
 
 # GitHub Actions self-hosted runner
 github_runner_repo: reminat/remidom

@@ -13,8 +13,8 @@ restic_backup_excludes:
   - /srv/docker/core/mosquitto/log
 restic_backup_tags: []
 
-# Services arrêtés pendant la sauvegarde (cohérence des bases : Mosquitto, Zigbee2MQTT,
-# Node-RED, Portainer/BoltDB), puis redémarrés même en cas d'échec. Vide = aucun arrêt.
+# Services arrêtés pendant la sauvegarde, uniquement ceux dont les fichiers ne peuvent pas
+# être copiés à chaud de façon cohérente ; redémarrés même en cas d'échec. Vide = aucun arrêt.
 restic_backup_compose_dir: /srv/docker/core
 restic_backup_stop_services: []
 
