@@ -91,12 +91,15 @@
         - { src: restic-backup.service.j2, ext: service }
         - { src: restic-backup.timer.j2, ext: timer }
       notify: Reload systemd
+      register: restic_backup_units
 
     - name: Apply systemd changes now
       ansible.builtin.meta: flush_handlers
 
+    # En --check, une unité pas encore installée est inconnue de systemd : rien à vérifier.
     - name: Set backup timer state
       ansible.builtin.systemd:
         name: "restic-backup-{{ restic_backup_name }}.timer"
         enabled: "{{ restic_backup_timer_enabled | bool }}"
         state: "{{ 'started' if restic_backup_timer_enabled | bool else 'stopped' }}"
+      when: not (ansible_check_mode and restic_backup_units is changed)
