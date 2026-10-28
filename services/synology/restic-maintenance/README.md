@@ -126,14 +126,19 @@ Ansible n'utilise pas `sudo` : ces étapes sont manuelles. Ne modifier ni les AC
 5. **Python et Docker** : `/usr/bin/python3 --version` (3.8 minimum),
    `ls -l /usr/local/bin/docker`, `sudo docker version --format '{{.Server.Version}}'`
    (20.10 minimum pour `--pull never`).
-6. **Transfert de fichiers** : Ansible utilise SFTP. Depuis `docker-test-01` :
-   ```sh
-   echo pwd | sftp -P 4022 -b - -i nas_restic_deploy remi@10.10.20.60
-   ```
-   En cas d'échec, activer SFTP (*Panneau de configuration → Services de fichiers → FTP
-   → SFTP*), ou, si `ansible-doc -t connection ssh` liste `piped` pour
-   `ssh_transfer_method` sur le runner, décommenter `ansible_ssh_transfer_method: piped`
-   dans `group_vars/nas.yml`. La version d'Ansible du runner est affichée par le workflow.
+6. **Transfert de fichiers** : Ansible transfère les fichiers en mode `piped`
+   (`ansible_ssh_transfer_method: piped` dans `group_vars/nas.yml`) : flux SSH avec `dd`
+   de chaque côté, sans SFTP ni SCP. Prérequis : `dd` présent sur le runner et sur le NAS,
+   et `piped` proposé par la version d'ansible-core du runner (2.17.14 constatée), ce que
+   `ansible-doc -t connection ssh` confirme. Constaté le 28/10/2026 : `/usr/bin/dd`
+   (coreutils 8.32) sur `docker-test-01`, `/usr/bin/dd` (coreutils 8.30) sur le NAS.
+
+   SFTP n'est pas utilisé : lors du test du 28/10/2026 depuis `docker-test-01`, la
+   connexion SSH a réussi mais `sftp` a échoué avec
+   `subsystem request failed on channel 0`. La cause n'a pas été établie (service SFTP
+   désactivé dans DSM, absence de sous-système `sftp` dans la configuration de sshd, ou
+   autre restriction) ; la configuration du NAS n'a pas été modifiée. Si SFTP est activé
+   plus tard, la ligne `ansible_ssh_transfer_method` peut être retirée.
 7. **Répertoire de déploiement** : le créer sans modifier les ACL, puis vérifier que
    `remi` peut y écrire par héritage :
    ```sh

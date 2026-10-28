@@ -7,9 +7,10 @@ ansible_remote_tmp: /tmp
 ansible_host_key_checking: true
 ansible_ssh_common_args: "-o UserKnownHostsFile={{ inventory_dir }}/nas_known_hosts -o StrictHostKeyChecking=yes"
 
-# Transfert des fichiers : SFTP (défaut). Si SFTP reste désactivé dans DSM et que
-# `ansible-doc -t connection ssh` liste « piped » sur le runner, décommenter :
-# ansible_ssh_transfer_method: piped
+# Transfert des fichiers par SSH avec dd des deux côtés (ansible-core >= 2.17 sur le
+# runner). SFTP a échoué lors du test (« subsystem request failed on channel 0 »),
+# cause non établie : voir README.
+ansible_ssh_transfer_method: piped
 
 # Maintenance Restic du repository docker-test (dry-run uniquement).
 restic_maintenance_name: docker-test
