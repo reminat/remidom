@@ -43,6 +43,8 @@ EXIT_CONFIG = 2
 EXIT_WINDOW = 3
 EXIT_RESTIC = 4
 EXIT_TIMEOUT = 5
+EXIT_BASELINE_REQUIRED = 6
+EXIT_BASELINE_EXISTS = 7
 EXIT_LOCKED = 75
 
 REQUIRED_KEYS = ("name", "mode", "image", "expected_restic_version", "repository", "password_file",
@@ -291,8 +293,9 @@ def check_private_file(fd, label):
     return st
 
 
-def write_json_at(dir_fd, name, data):
-    """Écriture atomique relative à dir_fd : fichier temporaire unique (O_EXCL, O_NOFOLLOW), puis renommage."""
+def write_json_at(dir_fd, name, data, replace=True):
+    """Écriture atomique relative à dir_fd : fichier temporaire unique (O_EXCL, O_NOFOLLOW), puis renommage.
+    Avec replace=False, la publication se fait par link() : elle échoue (FileExistsError) si name existe."""
     tmp = ".%s.%s.tmp" % (name, os.urandom(8).hex())
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
     try:
@@ -300,7 +303,11 @@ def write_json_at(dir_fd, name, data):
             json.dump(data, f, indent=2, sort_keys=True)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        if replace:
+            os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        else:
+            os.link(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+            os.unlink(tmp, dir_fd=dir_fd)
     except BaseException:
         try:
             os.unlink(tmp, dir_fd=dir_fd)
@@ -649,7 +656,7 @@ def analyze(cfg, snapshots, forget_groups, now, state, state_error=None):
                                         "%s : nouveau snapshot daté de %s, antérieur à la dernière exécution"
                                         % (sn["id"][:8], sn["time"])))
     else:
-        findings.append(finding("INFO", "baseline", "pas d'état précédent : la référence sera créée"))
+        findings.append(finding("INFO", "baseline", "aucune référence (state.json absent) : comparaisons impossibles"))
 
     # Estimation des suppressions (forget --dry-run).
     total = len(snapshots)
@@ -690,6 +697,8 @@ def analyze(cfg, snapshots, forget_groups, now, state, state_error=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Maintenance Restic (dry-run uniquement)")
     parser.add_argument("--config", required=True)
+    parser.add_argument("--init-baseline", action="store_true",
+                        help="crée la référence si state.json est absent (premier lancement manuel uniquement)")
     parser.add_argument("--ignore-window", action="store_true",
                         help="exécution manuelle hors fenêtre (sans effet sur le mode)")
     opts = parser.parse_args(argv)
@@ -761,6 +770,17 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
         log("Docker introuvable : %s" % DOCKER_BIN)
         return finish("config_error", EXIT_CONFIG)
 
+    state, state_error = read_state(state_fd, started,
+                                    dt.timedelta(minutes=cfg["thresholds"]["max_future_skew_minutes"]))
+    report["baseline"] = "invalid" if state_error else ("present" if state else "absent")
+    if opts.init_baseline:
+        if state:
+            log("--init-baseline refusé : une référence valide existe déjà (%d snapshots, dernière exécution %s) ;"
+                " elle n'est pas remplacée" % (len(state["snapshot_ids"]), state["last_run"]))
+            return finish("baseline_exists", EXIT_BASELINE_EXISTS)
+        if state_error:
+            log("--init-baseline sans effet : state.json existe mais est invalide ; il est conservé tel quel")
+
     runner = Runner(cfg, time.monotonic() + 60 * cfg["timeout_minutes"], log)
     try:
         problems = readonly_problems(runner.mounts())
@@ -796,8 +816,6 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
         log(str(exc))
         return finish("restic_error", EXIT_RESTIC)
 
-    state, state_error = read_state(state_fd, started,
-                                    dt.timedelta(minutes=cfg["thresholds"]["max_future_skew_minutes"]))
     findings, summary = analyze(cfg, snapshots, forget_groups, started, state, state_error)
     report["findings"].extend(findings)
     report["summary"] = summary
@@ -810,10 +828,24 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
     if any(f["level"] == "ERROR" for f in report["findings"]):
         return finish("anomaly", EXIT_ANOMALY)
 
-    # La référence n'est créée ou mise à jour qu'après une exécution sans anomalie
-    # (un état invalide produit une anomalie : il n'est donc jamais remplacé).
-    write_json_at(state_fd, "state.json", {"last_run": started.isoformat(),
-                                           "snapshot_ids": sorted(sn["id"] for sn in snapshots)})
+    # Un état invalide produit toujours une anomalie (ci-dessus) : il n'est jamais remplacé.
+    new_state = {"last_run": started.isoformat(), "snapshot_ids": sorted(sn["id"] for sn in snapshots)}
+    if state is None:
+        if not opts.init_baseline:
+            log("RÉFÉRENCE ABSENTE : aucune référence créée. Après vérification, relancer manuellement avec"
+                " --init-baseline.")
+            return finish("baseline_required", EXIT_BASELINE_REQUIRED)
+        try:
+            write_json_at(state_fd, "state.json", new_state, replace=False)
+        except FileExistsError:
+            log("référence apparue pendant l'exécution : elle n'est pas remplacée")
+            return finish("baseline_exists", EXIT_BASELINE_EXISTS)
+        report["baseline"] = "created"
+        log("RÉFÉRENCE CRÉÉE : %d snapshots (%s). À valider avant de s'y fier."
+            % (len(new_state["snapshot_ids"]), ", ".join("%s %d" % kv for kv in summary["per_group"].items())))
+        return finish("baseline_created", EXIT_OK)
+
+    write_json_at(state_fd, "state.json", new_state)
     return finish("ok", EXIT_OK)
 
 

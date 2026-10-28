@@ -70,6 +70,8 @@ compte pas dans leurs rafales. La disparition d'un identifiant figé est une ano
 2. Ouverture du stockage privé (`private_dir`), verrou exclusif (`state/lock`) : une
    seconde exécution sort en code 75.
 3. Fenêtre horaire (`window`), sauf `--ignore-window` pour un lancement manuel.
+   Lecture de la référence (`state/state.json`) : avec `--init-baseline`, refus immédiat
+   (`baseline_exists`, code 7, aucun conteneur lancé) si une référence valide existe déjà.
 4. Contrôle des montages, puis `restic version` (version attendue), puis, dans le délai
    global `timeout_minutes` (conteneur tué au-delà) : `snapshots --json`, `list locks`,
    `check` (sans `--read-data`) et
@@ -93,12 +95,26 @@ compte pas dans leurs rafales. La disparition d'un identifiant figé est une ano
 
    La détection repose sur l'**identifiant** des snapshots mémorisé à chaque exécution
    validée (`state/state.json`), jamais sur les dates de modification des fichiers du
-   repository, qui ne prouvent rien. La référence n'est créée ou mise à jour qu'après une
-   exécution sans anomalie ; la première exécution la crée (`baseline`).
-6. Rapport JSON dans `logs/` (90 derniers conservés) et résumé sur la sortie standard.
+   repository, qui ne prouvent rien.
+6. Référence, uniquement après une exécution sans anomalie :
 
-Codes de sortie : `0` ok, `1` anomalie, `2` configuration, stockage ou montages,
-`3` hors fenêtre, `4` erreur restic/Docker ou version inattendue, `5` délai dépassé,
+   | Situation | Résultat |
+   |---|---|
+   | référence valide présente | mise à jour, statut `ok` (code 0) |
+   | `state.json` absent, sans `--init-baseline` | **aucune référence créée**, statut `baseline_required` (code 6) |
+   | `state.json` absent, avec `--init-baseline` | référence créée (sans jamais remplacer un fichier apparu entre-temps), statut `baseline_created` (code 0), ligne `RÉFÉRENCE CRÉÉE : …` |
+   | `state.json` invalide, avec ou sans `--init-baseline` | anomalie `state_invalid` (code 1), fichier conservé tel quel |
+   | référence valide présente, avec `--init-baseline` | refus `baseline_exists` (code 7) dès le début, référence intacte |
+
+   Le rapport indique aussi `baseline` : `absent`, `present`, `invalid` ou `created`.
+   La perte de la référence (par exemple après une réinstallation de DSM, `/root` n'étant
+   pas sauvegardé) n'est donc jamais compensée silencieusement : les lancements
+   planifiés échouent en `baseline_required` jusqu'à une recréation manuelle et validée.
+7. Rapport JSON dans `logs/` (90 derniers conservés) et résumé sur la sortie standard.
+
+Codes de sortie : `0` ok ou référence créée, `1` anomalie, `2` configuration, stockage
+ou montages, `3` hors fenêtre, `4` erreur restic/Docker ou version inattendue, `5` délai
+dépassé, `6` référence absente, `7` référence déjà présente avec `--init-baseline`,
 `75` exécution déjà en cours.
 
 ## Stockage privé
@@ -319,12 +335,16 @@ cp -- "$SRC/restic_maintenance.py" "$SRC/config.json" "$RUN/"
 [ "$(ls -A -- "$RUN" | sort | tr '\n' ' ')" = "config.json restic_maintenance.py " ]
 printf '%s  %s\n' "$1" "$RUN/restic_maintenance.py" "$2" "$RUN/config.json" | sha256sum -c -
 set +e
-/usr/bin/python3 -I "$RUN/restic_maintenance.py" --config "$RUN/config.json" --ignore-window
+/usr/bin/python3 -I "$RUN/restic_maintenance.py" --config "$RUN/config.json" --ignore-window --init-baseline
 code=$?
 echo "code de sortie : $code"
 exit "$code"
 EOF
 ```
+
+`--init-baseline` est réservé à ce premier lancement (ou à une recréation décidée après
+la perte de la référence) ; il est refusé si une référence valide existe. Pour les
+lancements manuels suivants, utiliser le même bloc **sans** `--init-baseline`.
 
 Fonctionnement :
 - `sh -eu` : toute commande en échec (copie, contenu inattendu du répertoire, empreinte)
@@ -345,12 +365,40 @@ Limites :
 - un fichier source remplacé par un tube nommé ferait attendre `cp` indéfiniment (blocage,
   sans exécution de code) : interrompre avec Ctrl-C, le `trap` nettoie.
 
-Points à vérifier lors de ce premier lancement :
-- le rapport : `mounts_readonly`, `restic_version`, `summary.per_group` (attendu
-  `core` 38 et `validation` 1, ou plus si une sauvegarde a eu lieu), estimation des
-  suppressions par groupe ; la première exécution crée la référence (`baseline`) ;
-- `check` sans verrou peut signaler des erreurs transitoires si une sauvegarde tourne en
-  même temps : relancer hors sauvegarde avant de conclure.
+**Avant le lancement : aucune sauvegarde ni maintenance en cours.** Avec `--no-lock`, le
+script ne voit pas les verrous des autres processus ; une sauvegarde concurrente ne
+risque rien, mais la lecture peut être incomplète ou `check` signaler des erreurs
+transitoires. Contrôles en lecture seule :
+```sh
+# Sur le NAS
+sudo ls -la --time-style=full-iso /volume1/Restic/docker-test/locks/   # attendu : vide
+ps -ef | grep -i '[r]estic'                                             # seul le REST Server attendu
+sudo docker ps --format '{{.Names}}  {{.Image}}  {{.Status}}' | grep -i restic
+sudo netstat -tn 2>/dev/null | grep ':8100 '                            # connexions en cours (client ou Traefik)
+# Sur docker-test-01 (client)
+pgrep -a restic
+systemctl list-timers --all | grep -i restic
+crontab -l 2>/dev/null | grep -i restic; sudo grep -ri restic /etc/cron* 2>/dev/null
+```
+L'absence de verrou ou de connexion visible ne garantit **pas** qu'aucune sauvegarde ne
+va démarrer, ni qu'aucun autre client n'écrit à distance (via Traefik ou une autre
+machine) : vérifier les **planifications** de tous les clients du repository, ainsi que
+les tâches Hyper Backup et les snapshots Btrfs dans DSM, puis choisir un créneau
+nettement à l'écart de toutes ces exécutions.
+
+**Validation de la référence créée** (`baseline_created`) avant de s'y fier :
+- aucun constat `ERROR` ; `mounts_readonly: true` ; `restic_version: 0.19.1` ;
+- `summary.per_group` cohérent avec l'état connu du repository (`core` 38 et
+  `validation` 1, ou plus si des sauvegardes ont eu lieu) ;
+- identifiants de la référence comparés à une liste indépendante, par exemple
+  `restic snapshots` lancé avec les mêmes options de conteneur (lecture seule) :
+  ```sh
+  sudo cat /root/restic-maintenance/docker-test/state/state.json | python3 -c 'import sys,json; print("\n".join(i[:8] for i in json.load(sys.stdin)["snapshot_ids"]))'
+  ```
+- `check` sans erreur (sinon relancer hors sauvegarde avant de conclure).
+
+Si la référence ne convient pas : la supprimer en root
+(`sudo rm /root/restic-maintenance/docker-test/state/state.json`) et recommencer.
 
 ### Contrôle des montages
 
@@ -404,7 +452,9 @@ défini par l'utilisateur* :
 | Paramètres de la tâche | « Envoyer les détails d'exécution par e-mail » → « uniquement si le script se termine anormalement » |
 
 Script : le même bloc que le lancement manuel, sans `sudo` (la tâche s'exécute en root),
-sans `--ignore-window`, avec les empreintes écrites dans la tâche :
+sans `--ignore-window` et **jamais avec `--init-baseline`** (une référence absente doit
+produire `baseline_required`, code 6, donc un e-mail), avec les empreintes écrites dans
+la tâche :
 
 ```sh
 set -eu
@@ -444,15 +494,17 @@ références du workflow. Mêmes limites que ci-dessus.
   déploiement sans droit sur `/volume1/Restic` demanderait de modifier les ACL : décision
   à prendre ultérieurement.
 - **Référence initiale** : si le repository est déjà altéré lors de la création de la
-  référence (premier lancement, ou après perte de `state.json`), l'anomalie y est
-  intégrée.
+  référence, l'anomalie y est intégrée. La création n'est jamais automatique
+  (`--init-baseline`, manuel) et doit être validée (voir « Premier lancement manuel »).
 - **`check` sans verrou** : erreurs transitoires possibles pendant une sauvegarde.
 
 ## Concurrence
 
 - **Sauvegardes clientes** : aucun verrou n'est pris, elles ne sont jamais bloquées. Un
   `snapshots` ou un `forget --dry-run` lancé pendant une sauvegarde peut ne pas voir le
-  snapshot en cours : aucun impact en dry-run.
+  snapshot en cours : aucun impact en dry-run, mais un résultat moins fiable. L'absence de
+  verrou visible ne prouve pas l'absence de sauvegarde à venir : se fier aux
+  planifications (voir « Premier lancement manuel »).
 - **Snapshots Btrfs (05:00) et Hyper Backup (06:00)** : lecture seule, donc aucun risque de
   copie incohérente. La fenêtre et le délai sont déjà en place pour les futurs modes
   destructifs, qui ne devront jamais chevaucher ces horaires.

@@ -369,6 +369,23 @@ class PrivateStorageTest(TrustedUser, unittest.TestCase):
         finally:
             os.close(fd)
 
+    def test_write_without_replace(self):
+        fd = rm.open_private_dir(self.base + "/priv")
+        try:
+            rm.write_json_at(fd, "state.json", {"v": 1}, replace=False)
+            with self.assertRaises(FileExistsError):
+                rm.write_json_at(fd, "state.json", {"v": 2}, replace=False)
+            with open(self.base + "/priv/state.json") as f:
+                self.assertEqual(json.load(f), {"v": 1})
+            self.assertEqual(sorted(os.listdir(fd)), ["state.json"])  # aucun temporaire résiduel
+            os.remove(self.base + "/priv/state.json")
+            os.symlink(self.base + "/victime", self.base + "/priv/state.json")
+            with self.assertRaises(FileExistsError):  # un lien existant n'est ni suivi ni remplacé
+                rm.write_json_at(fd, "state.json", {"v": 3}, replace=False)
+            self.assertFalse(os.path.exists(self.base + "/victime"))
+        finally:
+            os.close(fd)
+
     def test_lock_symlink_refused(self):
         fd = rm.open_private_dir(self.base + "/priv")
         try:
@@ -742,7 +759,7 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         rm.DOCKER_BIN = self._orig
 
     def run_with(self, snapshots, forget, mounts=None, version="restic 0.19.1 compiled with go1.26.4 on linux/amd64",
-                 gate_mounts=None, exits=None):
+                 gate_mounts=None, exits=None, init=False):
         fixtures = {"version": version, "snapshots": snapshots, "list": "",
                     "check": "no errors were found", "forget": forget,
                     "mounts": MOUNTS_OK if mounts is None else mounts, "exits": exits or {}}
@@ -752,7 +769,7 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
             json.dump(fixtures, f)
         open(self.restic_log, "w").close()
         open(self.log, "w").close()
-        code = rm.main(["--config", self.config, "--ignore-window"])
+        code = rm.main(["--config", self.config, "--ignore-window"] + (["--init-baseline"] if init else []))
         with open(self.log) as f:
             calls = [json.loads(line) for line in f]
         return code, calls
@@ -762,7 +779,7 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         core = daily(20, end=now - dt.timedelta(hours=1))
         s = core + [validation()]
         forget = groups(core) + groups([s[-1]], paths=["/tmp/restic-test"])
-        code, calls = self.run_with(s, forget)
+        code, calls = self.run_with(s, forget, init=True)
         self.assertEqual(code, rm.EXIT_OK)
         self.assertEqual(calls[0][calls[0].index("--entrypoint") + 1], "/bin/cat")  # pré-contrôle d'abord
         subs = []
@@ -817,6 +834,75 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         fd = os.open(self.state_path(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(content)
+
+    def clean_repo(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        core = daily(20, end=now - dt.timedelta(hours=1))
+        s = core + [validation()]
+        return s, groups(core) + groups([s[-1]], paths=["/tmp/restic-test"])
+
+    def report(self):
+        with open(self.latest_report()) as f:
+            return json.load(f)
+
+    def test_missing_baseline_requires_explicit_init(self):
+        s, forget = self.clean_repo()
+        code, _ = self.run_with(s, forget)
+        self.assertEqual(code, rm.EXIT_BASELINE_REQUIRED)
+        self.assertNotEqual(code, 0)
+        r = self.report()
+        self.assertEqual((r["status"], r["baseline"]), ("baseline_required", "absent"))
+        self.assertTrue(any("RÉFÉRENCE ABSENTE" in line for line in r["log"]))
+        self.assertFalse(os.path.exists(self.state_path()))
+        # les contrôles ont bien été exécutés
+        self.assertEqual(len(self.restic_calls()), 5)
+
+    def test_init_baseline_created_after_checks(self):
+        s, forget = self.clean_repo()
+        code, _ = self.run_with(s, forget, init=True)
+        self.assertEqual(code, rm.EXIT_OK)
+        r = self.report()
+        self.assertEqual((r["status"], r["baseline"]), ("baseline_created", "created"))
+        self.assertTrue(any("RÉFÉRENCE CRÉÉE : 21 snapshots" in line for line in r["log"]))
+        with open(self.state_path()) as f:
+            self.assertEqual(sorted(json.load(f)["snapshot_ids"]), sorted(x["id"] for x in s))
+        # lancement suivant, sans option : comparaison normale
+        code, _ = self.run_with(s, forget)
+        self.assertEqual(code, rm.EXIT_OK)
+        self.assertEqual((self.report()["status"], self.report()["baseline"]), ("ok", "present"))
+
+    def test_init_baseline_not_created_on_anomaly(self):
+        s, forget = self.clean_repo()
+        intrus = snap("a", dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2), host="intrus")
+        code, _ = self.run_with(s + [intrus], forget + groups([intrus]), init=True)
+        self.assertEqual(code, rm.EXIT_ANOMALY)
+        self.assertFalse(os.path.exists(self.state_path()))
+        self.assertEqual(self.report()["baseline"], "absent")
+
+    def test_init_baseline_refused_when_valid_baseline_exists(self):
+        s, forget = self.clean_repo()
+        self.assertEqual(self.run_with(s, forget, init=True)[0], rm.EXIT_OK)
+        with open(self.state_path(), "rb") as f:
+            before = f.read()
+        code, calls = self.run_with(s, forget, init=True)
+        self.assertEqual(code, rm.EXIT_BASELINE_EXISTS)
+        self.assertEqual(calls, [])  # refus avant tout conteneur
+        r = self.report()
+        self.assertEqual((r["status"], r["baseline"]), ("baseline_exists", "present"))
+        with open(self.state_path(), "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_init_baseline_does_not_replace_invalid_state(self):
+        s, forget = self.clean_repo()
+        self.write_state(b"{invalide")
+        code, _ = self.run_with(s, forget, init=True)
+        self.assertEqual(code, rm.EXIT_ANOMALY)
+        r = self.report()
+        self.assertEqual(r["baseline"], "invalid")
+        self.assertIn("state_invalid", [f["code"] for f in r["findings"]])
+        self.assertTrue(any("sans effet" in line for line in r["log"]))
+        with open(self.state_path(), "rb") as f:
+            self.assertEqual(f.read(), b"{invalide")
 
     def test_invalid_state_is_kept_and_reported(self):
         now = dt.datetime.now(dt.timezone.utc)
