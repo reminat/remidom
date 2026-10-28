@@ -82,6 +82,8 @@ Les secrets ne sont jamais stockés dans le repo. Ils sont injectés au moment d
 | `mqtt_password`       | `lookup('env', 'MQTT_PASSWORD')`    | `MQTT_PASSWORD`         |
 | `z2m_network_key`     | `lookup('env', 'Z2M_NETWORK_KEY')`  | `Z2M_NETWORK_KEY_JSON`  |
 | `cf_api_token`        | `lookup('env', 'CF_DNS_API_TOKEN')` | `CF_DNS_API_TOKEN`      |
+| `restic_backup_repository` | `lookup('env', 'RESTIC_REPOSITORY_URL')` | `restic_repository_<env>` (facultatif) |
+| `restic_backup_password`   | `lookup('env', 'RESTIC_REPO_PASSWORD')`  | `restic_password_<env>` (facultatif)   |
 
 Le token machine `bws` est lui-même stocké dans le vault Bitwarden sous le nom `bws_machine_token`.
 
@@ -268,6 +270,47 @@ Prérequis : le domaine `reminat.com` doit être géré par les DNS Cloudflare.
 
 - `80/tcp` — HTTP (redirigé vers HTTPS par Traefik)
 - `443/tcp` — HTTPS
+
+---
+
+## Sauvegarde Restic des hôtes Docker
+
+Rôle `restic_backup` (playbook `docker-host.yml`, tag `restic_backup`), désactivé par
+défaut, activé en prod (`group_vars/docker_hosts.yml`). Il sauvegarde `/srv/docker/core`
+vers le REST Server du NAS (repository append-only : le client ne peut rien supprimer).
+
+| Élément | Valeur (prod) |
+|---|---|
+| Hôte, chemin, tags | `docker-prod-01`, `/srv/docker/core`, `core,prod` (exclu : `mosquitto/log`) |
+| Repository | secret `restic_repository_prod` : `rest:https://<utilisateur>:<mot de passe>@<serveur>/<repo>/` |
+| Mot de passe du repository | secret `restic_password_prod` (20 caractères minimum ; à conserver aussi hors de l'hôte) |
+| Image | `restic/restic@sha256:…` (même digest que la maintenance du NAS) |
+| Fichiers sur l'hôte | `/etc/restic/core.env`, `/etc/restic/core.password` (root, 0600), cache `/var/cache/restic/core` |
+| Commande | `sudo /usr/local/sbin/restic-core <commande restic>` (données en lecture seule) |
+| Service, timer | `restic-backup-core.service` (oneshot), `restic-backup-core.timer` (02:30, activé par `restic_backup_timer_enabled`) |
+
+Cohérence des données : le service arrête `zigbee2mqtt`, `nodered`, `portainer` et
+`mosquitto` pendant la copie (bases Mosquitto, Zigbee2MQTT, Node-RED et BoltDB de
+Portainer), puis les redémarre même en cas d'échec (`ExecStopPost`). Traefik reste actif.
+
+Première mise en service (après le déploiement du rôle) :
+```sh
+sudo /usr/local/sbin/restic-core init                       # une seule fois
+sudo systemctl start restic-backup-core.service             # arrêt bref des 4 services
+systemctl show -p Result,ExecMainStatus restic-backup-core.service
+sudo /usr/local/sbin/restic-core snapshots
+sudo /usr/local/sbin/restic-core check
+```
+
+Test de restauration (dans un dossier vide, jamais par-dessus les données) :
+```sh
+sudo mkdir /var/tmp/restauration-test
+sudo /usr/local/sbin/restic-core restore-to /var/tmp/restauration-test latest
+sudo diff -rq --exclude=log /srv/docker/core /var/tmp/restauration-test/srv/docker/core
+sudo rm -rf /var/tmp/restauration-test                      # contient des secrets (clé Zigbee, certificats)
+```
+
+Home Assistant (VM HAOS) n'est pas concerné : il utilise ses propres sauvegardes.
 
 ---
 
