@@ -1,0 +1,93 @@
+#!/bin/sh
+# Géré par Ansible (rôle restic_backup). Lance restic (image épinglée) pour la sauvegarde
+# « {{ restic_backup_name }} » : repository et mot de passe lus dans {{ restic_backup_config_dir }} (root, 0600).
+#
+#   restic-{{ restic_backup_name }} status          état du repository (présent / absent / erreur), sans rien modifier
+#   restic-{{ restic_backup_name }} init            initialisation, seulement si « status » confirme l'absence
+#   restic-{{ restic_backup_name }} snapshots | check | backup … | ls … | stats …
+#   restic-{{ restic_backup_name }} restore-to <dossier vide> <snapshot> [options de restore]
+#
+# Les données sont montées en lecture seule ; seule la restauration écrit, dans le dossier cible.
+set -eu
+
+IMAGE='{{ restic_backup_image }}'
+CONF='{{ restic_backup_config_dir }}/{{ restic_backup_name }}'
+CACHE='{{ restic_backup_cache_dir }}/{{ restic_backup_name }}'
+
+extra=""
+caps="--cap-add DAC_READ_SEARCH"
+prefix=""
+name="restic-{{ restic_backup_name }}-$$"
+# Délai maximal de « status » : sans réponse du serveur, restic réessaie pendant 15 minutes.
+STATUS_TIMEOUT=120
+
+run_restic() {
+  # shellcheck disable=SC2086
+  $prefix /usr/bin/docker run --rm --name "$name" --pull never --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+    --cap-drop ALL $caps --security-opt no-new-privileges \
+    --hostname '{{ restic_backup_host }}' \
+    --env-file "$CONF.env" \
+    -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password -v "$CONF.password:/run/secrets/restic_password:ro" \
+    -e RESTIC_CACHE_DIR=/cache -v "$CACHE:/cache" \
+{% for path in restic_backup_paths %}
+    -v '{{ path }}:{{ path }}:ro' \
+{% endfor %}
+    $extra "$IMAGE" "$@"
+}
+
+# Codes de restic 0.19.1 : 10 = repository absent, 12 = mot de passe refusé, 1 = autre erreur
+# (réseau, authentification REST, droits…). Seul 10 permet d'affirmer l'absence.
+# Retourne le code de restic ; l'appelant le récupère avec « || rc=$? » (compatible set -e).
+repository_status() {
+  rc=0
+  prefix="timeout $STATUS_TIMEOUT"
+  out=$(run_restic cat config 2>&1 >/dev/null) || rc=$?
+  prefix=""
+  if [ "$rc" -eq 124 ]; then
+    /usr/bin/docker rm -f "$name" >/dev/null 2>&1 || true
+    out="aucune réponse en ${STATUS_TIMEOUT} s (réseau, REST Server ou Traefik indisponible ?)"
+  fi
+  case "$rc" in
+    0)  echo "PRÉSENT : repository existant, mot de passe accepté" ;;
+    10) echo "ABSENT : aucun repository à cette adresse (initialisation possible avec « init »)" ;;
+    12) echo "ERREUR : repository existant, mais le mot de passe du repository est refusé" ;;
+    *)  echo "INCERTAIN (code $rc) : état inconnu, ne pas initialiser ; erreur :" ;;
+  esac
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 10 ] || printf '%s\n' "$out" | tail -n 5 >&2
+  return "$rc"
+}
+
+case "${1:-}" in
+  status)
+    rc=0
+    repository_status || rc=$?
+    exit "$rc"
+    ;;
+  init)
+    shift
+    rc=0
+    repository_status || rc=$?
+    if [ "$rc" -ne 10 ]; then
+      echo "init refusé : l'absence du repository n'est pas confirmée (code $rc)" >&2
+      exit 2
+    fi
+    rc=0
+    run_restic init "$@" || rc=$?
+    exit "$rc"
+    ;;
+  restore-to)
+    target="${2:-}"
+    [ -n "$target" ] && [ -d "$target" ] && [ ! -L "$target" ] && [ -z "$(ls -A -- "$target")" ] || {
+      echo "restore-to : un dossier existant et vide est requis" >&2; exit 2; }
+    case "$target" in /srv/docker/*|/|/etc*|/usr*|/var/lib/docker*) echo "restore-to : cible refusée : $target" >&2; exit 2 ;; esac
+    shift 2
+    extra="-v $target:/restore"
+    caps="--cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER"
+    rc=0
+    run_restic restore "$@" --target /restore || rc=$?
+    exit "$rc"
+    ;;
+esac
+
+run_restic "$@"

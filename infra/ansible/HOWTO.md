@@ -82,6 +82,8 @@ Les secrets ne sont jamais stockés dans le repo. Ils sont injectés au moment d
 | `mqtt_password`       | `lookup('env', 'MQTT_PASSWORD')`    | `MQTT_PASSWORD`         |
 | `z2m_network_key`     | `lookup('env', 'Z2M_NETWORK_KEY')`  | `Z2M_NETWORK_KEY_JSON`  |
 | `cf_api_token`        | `lookup('env', 'CF_DNS_API_TOKEN')` | `CF_DNS_API_TOKEN`      |
+| `restic_backup_rest_password` | `lookup('env', 'RESTIC_REST_PASSWORD')` | `restic_rest_password_<env>` (facultatif) |
+| `restic_backup_password`   | `lookup('env', 'RESTIC_REPO_PASSWORD')`  | `restic_password_<env>` (facultatif)   |
 
 Le token machine `bws` est lui-même stocké dans le vault Bitwarden sous le nom `bws_machine_token`.
 
@@ -268,6 +270,125 @@ Prérequis : le domaine `reminat.com` doit être géré par les DNS Cloudflare.
 
 - `80/tcp` — HTTP (redirigé vers HTTPS par Traefik)
 - `443/tcp` — HTTPS
+
+---
+
+## Sauvegarde Restic des hôtes Docker
+
+Rôle `restic_backup` (playbook `docker-host.yml`, tag `restic_backup`), désactivé par
+défaut, activé en prod (`group_vars/docker_hosts.yml`). Il sauvegarde `/srv/docker/core`
+vers le REST Server du NAS (repository append-only : le client ne peut rien supprimer).
+
+| Élément | Valeur (prod) |
+|---|---|
+| Hôte, chemin, tags | `docker-prod-01`, `/srv/docker/core`, `core,prod` (exclu : `mosquitto/log`) |
+| REST Server | `https://restic.reminat.com`, utilisateur `docker-prod`, repository `/docker-prod/` (`group_vars`) ; `--private-repos` impose que le chemin commence par le nom d'utilisateur |
+| Mot de passe REST | secret `restic_rest_password_prod` (même convention que `restic_rest_password_test`) |
+| Mot de passe du repository | secret `restic_password_prod` (à conserver aussi hors de l'hôte : sans lui, aucune restauration) |
+| URL restic | assemblée par Ansible dans `/etc/restic/core.env`, mot de passe REST encodé |
+| Image | `restic/restic@sha256:…` (même digest que la maintenance du NAS) |
+| Fichiers sur l'hôte | `/etc/restic/core.env`, `/etc/restic/core.password` (root, 0600), cache `/var/cache/restic/core` |
+| Commande | `sudo /usr/local/sbin/restic-core <commande restic>` (données en lecture seule) |
+| Service, timer | `restic-backup-core.service` (oneshot), `restic-backup-core.timer` (02:30, activé par `restic_backup_timer_enabled`) |
+
+### Cohérence à chaud, service par service
+
+Vérifié dans le code source des versions déployées. « Atomique » : le fichier est écrit à
+côté puis renommé ; une copie voit l'ancienne ou la nouvelle version complète, jamais un
+mélange.
+
+| Service | Fichiers | Écriture | Sauvegarde | À la restauration |
+|---|---|---|---|---|
+| Mosquitto 2.0.22 | `mosquitto/data/mosquitto.db` | atomique (`.new` + `fsync` + `rename`, `persist_write.c`) ; enregistré toutes les 30 min (`autosave_interval` par défaut) et à l'arrêt | à chaud | messages retenus et sessions persistantes à l'état du dernier enregistrement (jusqu'à 30 min avant la sauvegarde) |
+| | `mosquitto/config/*` (dont `passwords`) | statique, modifié au déploiement | à chaud (éviter un déploiement simultané) | identique |
+| Zigbee2MQTT 2.13.0 | `database.db` | atomique (`.tmp` + `fsync` + `rename`, zigbee-herdsman 10.8.0), toutes les 5 min et sur événement | à chaud | appareils connus à l'état du dernier enregistrement |
+| | `coordinator_backup.json` | atomique (`.tmp` + `rename`), quotidien | à chaud | sauvegarde du coordinateur (même adaptateur conseillé) |
+| | `state.json` | **non atomique** (`writeFileSync` toutes les 5 min) | à chaud, risque faible de copie tronquée | état des appareils seulement (simple cache) : s'il est illisible, Zigbee2MQTT repart sans, et les appareils republient leur état |
+| | `configuration.yaml` | rendu par Ansible (clé réseau dans Bitwarden) | à chaud | identique, ou redéployé par Ansible |
+| Node-RED 4.1.8 | `flows.json`, `flows_cred.json`, `.config.*.json` | atomique (`.$$$` + `fsync` + `rename`, `localfilesystem/util.js`) | à chaud | flux au dernier déploiement ; identifiants déchiffrables avec la clé du même dossier |
+| | `node_modules/` | statique | à chaud | identique |
+| Portainer 2.39.1 | `portainer.db` | **BoltDB modifiée sur place** (mmap), écritures périodiques ; verrou exclusif empêchant une lecture cohérente par un autre processus | **arrêt pendant la sauvegarde** | état à l'heure de la sauvegarde |
+| Traefik | `acme/acme.json` | écriture directe, rare (renouvellements) | à chaud, risque faible | au pire, certificats redemandés automatiquement (challenge DNS) |
+
+Seul **Portainer** est donc arrêté (`restic_backup_stop_services: [portainer]`), pour la
+durée de la commande `restic backup` : quelques secondes à quelques dizaines de secondes
+pour 81 Mo (la première sauvegarde lit tout, les suivantes seulement les changements).
+Portainer n'est qu'une interface d'administration : aucun effet sur la domotique. Il est
+redémarré même si la sauvegarde échoue.
+
+Limites : chaque fichier est cohérent, mais les fichiers de services différents sont
+capturés à quelques secondes d'intervalle ; les données écrites en mémoire et pas encore
+enregistrées (Mosquitto, Zigbee2MQTT) ne sont pas dans la sauvegarde.
+
+### Utilisateur REST (NAS, une fois)
+
+Le REST Server tourne avec `--append-only --private-repos` ; ses utilisateurs sont dans
+`PASSWORD_FILE=/config/.htpasswd` (conteneur `rest-server`). Créer `docker-prod` avec le
+mot de passe du secret `restic_rest_password_prod`, saisi à l'invite (sans écho) :
+```sh
+N=$(sudo docker ps --format '{{.Names}}' | grep -i rest)
+sudo docker exec "$N" cut -d: -f1 /config/.htpasswd            # utilisateurs existants (noms seulement)
+sudo docker exec -it "$N" create_user docker-prod              # mot de passe demandé à l'invite
+```
+Si le REST Server ne prend pas le nouvel utilisateur en compte (401), le redémarrer en
+dehors des sauvegardes. Vérification depuis `docker-prod-01`, sans restic (mot de passe
+demandé par `curl`) : `curl -s -o /dev/null -w '%{http_code}\n' -u docker-prod
+https://restic.reminat.com/docker-prod/config` ; attendu **404** (authentifié, repository
+absent) ; 401 = identifiants refusés ; 403 = chemin refusé.
+
+### Première mise en service
+
+L'existence du repository est vérifiée **séparément** de l'initialisation :
+```sh
+sudo /usr/local/sbin/restic-core status
+```
+| Résultat | Code | Signification | Suite |
+|---|---|---|---|
+| `PRÉSENT` | 0 | repository existant, mot de passe accepté | pas d'initialisation |
+| `ABSENT` | 10 | aucun repository à cette adresse | `init` autorisé |
+| `ERREUR` | 12 | repository existant, mot de passe du repository refusé | s'arrêter, vérifier `restic_password_prod` |
+| `INCERTAIN` | autre | réseau, authentification REST, droits… (erreur affichée) | s'arrêter, analyser l'erreur |
+
+`init` refait lui-même cette vérification et refuse (code 2) si l'absence n'est pas
+confirmée (code 10). Il reste une commande explicite, jamais lancée automatiquement :
+```sh
+sudo /usr/local/sbin/restic-core init                       # seulement après « ABSENT »
+sudo systemctl start restic-backup-core.service             # Portainer arrêté le temps de la copie
+systemctl show -p Result,ExecMainStatus restic-backup-core.service
+journalctl -u restic-backup-core.service --since "-15min" --no-pager | tail -20
+sudo docker compose --project-directory /srv/docker/core ps
+sudo /usr/local/sbin/restic-core snapshots
+sudo /usr/local/sbin/restic-core check
+```
+Planification : `restic_backup_timer_enabled: true` dans `group_vars/docker_hosts.yml`,
+puis déploiement.
+
+### Restauration
+
+Toujours dans un dossier vide, jamais par-dessus les données :
+```sh
+sudo mkdir /var/tmp/restauration
+sudo /usr/local/sbin/restic-core restore-to /var/tmp/restauration latest   # ou un identifiant de snapshot
+R=/var/tmp/restauration/srv/docker/core
+```
+
+- **Test de restauration** (sans rien remplacer) :
+  `sudo diff -rq --exclude=log /srv/docker/core "$R"` ; seules des différences sur des
+  fichiers vivants (`mosquitto.db`, `state.json`, `database.db`…) sont attendues.
+- **Restaurer un service** (exemple Node-RED) :
+  ```sh
+  sudo docker compose --project-directory /srv/docker/core stop nodered
+  sudo rsync -aHAX --delete "$R/nodered/" /srv/docker/core/nodered/
+  sudo docker compose --project-directory /srv/docker/core start nodered
+  ```
+  Même schéma pour `mosquitto`, `zigbee2mqtt` (adaptateur Zigbee identique), `portainer`.
+- **Hôte reconstruit** : Terraform puis `./deploy.sh prod` (structure et configuration),
+  arrêt de la pile (`docker compose stop`), restauration des dossiers de données comme
+  ci-dessus, puis `docker compose start`.
+- **Ensuite** : `sudo rm -rf /var/tmp/restauration` (contient des secrets : clé Zigbee,
+  certificats, identifiants Node-RED).
+
+Home Assistant (VM HAOS) n'est pas concerné : il utilise ses propres sauvegardes.
 
 ---
 

@@ -1,0 +1,11 @@
+# Géré par Ansible (rôle restic_backup).
+[Unit]
+Description=Sauvegarde Restic quotidienne « {{ restic_backup_name }} »
+
+[Timer]
+OnCalendar={{ restic_backup_on_calendar }}
+# Pas de rattrapage au démarrage : la sauvegarde arrête des services, elle ne doit tourner qu'à l'heure prévue.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

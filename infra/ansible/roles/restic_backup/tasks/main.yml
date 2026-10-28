@@ -1,0 +1,117 @@
+- name: Configure Restic backup
+  when: restic_backup_enabled | bool
+  block:
+    - name: Check Restic backup configuration
+      ansible.builtin.assert:
+        that:
+          - restic_backup_name is match('^[a-z0-9][a-z0-9-]*$')
+          - restic_backup_host is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
+          - restic_backup_rest_url is match('^https?://[A-Za-z0-9.-]+(:[0-9]+)?$')
+          - restic_backup_rest_user is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')
+          - restic_backup_repository_path is match('^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$')
+          - restic_backup_repository_path.split('/')[0] == restic_backup_rest_user
+          - restic_backup_paths | length > 0
+          - restic_backup_image is match('^[a-z0-9./-]+@sha256:[0-9a-f]{64}$')
+        fail_msg: >-
+          Configuration de sauvegarde invalide : restic_backup_rest_url (https://hôte[:port]),
+          restic_backup_rest_user et restic_backup_repository_path, qui doit commencer par
+          l'utilisateur (--private-repos), dans group_vars/docker_hosts.yml.
+        quiet: true
+
+    # Message fixe : rien n'est affiché des valeurs (no_log), seulement leur présence.
+    - name: Check Restic secrets presence
+      ansible.builtin.assert:
+        that:
+          - restic_backup_rest_password | length > 0
+          - restic_backup_password | length > 0
+          - "'\n' not in restic_backup_rest_password"
+          - "'\n' not in restic_backup_password"
+        quiet: true
+      no_log: true
+
+    - name: Check that backup paths exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ restic_backup_paths }}"
+      register: restic_backup_path_stats
+
+    - name: Require existing backup paths
+      ansible.builtin.assert:
+        that: item.stat.exists and item.stat.isdir
+        fail_msg: "Chemin à sauvegarder introuvable : {{ item.item }}"
+        quiet: true
+      loop: "{{ restic_backup_path_stats.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Check Restic image presence
+      ansible.builtin.command: docker image inspect {{ restic_backup_image }}
+      register: restic_backup_image_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Pull Restic image by digest
+      ansible.builtin.command: docker pull {{ restic_backup_image }}
+      when: restic_backup_image_check.rc != 0
+
+    - name: Create Restic configuration and cache directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop:
+        - "{{ restic_backup_config_dir }}"
+        - "{{ restic_backup_cache_dir }}/{{ restic_backup_name }}"
+
+    - name: Write repository environment file
+      ansible.builtin.copy:
+        dest: "{{ restic_backup_config_dir }}/{{ restic_backup_name }}.env"
+        content: "RESTIC_REPOSITORY={{ restic_backup_repository }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Write repository password file
+      ansible.builtin.copy:
+        dest: "{{ restic_backup_config_dir }}/{{ restic_backup_name }}.password"
+        content: "{{ restic_backup_password }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Install restic wrapper
+      ansible.builtin.template:
+        src: restic-wrapper.sh.j2
+        dest: "/usr/local/sbin/restic-{{ restic_backup_name }}"
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Install backup service and timer
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "/etc/systemd/system/restic-backup-{{ restic_backup_name }}.{{ item.ext }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - { src: restic-backup.service.j2, ext: service }
+        - { src: restic-backup.timer.j2, ext: timer }
+      notify: Reload systemd
+      register: restic_backup_units
+
+    - name: Apply systemd changes now
+      ansible.builtin.meta: flush_handlers
+
+    # En --check, une unité pas encore installée est inconnue de systemd : rien à vérifier.
+    - name: Set backup timer state
+      ansible.builtin.systemd:
+        name: "restic-backup-{{ restic_backup_name }}.timer"
+        enabled: "{{ restic_backup_timer_enabled | bool }}"
+        state: "{{ 'started' if restic_backup_timer_enabled | bool else 'stopped' }}"
+      when: not (ansible_check_mode and restic_backup_units is changed)
