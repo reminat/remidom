@@ -34,6 +34,10 @@ CONTAINER_PASSWORD = "/run/secrets/restic_password"
 
 # Sous-commandes restic autorisées et jetons interdits, quelles que soient les options.
 ALLOWED_SUBCOMMANDS = ("version", "snapshots", "forget", "check", "list")
+# Options de « check » autorisées en plus de --no-lock / --no-cache : lecture des données.
+CHECK_OPTION_RE = re.compile(r"^--read-data(-subset=[0-9]{1,3}/[0-9]{1,3})?$")
+# Lecture des données : jamais si absente de la configuration.
+NO_READ_DATA = {"weekdays": [], "parts": 1}
 FORBIDDEN_TOKENS = ("--prune", "prune", "unlock", "repair", "rebuild-index", "key",
                     "init", "migrate", "tag", "rewrite", "backup", "copy", "--remove-all")
 
@@ -100,6 +104,9 @@ def load_config(path):
         raise ConfigError("keep_reports invalide : %r" % cfg.get("keep_reports"))
     if not isinstance(cfg.get("run_check", True), bool):
         raise ConfigError("run_check doit être un booléen")
+    validate_read_data(cfg.get("read_data", NO_READ_DATA))
+    if cfg.get("read_data", NO_READ_DATA)["weekdays"] and not cfg.get("run_check", True):
+        raise ConfigError("read_data suppose run_check : la lecture des données se fait pendant check")
     validate_groups(cfg["groups"])
     image = cfg["image"]
     if not re.match(r"^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$", image) \
@@ -140,6 +147,33 @@ def validate_retention(retention):
     for key in ("keep_daily", "keep_weekly", "keep_monthly"):
         if not is_int(retention[key], 0, 10000):
             raise ConfigError("%s invalide : %r (entier entre 0 et 10000)" % (key, retention[key]))
+
+
+def validate_read_data(read_data):
+    """weekdays : jours ISO (1 = lundi … 7 = dimanche) ; parts : 1 = lecture intégrale,
+    t > 1 = un groupe de packs sur t par exécution, en rotation (couverture complète en t semaines)."""
+    if not isinstance(read_data, dict) or set(read_data) != {"weekdays", "parts"}:
+        raise ConfigError("read_data doit contenir exactement weekdays et parts")
+    days = read_data["weekdays"]
+    if not isinstance(days, list) or any(not is_int(d, 1, 7) for d in days) or len(set(days)) != len(days):
+        raise ConfigError("read_data.weekdays invalide : %r (jours ISO 1 à 7, sans doublon)" % (days,))
+    if not is_int(read_data["parts"], 1, 52):
+        raise ConfigError("read_data.parts invalide : %r (entier entre 1 et 52)" % (read_data["parts"],))
+
+
+def read_data_args(read_data, today, force=False):
+    """Options de « restic check » pour la lecture des données à la date « today » (date locale).
+    [] = contrôle de structure seulement. Rotation sur un compteur de semaines continu
+    (lundi à dimanche), sans rupture au changement d'année."""
+    if force:
+        return ["--read-data"]
+    if today.isoweekday() not in read_data["weekdays"]:
+        return []
+    parts = read_data["parts"]
+    if parts == 1:
+        return ["--read-data"]
+    week = (today.toordinal() - 1) // 7
+    return ["--read-data-subset=%d/%d" % (week % parts + 1, parts)]
 
 
 def validate_thresholds(thresholds):
@@ -487,6 +521,10 @@ def check_safe(args):
             raise StepError("option restic refusée : %r" % token)
     if sub[0] == "forget" and "--dry-run" not in args:
         raise StepError("forget sans --dry-run refusé")
+    if sub[0] == "check":
+        extra = [a for a in args if a not in ("--no-lock", "--no-cache", "check")]
+        if len(extra) > 1 or any(not CHECK_OPTION_RE.match(a) for a in extra):
+            raise StepError("option de check refusée : %r" % (extra,))
     if "--no-lock" not in args:
         raise StepError("--no-lock obligatoire (repository en lecture seule)")
 
@@ -779,6 +817,8 @@ def main(argv=None):
     parser.add_argument("--config", required=True)
     parser.add_argument("--init-baseline", action="store_true",
                         help="crée la référence si state.json est absent (premier lancement manuel uniquement)")
+    parser.add_argument("--read-data", action="store_true",
+                        help="force la lecture intégrale des données pour cette exécution (lancement manuel)")
     parser.add_argument("--ignore-window", action="store_true",
                         help="exécution manuelle hors fenêtre (sans effet sur le mode)")
     opts = parser.parse_args(argv)
@@ -883,8 +923,12 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
         if locks:
             report["findings"].append(finding("WARN", "locks", "%d verrou(s) présent(s) dans le repository" % len(locks)))
         if cfg.get("run_check", True):
-            runner.restic("check")
-            log("check : OK")
+            check_args = read_data_args(cfg.get("read_data", NO_READ_DATA), dt.date.today(), opts.read_data)
+            report["check"] = {"read_data": " ".join(check_args) or "aucune", "ok": False}
+            runner.restic("check", *check_args)
+            report["check"]["ok"] = True
+            log("check : OK (%s)" % ("lecture des données : " + " ".join(check_args) if check_args
+                                     else "structure seulement"))
         forget_groups = parse_json_output(runner.restic("forget", *forget_args(cfg["retention"]))) or []
         policy_now = dt.datetime.now(dt.timezone.utc)  # borne supérieure de l'heure utilisée par restic
     except UnsafeMounts as exc:

@@ -6,6 +6,8 @@
   ansible.builtin.assert:
     that:
       - restic_maintenance_mode == 'dry-run'
+      - restic_maintenance_read_data.weekdays is sequence
+      - restic_maintenance_read_data.parts | int >= 1
       - restic_maintenance_name is match('^[a-z0-9][a-z0-9-]*$')
       - restic_maintenance_repository is match('^/volume[0-9]+/')
       - restic_maintenance_password_file is match('^/volume[0-9]+/')

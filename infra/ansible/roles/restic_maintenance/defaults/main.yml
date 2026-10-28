@@ -41,6 +41,12 @@ restic_maintenance_window:
   end: "04:30"
 restic_maintenance_timeout_minutes: 120
 restic_maintenance_run_check: true
+# Lecture des données par « restic check » (en plus du contrôle quotidien de structure) :
+# jours ISO (7 = dimanche) ; parts 1 = lecture intégrale, t > 1 = 1/t des packs par exécution,
+# en rotation (toutes les données relues en t semaines). Liste vide = jamais.
+restic_maintenance_read_data:
+  weekdays: [7]
+  parts: 1
 
 restic_maintenance_thresholds:
   max_future_skew_minutes: 60
