@@ -1,0 +1,18 @@
+{{ {
+  "name": restic_maintenance_name,
+  "mode": restic_maintenance_mode,
+  "image": (restic_maintenance_image_repo ~ '@' ~ restic_maintenance_image_digest)
+           if restic_maintenance_image_digest
+           else (restic_maintenance_image_repo ~ ':' ~ restic_maintenance_restic_version),
+  "expected_restic_version": restic_maintenance_restic_version,
+  "repository": restic_maintenance_repository,
+  "password_file": restic_maintenance_password_file,
+  "private_dir": restic_maintenance_private_dir,
+  "keep_reports": restic_maintenance_keep_reports,
+  "groups": restic_maintenance_groups,
+  "retention": restic_maintenance_retention,
+  "window": restic_maintenance_window,
+  "timeout_minutes": restic_maintenance_timeout_minutes,
+  "run_check": restic_maintenance_run_check,
+  "thresholds": restic_maintenance_thresholds,
+} | to_nice_json(indent=2) }}

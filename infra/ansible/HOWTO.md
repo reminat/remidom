@@ -271,6 +271,15 @@ Prérequis : le domaine `reminat.com` doit être géré par les DNS Cloudflare.
 
 ---
 
+## NAS Synology — maintenance Restic
+
+Playbook `playbooks/nas.yml` (groupe `[nas]`, sans `become`), déployé uniquement via le
+workflow manuel **NAS — Restic maintenance**, jamais par `deploy.sh`. Mode dry-run
+uniquement. Préparation du NAS, tâche DSM et contrôles :
+[`services/synology/restic-maintenance/README.md`](../../services/synology/restic-maintenance/README.md).
+
+---
+
 ## Flux de déploiement
 
 ```mermaid

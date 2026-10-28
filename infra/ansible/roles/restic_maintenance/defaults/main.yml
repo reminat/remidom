@@ -1,0 +1,52 @@
+# Seul mode accepté dans cette version (le script refuse toute autre valeur).
+restic_maintenance_mode: dry-run
+# Image restic : version et digest vont ensemble (les changer dans la même PR).
+restic_maintenance_image_repo: restic/restic
+restic_maintenance_restic_version: "0.19.1"
+# Digest de l'index multi-architecture publié sur Docker Hub pour restic/restic:0.19.1
+# (identique sur toute installation), contrôlé le 28/10/2026 : Docker Hub et image locale
+# du NAS. Il identifie l'image attendue ; il ne prouve ni sa provenance ni son innocuité
+# (pas de vérification de signature). Vide = référence par tag (non recommandé).
+restic_maintenance_image_digest: "sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
+
+restic_maintenance_src: "{{ playbook_dir }}/../../../services/synology/restic-maintenance"
+restic_maintenance_base_dir: /volume1/docker/restic-maintenance
+
+# À définir par environnement (group_vars/nas.yml).
+restic_maintenance_name: ""
+restic_maintenance_repository: ""
+restic_maintenance_password_file: ""
+# Groupes de snapshots attendus (hôte + ensemble exact de chemins, comme --group-by host,paths).
+# Tout snapshot hors de ces groupes est une anomalie. Un groupe avec frozen_ids est historique :
+# seuls ces identifiants y sont acceptés, sans contrôle de fraîcheur ni de fréquence.
+restic_maintenance_groups: []
+
+# Répertoire des fichiers déployés (créé au préalable, accessible en écriture au compte Ansible).
+restic_maintenance_deploy_dir: "{{ restic_maintenance_base_dir }}/{{ restic_maintenance_name }}"
+# Stockage privé (état, rapports, verrou) : hors des volumes de données régis par les ACL
+# Synology. Créé et vérifié par le script lui-même (root, 0700, sans lien symbolique ni ACL),
+# qui refuse de démarrer sinon. Non sauvegardé par Hyper Backup : voir README.
+restic_maintenance_private_dir: "/root/restic-maintenance/{{ restic_maintenance_name }}"
+restic_maintenance_keep_reports: 90
+
+restic_maintenance_retention:
+  keep_within: 30d
+  keep_daily: 14
+  keep_weekly: 8
+  keep_monthly: 12
+
+# Fenêtre provisoire : l'horaire définitif reste à fixer (hors sauvegardes, avant 05:00).
+restic_maintenance_window:
+  start: "01:00"
+  end: "04:30"
+restic_maintenance_timeout_minutes: 120
+restic_maintenance_run_check: true
+
+restic_maintenance_thresholds:
+  max_future_skew_minutes: 60
+  max_age_hours: 48
+  max_snapshots_per_24h: 6
+  backdate_tolerance_hours: 24
+  max_remove_count: 10
+  max_remove_percent: 20
+  min_keep_per_group: 7

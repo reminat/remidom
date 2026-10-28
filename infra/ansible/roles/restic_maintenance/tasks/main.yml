@@ -1,0 +1,133 @@
+# Ce rôle dépose uniquement des fichiers : il n'exécute ni restic, ni docker,
+# et ne crée pas la tâche planifiée DSM (voir services/synology/restic-maintenance/README.md).
+# Pas de « mode » : les droits viennent de l'héritage des ACL Synology (fichiers non secrets).
+
+- name: Check Restic maintenance configuration
+  ansible.builtin.assert:
+    that:
+      - restic_maintenance_mode == 'dry-run'
+      - restic_maintenance_name is match('^[a-z0-9][a-z0-9-]*$')
+      - restic_maintenance_repository is match('^/volume[0-9]+/')
+      - restic_maintenance_password_file is match('^/volume[0-9]+/')
+      - restic_maintenance_groups | length > 0
+      - restic_maintenance_groups | rejectattr('host', 'defined') | list | length == 0
+      - restic_maintenance_groups | rejectattr('paths', 'defined') | list | length == 0
+      - restic_maintenance_restic_version is match('^[0-9]+[.][0-9]+[.][0-9]+$')
+      - restic_maintenance_image_digest == '' or restic_maintenance_image_digest is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: >-
+      Configuration incomplète ou mode refusé : seul dry-run est autorisé, et nom, repository,
+      secret et groupes attendus doivent être définis dans group_vars/nas.yml.
+    quiet: true
+
+- name: Check Python version on the NAS
+  ansible.builtin.raw: "{{ ansible_python_interpreter }} -c 'import sys; print(\"%d.%d\" % sys.version_info[:2])'"
+  register: restic_maintenance_python
+  changed_when: false
+  check_mode: false
+
+- name: Require Python 3.8 or later
+  ansible.builtin.assert:
+    that:
+      - restic_maintenance_python.stdout | trim is version('3.8', '>=')
+    fail_msg: "Python {{ restic_maintenance_python.stdout | trim }} trouvé, 3.8 minimum requis."
+    quiet: true
+
+- name: Check Docker CLI presence
+  ansible.builtin.stat:
+    path: /usr/local/bin/docker
+  register: restic_maintenance_docker
+
+- name: Check deployment directory
+  ansible.builtin.stat:
+    path: "{{ restic_maintenance_deploy_dir }}"
+  register: restic_maintenance_dir
+
+- name: Require Docker and a writable deployment directory
+  ansible.builtin.assert:
+    that:
+      - restic_maintenance_docker.stat.exists
+      - restic_maintenance_dir.stat.exists
+      - restic_maintenance_dir.stat.isdir
+      - restic_maintenance_dir.stat.writeable
+    fail_msg: >-
+      Prérequis manquant pour {{ ansible_user | default("le compte de connexion") }} : /usr/local/bin/docker doit exister et
+      {{ restic_maintenance_deploy_dir }} doit être créé au préalable par un administrateur
+      et accessible en écriture (voir README, « Préparation du NAS »).
+    quiet: true
+
+# Références calculées sur le runner, à partir du dépôt et des variables de ce déploiement :
+# même template, mêmes variables (celles de l'hôte NAS, conservées par delegate_to).
+- name: Create a local temporary file for the expected configuration
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .config.json
+  delegate_to: localhost
+  check_mode: false
+  changed_when: false
+  register: restic_maintenance_expected_tmp
+
+- name: Compute expected checksums on the runner
+  block:
+    - name: Render the expected configuration on the runner
+      ansible.builtin.template:
+        src: "{{ restic_maintenance_src }}/config.json.j2"
+        dest: "{{ restic_maintenance_expected_tmp.path }}"
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+
+    - name: Checksum of the expected configuration
+      ansible.builtin.stat:
+        path: "{{ restic_maintenance_expected_tmp.path }}"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      register: restic_maintenance_expected_cfg
+
+    - name: Checksum of the script in the repository
+      ansible.builtin.stat:
+        path: "{{ restic_maintenance_src }}/restic_maintenance.py"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      register: restic_maintenance_expected_py
+  always:
+    - name: Remove the local temporary file
+      ansible.builtin.file:
+        path: "{{ restic_maintenance_expected_tmp.path }}"
+        state: absent
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+
+- name: Deploy Restic maintenance script
+  ansible.builtin.copy:
+    src: "{{ restic_maintenance_src }}/restic_maintenance.py"
+    dest: "{{ restic_maintenance_deploy_dir }}/restic_maintenance.py"
+
+- name: Render Restic maintenance configuration
+  ansible.builtin.template:
+    src: "{{ restic_maintenance_src }}/config.json.j2"
+    dest: "{{ restic_maintenance_deploy_dir }}/config.json"
+
+- name: Compute deployed file checksums
+  ansible.builtin.stat:
+    path: "{{ restic_maintenance_deploy_dir }}/{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - restic_maintenance.py
+    - config.json
+  register: restic_maintenance_checksums
+
+- name: Show reference checksums (computed on the runner)
+  ansible.builtin.debug:
+    msg:
+      - "{{ restic_maintenance_expected_py.stat.checksum }}  restic_maintenance.py"
+      - "{{ restic_maintenance_expected_cfg.stat.checksum }}  config.json"
+
+- name: Verify that the deployed files match the references
+  ansible.builtin.assert:
+    that:
+      - restic_maintenance_checksums.results[0].stat.checksum == restic_maintenance_expected_py.stat.checksum
+      - restic_maintenance_checksums.results[1].stat.checksum == restic_maintenance_expected_cfg.stat.checksum
+    fail_msg: "Les fichiers présents sur le NAS ne correspondent pas aux références calculées sur le runner."
+    success_msg: "Fichiers déployés identiques aux références calculées sur le runner."
+  when: not ansible_check_mode

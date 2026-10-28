@@ -1,0 +1,31 @@
+# NAS Synology (DSM 7) — accès SSH sans élévation de privilèges.
+ansible_python_interpreter: /usr/bin/python3
+ansible_remote_tmp: /tmp
+
+# Clé d'hôte vérifiée contre le fichier versionné (ansible.cfg désactive la vérification
+# pour les autres hôtes ; elle est réactivée ici pour le NAS uniquement).
+ansible_host_key_checking: true
+ansible_ssh_common_args: "-o UserKnownHostsFile={{ inventory_dir }}/nas_known_hosts -o StrictHostKeyChecking=yes"
+
+# Transfert des fichiers par SSH avec dd des deux côtés (ansible-core >= 2.17 sur le
+# runner). SFTP a échoué lors du test (« subsystem request failed on channel 0 »),
+# cause non établie : voir README.
+ansible_ssh_transfer_method: piped
+
+# Maintenance Restic du repository docker-test (dry-run uniquement).
+restic_maintenance_name: docker-test
+restic_maintenance_repository: /volume1/Restic/docker-test
+restic_maintenance_password_file: /volume1/docker/restic-maintenance/secrets/restic_password_test
+
+# Groupes attendus : chemins exacts, pas de préfixe (/srv/docker n'est pas autorisé).
+restic_maintenance_groups:
+  - name: core
+    host: docker-test-01
+    paths: [/srv/docker/core]
+    tags: [core, test]
+  # Snapshot de validation historique : figé, aucun nouveau snapshot accepté.
+  - name: validation
+    host: docker-test-01
+    paths: [/tmp/restic-test]
+    tags: [validation]
+    frozen_ids: ["1e30db7a"]
