@@ -514,7 +514,20 @@ Même script, même rôle, même procédure que `docker-test` ; seules les valeu
 
 Le contrôle `stale` (aucun snapshot de moins de 48 h) signale aussi l'arrêt de la
 sauvegarde quotidienne de `docker-prod-01` (timer 02:30), qui n'a pas de notification
-propre.
+propre. Avec une sauvegarde à 02:30 et un contrôle à 03:45, le seuil de 48 h **tolère une
+sauvegarde manquée** : si celle du jour J échoue, le contrôle de J voit un dernier snapshot
+de J−1 (25 h 15) et ne signale rien ; si celle de J+1 échoue aussi, le contrôle de J+1 voit
+49 h 15 et alerte. L'alerte arrive donc au plus tard environ 25 h après le premier échec.
+
+**Fenêtre et délai** : la fenêtre `01:00–04:30` n'est vérifiée **qu'au démarrage** (hors
+fenêtre : statut `outside_window`, code 3, rien n'est lu). Une exécution commencée dans la
+fenêtre va jusqu'au bout, même au-delà de 04:30, dans la limite du délai global de 120 min
+(au-delà : conteneur arrêté, statut `timeout`, code 5). Démarrée à 03:45, elle se termine au
+plus tard vers 05:45 ; en lecture seule, un chevauchement avec les snapshots Btrfs ou Hyper
+Backup reste sans risque pour les données. Le script ne détecte pas une sauvegarde en
+cours (lecture sans verrou) : il signale seulement les verrous présents (`WARN locks`) ; le
+snapshot en cours peut manquer et `check` peut échouer de façon transitoire (code 4).
+D'où l'heure choisie, loin de la sauvegarde de 02:30 (quelques secondes pour 81 Mo).
 
 ### Prérequis (manuels, une fois)
 
