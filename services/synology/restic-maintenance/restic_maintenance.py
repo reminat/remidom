@@ -1,9 +1,13 @@
 #!/usr/bin/python3
-"""Maintenance Restic locale sur le NAS — mode dry-run uniquement.
+"""Maintenance Restic locale sur le NAS.
 
 Exécuté en root par une tâche planifiée DSM. Restic tourne dans un conteneur
-Docker (image épinglée), repository monté en lecture seule, sans réseau.
-Le mot de passe est monté comme fichier : ce script ne le lit jamais.
+Docker (image épinglée), sans réseau. Le mot de passe est monté comme fichier :
+ce script ne le lit jamais.
+
+Sans option, contrôle en lecture seule (forget --dry-run). Avec --apply forget|prune,
+le même contrôle, puis, s'il est entièrement propre et si l'opération est activée dans
+la configuration, l'opération réelle, seule à monter le repository en écriture.
 
 Compatible Python 3.8 (version fournie par DSM 7). À lancer avec « python3 -I ».
 """
@@ -32,14 +36,25 @@ DOCKER_BIN = "/usr/local/bin/docker"
 CONTAINER_REPO = "/repo"
 CONTAINER_PASSWORD = "/run/secrets/restic_password"
 
-# Sous-commandes restic autorisées et jetons interdits, quelles que soient les options.
-ALLOWED_SUBCOMMANDS = ("version", "snapshots", "forget", "check", "list")
+# Sous-commandes restic autorisées en lecture seule et jetons interdits, quelles que soient les options.
+ALLOWED_SUBCOMMANDS = ("version", "snapshots", "forget", "check", "list", "prune")
 # Options de « check » autorisées en plus de --no-lock / --no-cache : lecture des données.
 CHECK_OPTION_RE = re.compile(r"^--read-data(-subset=[0-9]{1,3}/[0-9]{1,3})?$")
 # Lecture des données : jamais si absente de la configuration.
 NO_READ_DATA = {"weekdays": [], "parts": 1}
-FORBIDDEN_TOKENS = ("--prune", "prune", "unlock", "repair", "rebuild-index", "key",
-                    "init", "migrate", "tag", "rewrite", "backup", "copy", "--remove-all")
+FORBIDDEN_TOKENS = ("--prune", "unlock", "repair", "rebuild-index", "key", "init", "migrate", "tag",
+                    "rewrite", "backup", "copy", "--remove-all", "--unsafe-allow-remove-all",
+                    "--unsafe-recover-no-free-space", "--repack-uncompressed", "--retry-lock")
+SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+MAX_UNUSED_RE = re.compile(r"^([0-9]|[1-4][0-9]|50)%$")
+# Opérations réelles : jamais si absentes de la configuration.
+NO_APPLY = {"forget": False, "prune": False, "prune_max_unused": "5%", "repository_owner": "0:0"}
+# Entrées du repository dont le propriétaire est vérifié avant toute écriture.
+REPO_ENTRIES = ("config", "data", "index", "keys", "locks", "snapshots")
+# Code de sortie de restic quand il ne peut pas verrouiller le repository (rien n'a été modifié).
+RESTIC_EXIT_LOCKED = 11
+# Arrêt d'une opération réelle au délai : SIGTERM (restic libère son verrou), puis SIGKILL.
+STOP_GRACE_SECONDS = 60
 
 EXIT_OK = 0
 EXIT_ANOMALY = 1
@@ -107,6 +122,9 @@ def load_config(path):
     validate_read_data(cfg.get("read_data", NO_READ_DATA))
     if cfg.get("read_data", NO_READ_DATA)["weekdays"] and not cfg.get("run_check", True):
         raise ConfigError("read_data suppose run_check : la lecture des données se fait pendant check")
+    validate_apply(cfg.get("apply", NO_APPLY))
+    if any(cfg.get("apply", NO_APPLY)[op] for op in ("forget", "prune")) and not cfg.get("run_check", True):
+        raise ConfigError("apply suppose run_check : aucune opération réelle sans contrôle préalable")
     validate_groups(cfg["groups"])
     image = cfg["image"]
     if not re.match(r"^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$", image) \
@@ -174,6 +192,21 @@ def read_data_args(read_data, today, force=False):
         return ["--read-data"]
     week = (today.toordinal() - 1) // 7
     return ["--read-data-subset=%d/%d" % (week % parts + 1, parts)]
+
+
+def validate_apply(apply):
+    """Opérations réelles : forget / prune activés séparément ; propriétaire attendu du repository."""
+    if not isinstance(apply, dict) or set(apply) != set(NO_APPLY):
+        raise ConfigError("apply doit contenir exactement %s" % ", ".join(sorted(NO_APPLY)))
+    for op in ("forget", "prune"):
+        if not isinstance(apply[op], bool):
+            raise ConfigError("apply.%s doit être un booléen" % op)
+    if not isinstance(apply["prune_max_unused"], str) or not MAX_UNUSED_RE.match(apply["prune_max_unused"]):
+        raise ConfigError("apply.prune_max_unused invalide : %r (pourcentage entier de 0%% à 50%%)"
+                          % (apply["prune_max_unused"],))
+    if not isinstance(apply["repository_owner"], str) or not re.match(r"^[0-9]{1,10}:[0-9]{1,10}$",
+                                                                     apply["repository_owner"]):
+        raise ConfigError("apply.repository_owner invalide : %r (uid:gid)" % (apply["repository_owner"],))
 
 
 def validate_thresholds(thresholds):
@@ -372,8 +405,13 @@ def open_lock(state_fd):
 # --------------------------------------------------------------------------- état
 
 def validate_state(obj, now, max_skew):
-    if not isinstance(obj, dict) or set(obj) != {"last_run", "snapshot_ids"}:
-        return "structure inattendue (clés last_run et snapshot_ids exactement)"
+    if not isinstance(obj, dict) or not {"last_run", "snapshot_ids"} <= set(obj) \
+            or not set(obj) <= {"last_run", "snapshot_ids", "in_progress"}:
+        return "structure inattendue (clés last_run, snapshot_ids et, facultative, in_progress)"
+    if "in_progress" in obj:
+        error = validate_in_progress(obj["in_progress"])
+        if error:
+            return error
     if not isinstance(obj["last_run"], str):
         return "last_run n'est pas une chaîne"
     try:
@@ -389,6 +427,25 @@ def validate_state(obj, now, max_skew):
         return "identifiant de snapshot invalide"
     if len(set(ids)) != len(ids):
         return "identifiants en double"
+    return None
+
+
+def validate_in_progress(ip):
+    """Opération réelle commencée et non terminée : {"operation", "started", "ids"}."""
+    if not isinstance(ip, dict) or set(ip) != {"operation", "started", "ids"}:
+        return "in_progress : structure inattendue"
+    if ip["operation"] not in ("forget", "prune"):
+        return "in_progress : opération inconnue"
+    try:
+        parse_time(ip["started"])
+    except (TypeError, ValueError):
+        return "in_progress : started illisible"
+    ids = ip["ids"]
+    if not isinstance(ids, list) or len(ids) > MAX_STATE_IDS \
+            or any(not isinstance(i, str) or not SNAPSHOT_ID_RE.match(i) for i in ids):
+        return "in_progress : identifiants invalides"
+    if ip["operation"] == "prune" and ids:
+        return "in_progress : prune ne supprime aucun snapshot"
     return None
 
 
@@ -511,6 +568,27 @@ def build_restic_args(subcommand, extra):
     return args
 
 
+def build_write_args(subcommand, extra):
+    args = ["--no-cache", subcommand] + list(extra)
+    check_write_safe(args)
+    return args
+
+
+def check_write_safe(args):
+    """Seules commandes admises sur le repository monté en écriture, sous verrou restic :
+    « forget <identifiants complets> » et « prune --max-unused=N% ». Rien d'autre."""
+    if len(args) < 3 or args[0] != "--no-cache":
+        raise StepError("commande d'écriture refusée : %r" % (args[:3],))
+    if args[1] == "forget":
+        if not all(SNAPSHOT_ID_RE.match(a) for a in args[2:]) or len(set(args[2:])) != len(args[2:]):
+            raise StepError("forget réel : seuls des identifiants complets, distincts, sont admis")
+        return
+    if args[1] == "prune" and len(args) == 3 and args[2].startswith("--max-unused=") \
+            and MAX_UNUSED_RE.match(args[2][len("--max-unused="):]):
+        return
+    raise StepError("commande d'écriture refusée : %r" % (args,))
+
+
 def check_safe(args):
     """Dernier garde-fou avant exécution : refuse toute commande potentiellement destructive."""
     sub = [a for a in args if not a.startswith("-")]
@@ -525,21 +603,36 @@ def check_safe(args):
         extra = [a for a in args if a not in ("--no-lock", "--no-cache", "check")]
         if len(extra) > 1 or any(not CHECK_OPTION_RE.match(a) for a in extra):
             raise StepError("option de check refusée : %r" % (extra,))
+    if sub[0] == "prune":
+        extra = [a for a in args if a not in ("--no-lock", "--no-cache", "prune", "--dry-run")]
+        if "--dry-run" not in args or len(extra) != 1 or not extra[0].startswith("--max-unused=") \
+                or not MAX_UNUSED_RE.match(extra[0][len("--max-unused="):]):
+            raise StepError("prune en lecture seule : --dry-run et --max-unused=N%% seulement : %r" % (extra,))
     if "--no-lock" not in args:
         raise StepError("--no-lock obligatoire (repository en lecture seule)")
 
 
-def docker_base(cfg, container_name):
-    """Options communes à tous les conteneurs : isolement et montages en lecture seule."""
+def docker_base(cfg, container_name, write=False):
+    """Options communes à tous les conteneurs : isolement et montages en lecture seule.
+    write=True (opérations réelles seulement) : /repo en écriture, sous l'uid:gid propriétaire
+    du repository, avec DAC_OVERRIDE pour les dossiers régis par les ACL Synology."""
+    if write:
+        repo_mount = "%s:%s" % (cfg["repository"], CONTAINER_REPO)
+        identity = ["--user", cfg.get("apply", NO_APPLY)["repository_owner"],
+                    "--cap-drop", "ALL", "--cap-add", "DAC_READ_SEARCH", "--cap-add", "DAC_OVERRIDE"]
+    else:
+        repo_mount = "%s:%s:ro" % (cfg["repository"], CONTAINER_REPO)
+        identity = ["--cap-drop", "ALL", "--cap-add", "DAC_READ_SEARCH"]
     return [
         DOCKER_BIN, "run", "--rm", "--name", container_name,
+        "--hostname", "restic-maint-%s" % cfg["name"],
         "--pull", "never",
         "--network", "none",
         "--read-only",
         "--tmpfs", "/tmp:rw,noexec,nosuid,size=512m",
-        "--cap-drop", "ALL", "--cap-add", "DAC_READ_SEARCH",
+    ] + identity + [
         "--security-opt", "no-new-privileges",
-        "-v", "%s:%s:ro" % (cfg["repository"], CONTAINER_REPO),
+        "-v", repo_mount,
         "-v", "%s:%s:ro" % (cfg["password_file"], CONTAINER_PASSWORD),
         "-e", "RESTIC_REPOSITORY=%s" % CONTAINER_REPO,
         "-e", "RESTIC_PASSWORD_FILE=%s" % CONTAINER_PASSWORD,
@@ -550,44 +643,50 @@ def docker_base(cfg, container_name):
 # Barrière exécutée dans chaque conteneur restic, avant restic : lit les montages de CE
 # conteneur et refuse (code GATE_EXIT) si /, /repo, le secret ou tout sous-montage de /repo
 # n'est pas en lecture seule. Même règle que readonly_problems() ; busybox sh/awk de l'image.
+# Conteneur d'écriture (rw=1) : /repo exactement doit au contraire être « rw » ; tout le reste « ro ».
 GATE_EXIT = 97
 GATE_MARKER = "RESTIC_GATE_REFUSED"
 GATE_AWK = r"""
 {
   mp = $2
   if (mp == "/" || mp == repo || mp == secret || index(mp, repo "/") == 1) {
-    n = split($4, opts, ","); ro = 0
-    for (i = 1; i <= n; i++) if (opts[i] == "ro") ro = 1
-    state[mp] = ro
+    n = split($4, opts, ","); ro = 0; wr = 0
+    for (i = 1; i <= n; i++) { if (opts[i] == "ro") ro = 1; if (opts[i] == "rw") wr = 1 }
+    state[mp] = (rw == 1 && mp == repo) ? wr : ro
   }
 }
 END {
   bad = 0
   if (!("/" in state) || !(repo in state) || !(secret in state)) { print "montage attendu absent" > "/dev/stderr"; bad = 1 }
-  for (m in state) if (!state[m]) { print "montage sans ro : " m > "/dev/stderr"; bad = 1 }
+  for (m in state) if (!state[m]) { print "montage refusé (ro attendu, rw pour /repo en écriture) : " m > "/dev/stderr"; bad = 1 }
   exit bad
 }
 """
-GATE_SCRIPT = (
-    "awk -v repo=%s -v secret=%s '%s' /proc/self/mounts || { echo %s >&2; exit %d; }\n"
-    "exec /usr/bin/restic \"$@\"\n" % (CONTAINER_REPO, CONTAINER_PASSWORD, GATE_AWK, GATE_MARKER, GATE_EXIT)
-)
+
+def gate_script(write=False):
+    return ("awk -v repo=%s -v secret=%s -v rw=%d '%s' /proc/self/mounts || { echo %s >&2; exit %d; }\n"
+            "exec /usr/bin/restic \"$@\"\n"
+            % (CONTAINER_REPO, CONTAINER_PASSWORD, 1 if write else 0, GATE_AWK, GATE_MARKER, GATE_EXIT))
 
 
-def docker_command(cfg, container_name, restic_args):
+GATE_SCRIPT = gate_script()
+
+
+def docker_command(cfg, container_name, restic_args, write=False):
     """Conteneur restic : la barrière de montages s'exécute d'abord, puis « exec restic »."""
-    return docker_base(cfg, container_name) + ["--entrypoint", "/bin/sh", cfg["image"],
-                                               "-c", GATE_SCRIPT, "restic-gate"] + restic_args
+    return docker_base(cfg, container_name, write) + ["--entrypoint", "/bin/sh", cfg["image"],
+                                                      "-c", gate_script(write), "restic-gate"] + restic_args
 
 
-def mounts_command(cfg, container_name):
+def mounts_command(cfg, container_name, write=False):
     """Même conteneur, mais affiche ses points de montage au lieu de lancer restic."""
-    return docker_base(cfg, container_name) + ["--entrypoint", "/bin/cat", cfg["image"], "/proc/self/mounts"]
+    return docker_base(cfg, container_name, write) + ["--entrypoint", "/bin/cat", cfg["image"], "/proc/self/mounts"]
 
 
-def readonly_problems(mounts_text):
+def readonly_problems(mounts_text, write=False):
     """Exige l'option ro sur /, /repo, le secret et tout sous-montage de /repo.
-    Pour un point de montage répété, seule la dernière ligne (le montage visible) compte."""
+    Pour un point de montage répété, seule la dernière ligne (le montage visible) compte.
+    write=True : /repo exactement doit au contraire être en écriture (le reste inchangé)."""
     options = {}
     for line in mounts_text.splitlines():
         fields = line.split()
@@ -599,14 +698,41 @@ def readonly_problems(mounts_text):
     problems = ["%s : point de montage absent" % mp
                 for mp in ("/", CONTAINER_REPO, CONTAINER_PASSWORD) if mp not in options]
     for mp in sorted(options):
-        if "ro" not in options[mp]:
+        if write and mp == CONTAINER_REPO:
+            if "rw" not in options[mp]:
+                problems.append("%s : monté sans « rw » pour une opération réelle" % mp)
+        elif "ro" not in options[mp]:
             problems.append("%s : monté sans « ro » (%s)" % (unescape_mount(mp), ",".join(options[mp])))
+    return problems
+
+
+def repository_owner_problems(repository, owner):
+    """Les fichiers créés par une opération réelle doivent rester lisibles par le REST Server :
+    on écrit sous l'identité qui possède déjà le repository, et on refuse si elle n'est pas homogène."""
+    problems = []
+    for entry in REPO_ENTRIES:
+        try:
+            st = os.lstat(os.path.join(repository, entry))
+        except OSError as exc:
+            problems.append("%s : %s" % (entry, exc.strerror))
+            continue
+        actual = "%d:%d" % (st.st_uid, st.st_gid)
+        if stat.S_ISLNK(st.st_mode):
+            problems.append("%s : lien symbolique" % entry)
+        elif actual != owner:
+            problems.append("%s : propriétaire %s au lieu de %s" % (entry, actual, owner))
     return problems
 
 
 def parse_restic_version(output):
     m = re.match(r"^restic (\d+\.\d+\.\d+)\b", output.strip())
     return m.group(1) if m else None
+
+
+class ResticFailed(StepError):
+    def __init__(self, message, returncode):
+        StepError.__init__(self, message)
+        self.returncode = returncode
 
 
 class Runner:
@@ -620,32 +746,46 @@ class Runner:
         self.counter += 1
         return "restic-maint-%s-%d-%d" % (re.sub(r"[^a-z0-9-]", "-", self.cfg["name"]), os.getpid(), self.counter)
 
-    def _exec(self, cmd, name, label):
+    def _exec(self, cmd, name, label, graceful=False):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise StepTimeout("délai global dépassé avant « %s »" % label)
         try:
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=remaining)
         except subprocess.TimeoutExpired:
-            subprocess.run([DOCKER_BIN, "kill", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if graceful:
+                # docker stop : SIGTERM (restic annule et retire son verrou), SIGKILL après le délai de grâce.
+                subprocess.run([DOCKER_BIN, "stop", "--time", str(STOP_GRACE_SECONDS), name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.run([DOCKER_BIN, "kill", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             raise StepTimeout("délai global dépassé pendant « %s »" % label)
         stderr = proc.stderr.decode("utf-8", "replace").strip()
         if proc.returncode == GATE_EXIT and GATE_MARKER in stderr:
             raise UnsafeMounts("%s : barrière du conteneur : %s" % (label, stderr[-500:]))
         if proc.returncode != 0:
-            raise StepError("%s a échoué (code %d) : %s" % (label, proc.returncode, stderr[-2000:]))
+            raise ResticFailed("%s a échoué (code %d) : %s" % (label, proc.returncode, stderr[-2000:]),
+                               proc.returncode)
         return proc.stdout.decode("utf-8", "replace")
 
-    def mounts(self):
+    def mounts(self, write=False):
         name = self._name()
-        self.log("vérification des montages du conteneur")
-        return self._exec(mounts_command(self.cfg, name), name, "lecture des montages")
+        self.log("vérification des montages du conteneur%s" % (" d'écriture" if write else ""))
+        return self._exec(mounts_command(self.cfg, name, write), name, "lecture des montages")
 
     def restic(self, subcommand, *extra):
         args = build_restic_args(subcommand, extra)
         name = self._name()
         self.log("restic %s" % " ".join(args))
         return self._exec(docker_command(self.cfg, name, args), name, "restic %s" % subcommand)
+
+    def restic_write(self, subcommand, *extra):
+        """Opération réelle : repository en écriture, verrou restic normal (jamais --no-lock)."""
+        args = build_write_args(subcommand, extra)
+        name = self._name()
+        self.log("ÉCRITURE : restic %s" % " ".join(a if not SNAPSHOT_ID_RE.match(a) else a[:8] for a in args))
+        return self._exec(docker_command(self.cfg, name, args, write=True), name,
+                          "restic %s (écriture)" % subcommand, graceful=True)
 
 
 def parse_json_output(text):
@@ -686,8 +826,9 @@ def max_in_window(times, window):
     return best
 
 
-def analyze(cfg, snapshots, forget_groups, now, state, state_error=None, policy_now=None):
-    """Analyse pure : ne fait aucune entrée/sortie. Retourne (findings, summary)."""
+def analyze(cfg, snapshots, forget_groups, now, state, state_error=None, policy_now=None, apply=False):
+    """Analyse pure : ne fait aucune entrée/sortie. Retourne (findings, summary).
+    apply=True : seuils de volume bloquants (ERROR) au lieu d'informatifs (WARN)."""
     th = cfg["thresholds"]
     findings = []
     groups = cfg["groups"]
@@ -753,7 +894,14 @@ def analyze(cfg, snapshots, forget_groups, now, state, state_error=None, policy_
         previous = set(state.get("snapshot_ids", []))
         last_run = parse_time(state["last_run"])
         tolerance = dt.timedelta(hours=th["backdate_tolerance_hours"])
-        gone = sorted(previous - ids)
+        ip = state.get("in_progress")
+        requested = set(ip["ids"]) if ip else set()
+        if ip:
+            findings.append(finding("ERROR", "operation_interrupted",
+                                    "%s réel commencé le %s et non terminé (%d/%d suppressions demandées constatées) :"
+                                    " voir « Opération interrompue » dans le README"
+                                    % (ip["operation"], ip["started"], len(requested - ids), len(requested))))
+        gone = sorted(previous - ids - requested)
         if gone:
             findings.append(finding("ERROR", "snapshots_disappeared",
                                     "%d snapshot(s) disparu(s) depuis la dernière exécution : %s"
@@ -782,7 +930,7 @@ def analyze(cfg, snapshots, forget_groups, now, state, state_error=None, policy_
     percent = (100.0 * removed / total) if total else 0.0
     # En dry-run, rien n'est supprimé : les candidats s'accumulent normalement d'une exécution à
     # l'autre. Ces seuils, faits pour encadrer une suppression réelle, ne sont alors qu'informatifs.
-    volume_level = "WARN" if cfg["mode"] == "dry-run" else "ERROR"
+    volume_level = "ERROR" if apply else "WARN"
     if removed > th["max_remove_count"]:
         findings.append(finding(volume_level, "remove_count", "%d suppressions estimées (max %d)" % (removed, th["max_remove_count"])))
     if percent > th["max_remove_percent"]:
@@ -813,10 +961,15 @@ def analyze(cfg, snapshots, forget_groups, now, state, state_error=None, policy_
 # --------------------------------------------------------------------------- main
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Maintenance Restic (dry-run uniquement)")
+    parser = argparse.ArgumentParser(description="Maintenance Restic : contrôle dry-run, opérations réelles explicites")
     parser.add_argument("--config", required=True)
-    parser.add_argument("--init-baseline", action="store_true",
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--init-baseline", action="store_true",
                         help="crée la référence si state.json est absent (premier lancement manuel uniquement)")
+    action.add_argument("--apply", choices=("forget", "prune"),
+                        help="opération réelle après un contrôle entièrement propre (activée dans la configuration)")
+    action.add_argument("--resolve-interrupted", action="store_true",
+                        help="après vérification manuelle, clôt une opération réelle interrompue (lecture seule)")
     parser.add_argument("--read-data", action="store_true",
                         help="force la lecture intégrale des données pour cette exécution (lancement manuel)")
     parser.add_argument("--ignore-window", action="store_true",
@@ -860,11 +1013,16 @@ def main(argv=None):
             os.close(fd)
 
 
+def tail(text, n=40):
+    return [line for line in text.strip().splitlines() if line.strip()][-n:]
+
+
 def run(cfg, opts, log, lines, state_fd, log_fd):
     """Exécution sous verrou exclusif ; état et rapports relatifs aux descripteurs vérifiés."""
     started = dt.datetime.now(dt.timezone.utc)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    report = {"name": cfg["name"], "mode": cfg["mode"], "image": cfg["image"],
+    operation = opts.apply or ("resolve-interrupted" if opts.resolve_interrupted else "control")
+    report = {"name": cfg["name"], "mode": cfg["mode"], "operation": operation, "image": cfg["image"],
               "expected_restic_version": cfg["expected_restic_version"],
               "started": started.isoformat(), "findings": [], "summary": None, "status": None}
 
@@ -877,7 +1035,9 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
         log("statut : %s" % status)
         return code
 
-    log("maintenance %s — mode %s — image %s" % (cfg["name"], cfg["mode"], cfg["image"]))
+    log("maintenance %s — %s — image %s" % (cfg["name"], "OPÉRATION RÉELLE : %s" % opts.apply if opts.apply
+                                            else "contrôle dry-run" if operation == "control" else operation,
+                                            cfg["image"]))
     if not opts.ignore_window and not in_window(cfg["window"], dt.datetime.now()):
         log("hors fenêtre %s–%s : rien à faire" % (cfg["window"]["start"], cfg["window"]["end"]))
         return finish("outside_window", EXIT_WINDOW)
@@ -890,6 +1050,17 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
         log("Docker introuvable : %s" % DOCKER_BIN)
         return finish("config_error", EXIT_CONFIG)
 
+    apply_cfg = cfg.get("apply", NO_APPLY)
+    if opts.apply:
+        if not apply_cfg[opts.apply]:
+            log("--apply %s refusé : opération désactivée dans la configuration (apply.%s)" % (opts.apply, opts.apply))
+            return finish("apply_disabled", EXIT_CONFIG)
+        problems = repository_owner_problems(cfg["repository"], apply_cfg["repository_owner"])
+        if problems:
+            for p in problems:
+                log("repository refusé pour l'écriture : %s" % p)
+            return finish("repository_owner", EXIT_CONFIG)
+
     state, state_error = read_state(state_fd, started,
                                     dt.timedelta(minutes=cfg["thresholds"]["max_future_skew_minutes"]))
     report["baseline"] = "invalid" if state_error else ("present" if state else "absent")
@@ -900,7 +1071,12 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
             return finish("baseline_exists", EXIT_BASELINE_EXISTS)
         if state_error:
             log("--init-baseline sans effet : state.json existe mais est invalide ; il est conservé tel quel")
+    if opts.resolve_interrupted and not (state and state.get("in_progress")):
+        log("--resolve-interrupted : aucune opération interrompue dans la référence ; rien à faire")
+        return finish("nothing_to_resolve", EXIT_CONFIG)
 
+    # Toute exécution autre que le contrôle quotidien exige un repository sans verrou.
+    strict = operation != "control"
     runner = Runner(cfg, time.monotonic() + 60 * cfg["timeout_minutes"], log)
     try:
         problems = readonly_problems(runner.mounts())
@@ -921,7 +1097,10 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
         log("%d snapshots lus" % len(snapshots))
         locks = runner.restic("list", "locks").split()
         if locks:
-            report["findings"].append(finding("WARN", "locks", "%d verrou(s) présent(s) dans le repository" % len(locks)))
+            report["findings"].append(finding("ERROR" if strict else "WARN", "locks",
+                                              "%d verrou(s) présent(s) dans le repository%s"
+                                              % (len(locks), " : aucune suppression automatique de verrou"
+                                                 if strict else "")))
         if cfg.get("run_check", True):
             check_args = read_data_args(cfg.get("read_data", NO_READ_DATA), dt.date.today(), opts.read_data)
             report["check"] = {"read_data": " ".join(check_args) or "aucune", "ok": False}
@@ -941,24 +1120,35 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
         log(str(exc))
         return finish("restic_error", EXIT_RESTIC)
 
-    findings, summary = analyze(cfg, snapshots, forget_groups, started, state, state_error, policy_now)
+    findings, summary = analyze(cfg, snapshots, forget_groups, started, state, state_error, policy_now,
+                                apply=opts.apply == "forget")
+    removal = [sn.get("id", "") for g in forget_groups for sn in (g.get("remove") or [])]
+    if opts.apply == "forget":
+        findings.extend(removal_problems(cfg, snapshots, removal))
     report["findings"].extend(findings)
     report["summary"] = summary
 
     for f in report["findings"]:
         log("%-5s %-22s %s" % (f["level"], f["code"], f["message"]))
-    log("estimation : %d conservés, %d à supprimer (%.1f %%) sur %d — AUCUNE suppression effectuée (dry-run)"
-        % (summary["would_keep"], summary["would_remove"], summary["would_remove_percent"], summary["snapshots"]))
+    log("estimation : %d conservés, %d à supprimer (%.1f %%) sur %d%s"
+        % (summary["would_keep"], summary["would_remove"], summary["would_remove_percent"], summary["snapshots"],
+           "" if opts.apply == "forget" else " — AUCUNE suppression effectuée (dry-run)"))
 
-    if any(f["level"] == "ERROR" for f in report["findings"]):
+    blocking = [f for f in report["findings"] if f["level"] == "ERROR"
+                and not (opts.resolve_interrupted and f["code"] == "operation_interrupted")]
+    if blocking:
+        if opts.apply:
+            log("OPÉRATION REFUSÉE : contrôle non conforme ; rien n'a été modifié")
+            return finish("apply_refused", EXIT_ANOMALY)
         return finish("anomaly", EXIT_ANOMALY)
 
     # Un état invalide produit toujours une anomalie (ci-dessus) : il n'est jamais remplacé.
-    new_state = {"last_run": started.isoformat(), "snapshot_ids": sorted(sn["id"] for sn in snapshots)}
+    current_ids = sorted(sn["id"] for sn in snapshots)
+    new_state = {"last_run": started.isoformat(), "snapshot_ids": current_ids}
     if state is None:
         if not opts.init_baseline:
-            log("RÉFÉRENCE ABSENTE : aucune référence créée. Après vérification, relancer manuellement avec"
-                " --init-baseline.")
+            log("RÉFÉRENCE ABSENTE : aucune référence créée%s. Après vérification, relancer manuellement avec"
+                " --init-baseline." % (" ; aucune opération réelle" if opts.apply else ""))
             return finish("baseline_required", EXIT_BASELINE_REQUIRED)
         try:
             write_json_at(state_fd, "state.json", new_state, replace=False)
@@ -970,8 +1160,153 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
             % (len(new_state["snapshot_ids"]), ", ".join("%s %d" % kv for kv in summary["per_group"].items())))
         return finish("baseline_created", EXIT_OK)
 
-    write_json_at(state_fd, "state.json", new_state)
-    return finish("ok", EXIT_OK)
+    if opts.resolve_interrupted:
+        ip = state["in_progress"]
+        write_json_at(state_fd, "state.json", new_state)
+        log("OPÉRATION INTERROMPUE CLOSE : %s du %s ; repository sans verrou, check OK ; référence mise à jour"
+            " (%d snapshots)" % (ip["operation"], ip["started"], len(current_ids)))
+        return finish("interrupted_resolved", EXIT_OK)
+    if not opts.apply:
+        write_json_at(state_fd, "state.json", new_state)
+        return finish("ok", EXIT_OK)
+    return apply_operation(cfg, opts.apply, runner, state_fd, report, log, finish, started, snapshots,
+                           removal if opts.apply == "forget" else [])
+
+
+def removal_problems(cfg, snapshots, removal):
+    """Chaque suppression doit viser un identifiant complet, présent, d'un groupe déclaré et non figé."""
+    by_id = {sn.get("id"): sn for sn in snapshots}
+    problems = []
+    for sid in removal:
+        sn = by_id.get(sid)
+        g = match_group(cfg["groups"], sn) if sn else None
+        if not SNAPSHOT_ID_RE.match(sid or "") or sn is None:
+            problems.append("%r : identifiant inconnu ou incomplet" % (sid,))
+        elif g is None:
+            problems.append("%s : hors des groupes déclarés" % sid[:8])
+        elif g.get("frozen_ids") is not None:
+            problems.append("%s : groupe figé %s" % (sid[:8], g["name"]))
+    if len(set(removal)) != len(removal):
+        problems.append("identifiants en double dans la liste de suppression")
+    return [finding("ERROR", "removal_not_allowed", p) for p in problems]
+
+
+def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, snapshots, removal):
+    """Opération réelle, après un contrôle sans aucune erreur. La référence porte un marqueur
+    in_progress pendant l'écriture : une interruption reste visible (operation_interrupted)."""
+    before = {sn["id"] for sn in snapshots}
+    times = {sn["id"]: sn.get("time", "?") for sn in snapshots}
+    max_unused = "--max-unused=%s" % cfg["apply"]["prune_max_unused"]
+    result = {"operation": op, "ok": False}
+    report["apply"] = result
+    if op == "forget":
+        result["requested"] = sorted(removal)
+        if not removal:
+            write_json_at(state_fd, "state.json", {"last_run": started.isoformat(), "snapshot_ids": sorted(before)})
+            log("forget : aucun snapshot à supprimer selon la politique ; rien n'a été modifié")
+            result["ok"] = True
+            return finish("nothing_to_remove", EXIT_OK)
+    try:
+        if op == "prune":
+            result["dry_run"] = tail(runner.restic("prune", "--dry-run", max_unused))
+            for line in result["dry_run"]:
+                log("prune --dry-run | %s" % line)
+        problems = readonly_problems(runner.mounts(write=True), write=True)
+        if problems:
+            for p in problems:
+                log("montage refusé : %s" % p)
+            return finish("unsafe_mounts", EXIT_CONFIG)
+    except UnsafeMounts as exc:
+        log(str(exc))
+        return finish("unsafe_mounts", EXIT_CONFIG)
+    except StepTimeout as exc:
+        log(str(exc))
+        return finish("timeout", EXIT_TIMEOUT)
+    except (StepError, ValueError) as exc:
+        log(str(exc))
+        return finish("restic_error", EXIT_RESTIC)
+
+    clean_state = {"last_run": started.isoformat(), "snapshot_ids": sorted(before)}
+    if runner.deadline - time.monotonic() < STOP_GRACE_SECONDS:
+        log("délai global presque épuisé avant l'écriture : opération non commencée")
+        write_json_at(state_fd, "state.json", clean_state)
+        return finish("timeout", EXIT_TIMEOUT)
+    marker = dict(clean_state, in_progress={"operation": op, "started": started.isoformat(),
+                                            "ids": sorted(removal) if op == "forget" else []})
+    write_json_at(state_fd, "state.json", marker)
+    try:
+        if op == "forget":
+            for sid in sorted(removal, key=lambda i: times[i]):
+                log("SUPPRESSION DEMANDÉE : %s (%s)" % (sid[:8], times[sid]))
+            output = runner.restic_write("forget", *sorted(removal))
+        else:
+            output = runner.restic_write("prune", max_unused)
+        result["restic_output"] = tail(output)
+    except ResticFailed as exc:
+        log(str(exc))
+        if exc.returncode == RESTIC_EXIT_LOCKED:
+            # restic n'a pas pu verrouiller : il n'a rien modifié ; le marqueur est retiré.
+            write_json_at(state_fd, "state.json", clean_state)
+            log("repository verrouillé par un autre processus : rien n'a été modifié ; verrou laissé en place")
+            return finish("repository_locked", EXIT_RESTIC)
+        log("OPÉRATION INTERROMPUE : marqueur conservé dans la référence (voir « Opération interrompue »)")
+        return finish("apply_failed", EXIT_RESTIC)
+    except UnsafeMounts as exc:
+        # Barrière du conteneur d'écriture : refus avant le lancement de restic, rien n'a été modifié.
+        log(str(exc))
+        write_json_at(state_fd, "state.json", clean_state)
+        return finish("unsafe_mounts", EXIT_CONFIG)
+    except StepTimeout as exc:
+        log(str(exc))
+        log("OPÉRATION INTERROMPUE : marqueur conservé dans la référence (voir « Opération interrompue »)")
+        return finish("timeout", EXIT_TIMEOUT)
+    except StepError as exc:
+        log(str(exc))
+        log("OPÉRATION INTERROMPUE : marqueur conservé dans la référence (voir « Opération interrompue »)")
+        return finish("apply_failed", EXIT_RESTIC)
+
+    # Vérification après écriture, en lecture seule : ensemble exact des snapshots, verrous, structure.
+    try:
+        after = {sn["id"] for sn in parse_json_output(runner.restic("snapshots", "--json")) or []}
+        locks = runner.restic("list", "locks").split()
+        runner.restic("check")
+    except (StepError, StepTimeout, UnsafeMounts, ValueError) as exc:
+        log(str(exc))
+        log("VÉRIFICATION APRÈS %s IMPOSSIBLE OU EN ÉCHEC : marqueur conservé" % op.upper())
+        return finish("apply_unverified", EXIT_RESTIC)
+    expected = before - set(removal)
+    problems = []
+    if set(removal) & after:
+        problems.append("toujours présents : %s" % ", ".join(i[:8] for i in sorted(set(removal) & after)))
+    if expected - after:
+        problems.append("disparus sans avoir été demandés : %s" % ", ".join(i[:8] for i in sorted(expected - after)))
+    if locks:
+        problems.append("%d verrou(s) restant(s)" % len(locks))
+    if problems:
+        for p in problems:
+            report["findings"].append(finding("ERROR", "apply_unexpected_result", p))
+            log("ERROR apply_unexpected_result %s" % p)
+        log("RÉSULTAT INATTENDU : marqueur conservé dans la référence (voir « Opération interrompue »)")
+        return finish("apply_unexpected", EXIT_ANOMALY)
+
+    if after - before:
+        # Sauvegarde survenue entre-temps : non intégrée à la référence, le contrôle suivant la vérifiera.
+        log("INFO  nouveau(x) snapshot(s) pendant l'opération, laissé(s) au contrôle suivant : %s"
+            % ", ".join(i[:8] for i in sorted(after - before)))
+    write_json_at(state_fd, "state.json", {"last_run": started.isoformat(), "snapshot_ids": sorted(after & before)})
+    result["ok"] = True
+    report["check_after"] = True
+    if op == "forget":
+        result["removed"] = sorted(removal)
+        for sid in sorted(removal, key=lambda i: times[i]):
+            log("SUPPRIMÉ : %s (%s)" % (sid[:8], times[sid]))
+        log("forget : %d snapshot(s) supprimé(s), %d conservé(s) ; check OK ; référence mise à jour"
+            % (len(removal), len(after)))
+        return finish("forget_done", EXIT_OK)
+    for line in result["restic_output"]:
+        log("prune | %s" % line)
+    log("prune : terminé ; %d snapshots inchangés ; check OK ; aucun verrou restant" % len(after))
+    return finish("prune_done", EXIT_OK)
 
 
 if __name__ == "__main__":
