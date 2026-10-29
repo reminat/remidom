@@ -528,9 +528,9 @@ Non vérifiable sur une VM (ext4, sans ACL Synology) : à faire avant toute acti
    ```
    puis, **depuis `docker-test-01`, via le REST Server** : `restic-core snapshots`,
    `restic-core check --read-data`, une restauration dans un dossier vide et la sauvegarde
-   suivante. Restic tente un `chmod` en lecture seule sur ses fichiers ; sur un dossier régi
-   par les ACL Synology, vérifier que l'ACL héritée reste présente (sortie de
-   `synoacltool`, identique à celle d'un pack écrit par le REST Server).
+   suivante. Restic tente un `chmod` en lecture seule sur ses fichiers : sur un dossier régi
+   par les ACL Synology, ce `chmod` les fait passer en mode Linux (constaté le 29/10, voir
+   « Droits des fichiers écrits par restic »).
 3. **Sauvegardes externes** : vérifier que les snapshots Btrfs et Hyper Backup couvrent
    bien `/volume1/Restic` (filet de récupération), et relever la durée de Hyper Backup pour
    fixer la fin de `apply.protected`.
@@ -540,7 +540,7 @@ Non vérifiable sur une VM (ext4, sans ACL Synology) : à faire avant toute acti
 Opérations **manuelles** uniquement (aucune tâche DSM `forget`/`prune`), sur le repository
 existant, sans snapshot antidaté. Chaque étape s'arrête au premier écart ; conserver les
 sorties (rapports dans `/root/restic-maintenance/docker-test/logs/`, captures ci-dessous).
-Créneau : hors de la sauvegarde de `docker-test-01` (03:02) et de la plage protégée.
+Créneau : hors de la sauvegarde de `docker-test-01` (03:00 à 03:05) et de la plage protégée.
 
 **Limite connue : volume des candidats.** Faute de suppression, les candidats
 s'accumulent (un par jour hors fins de semaine et de mois). Simulation à partir du dépôt
@@ -554,8 +554,8 @@ prod si l'activation intervient tard (premier candidat vers le 28/11).
 0. **Préalables** : merge, workflow NAS `test` (`--check` puis apply) ; empreintes du
    journal ; relevés en lecture seule (« Validations restant à faire », point 1, avec
    `R=/volume1/Restic/docker-test`) ; `apply.repository_owner` conforme au relevé.
-   Sur `docker-test-01`, identifier le mécanisme de sauvegarde de 03:02 (le rôle
-   `restic_backup` n'est pas activé en test) :
+   Sur `docker-test-01`, identifier le mécanisme de sauvegarde (le rôle `restic_backup`
+   n'est pas activé en test ; constaté le 29/10 : voir « Résultats ») :
    ```sh
    systemctl list-timers --all | grep -i restic; crontab -l 2>/dev/null | grep -i restic
    sudo grep -ril restic /etc/cron* /etc/systemd/system 2>/dev/null
@@ -632,15 +632,73 @@ prod si l'activation intervient tard (premier candidat vers le 28/11).
    Seules des différences sur des fichiers vivants sont attendues (`mosquitto.db`,
    `state.json`, `database.db`…). Supprimer le dossier restauré après examen.
 8. **Nouvelle sauvegarde** : par le mécanisme habituel de `docker-test-01` (lancement
-   manuel, mêmes options que 03:02). Puis `sudo rm -rf "$D"` (secrets) et, sur le NAS, bloc
+   manuel, mêmes options que la sauvegarde planifiée). Puis `sudo rm -rf "$D"` (secrets) et, sur le NAS, bloc
    manuel `--ignore-window` : attendu `ok`, le nouveau snapshot accepté, aucun
    `snapshots_disappeared`.
 9. **Preuves** : conserver les rapports (`logs/`, 90 derniers) et les sorties des étapes
    1 à 8 ; ne pas créer de tâche DSM `forget`/`prune` pour `docker-test`.
 
+### Résultats de la validation sur `docker-test` (29/10/2026)
+
+Repository `952285ee`, version déployée : script `833285006783…`, configuration de test
+`bf66adefc5fa…` (workflow NAS `test`, runs `40958836880` et `40958941914`).
+
+| Étape | Résultat |
+|---|---|
+| Relevés | propriétaires `0:0` partout ; ACL héritées (`administrators`, `restic`, `remi`) ; REST Server sous root (`Config.User` vide, `id` = root), `/volume1/Restic` → `/data` en écriture |
+| Client de `docker-test-01` | `restic-backup.timer` (`OnCalendar=*-*-* 03:00:00`, `RandomizedDelaySec=5m`, `Persistent=true`) → `restic-backup.service` → `/usr/local/bin/restic-backup.sh` (root, passé en `700`) ; restic `/usr/local/bin/restic` ; configuration `/etc/restic/restic.env` (root, `600`). **Installé hors de ce dépôt.** |
+| Candidats (dry-run) | 42 snapshots, 34 conservés, **8 candidats** (19,05 %) : `fe2eabf1`, `ce4f89f4`, `198bca4f`, `84c68543`, `91512828`, `f0d9ca45`, `e557b552`, `0609b089` ; uniquement `core,test`, `/srv/docker/core` ; `1e30db7a` (validation, figé) conservé |
+| `--apply forget` | les 8 candidats prévus supprimés, 34 conservés |
+| `--apply prune` | succès, 34 snapshots inchangés, aucun verrou |
+| Via REST | `check --read-data` : succès |
+| Restauration isolée | `d0b09302` : succès |
+| Nouvelle sauvegarde | `458d5198` |
+| Contrôle final (22:52) | 35 snapshots, 0 candidat, aucun constat, `ok`, code 0 |
+
+### Droits des fichiers écrits par restic
+
+**Constat** : les packs et index écrits par la maintenance (`prune`) sont `root:root`,
+`0400`, **sans ACL Synology** (`synoacltool -get` : « It's Linux mode »), alors que ceux
+du REST Server portent l'ACL héritée. Cause : à la fin de chaque écriture, restic fait
+`chmod` (lecture seule) sur le fichier (`setFileReadonly`, backend local) ; sur un volume
+Synology, un `chmod` fait passer le fichier du mode ACL au mode Linux. Le REST Server, lui,
+crée ses fichiers sans `chmod` : ils gardent l'ACL héritée. Concerne tout fichier écrit
+localement : packs et index de `prune`, verrous, et snapshot réécrit par `restic tag`.
+`forget` ne fait que supprimer.
+
+| Accès | Effet |
+|---|---|
+| REST Server (root, `DAC_OVERRIDE`) | lecture normale (validé : `check --read-data` via REST) |
+| Maintenance du NAS (root, `DAC_READ_SEARCH`) | lecture normale (contrôle final `ok`) |
+| Hyper Backup, snapshots Btrfs | tournent en root / au niveau du volume : non affectés en principe ; **à confirmer** par la prochaine exécution de Hyper Backup (journal sans fichier ignoré ni erreur de droits sous `/volume1/Restic`) |
+| Comptes de l'ACL (`administrators`, `remi`, `restic`) en SMB, File Station, `rsync` sans `sudo` | **plus de lecture** de ces fichiers : une copie faite ainsi serait incomplète, sans erreur visible selon l'outil. Copier le repository uniquement en root, par Hyper Backup ou depuis un snapshot Btrfs |
+| Suppression | dépend des droits du **dossier** (ACL inchangée) : un compte qui peut écrire dans `data/xx/` peut toujours supprimer ces fichiers ; le mode `0400` ne les protège pas |
+| Restauration Hyper Backup | restaure les droits sauvegardés (fichiers en mode Linux `0400`) : sans effet pour le REST Server sous root |
+
+**Décision proposée : acceptation documentée**, sans correction des droits :
+- aucun lecteur légitime n'est affecté (REST Server, maintenance, Hyper Backup en root) ;
+- une correction devrait réappliquer l'ACL fichier par fichier après chaque écriture
+  (`synoacltool`, exécuté en root par le script) : du code de plus en root, pour rendre ces
+  fichiers à nouveau modifiables par les administrateurs, ce qui n'apporte rien ;
+- le compte `restic` de l'ACL : vérifier qu'aucun processus ne lit le repository sous ce
+  compte (sinon il perdrait l'accès aux fichiers réécrits).
+
+Conditions qui en découlent : **le REST Server doit rester sous root** (vérification à
+chaque modification de son conteneur : `docker exec <rest-server> id`) ; pas de
+« réinitialisation des droits » DSM récursive sur `/volume1/Restic` sans nouvelle analyse.
+Suivi, en lecture seule :
+```sh
+R=/volume1/Restic/docker-test
+sudo find "$R" -type f -printf '%u:%g %m\n' | sort | uniq -c       # répartition des modes
+F=$(sudo find "$R/index" -type f -perm 0400 | head -n 1); [ -n "$F" ] && sudo synoacltool -get "$F"
+```
+
 ### Activation (étape séparée, après validation de la politique)
 
-1. Validations ci-dessus (1 et 3), puis écriture réelle sur `docker-test` (2).
+1. Validations ci-dessus : relevé **du repository `docker-prod`** (1 : propriétaire,
+   ACL, REST Server sous root), sauvegardes externes (3) ; écriture réelle sur
+   `docker-test` (2, faite le 29/10). Puis **marquage `keep` de `75eeb351`** (« Protéger un
+   snapshot ») et contrôle quotidien `ok` avec `INFO retagged`, avant le 28/11/2026.
 2. **PR** sur `inventories/prod/group_vars/nas.yml` :
    ```yaml
    restic_maintenance_apply:
@@ -1150,7 +1208,7 @@ D'où l'heure choisie, loin de la sauvegarde de 02:30 (quelques secondes pour 81
 | Heure | Tâche | Repository |
 |---|---|---|
 | 02:30 | sauvegarde `restic-backup-core.timer` (docker-prod-01) | `docker-prod` |
-| 03:02 | sauvegarde de `docker-test-01` | `docker-test` |
+| 03:00 (+ 0 à 5 min) | sauvegarde de `docker-test-01` (`restic-backup.timer`, hors dépôt) | `docker-test` |
 | 03:30 | maintenance dry-run (DSM, proposée, pas encore créée) | `docker-test` |
 | **03:45** | **maintenance dry-run (DSM, active)** | `docker-prod` |
 | 04:00 le samedi | `forget` réel (DSM, proposée, après activation) | `docker-prod` |
