@@ -256,7 +256,7 @@ ne supprime aucun snapshot). Puis `prune --dry-run` (sortie dans le rapport), ma
 ### Politique de rétention (à valider)
 
 **Règles de restic 0.19.1** (indépendantes de toute simulation) :
-`--group-by host,paths --keep-within 30d --keep-daily 14 --keep-weekly 8 --keep-monthly 12`,
+`--group-by host,paths --keep-within 30d --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --keep-tag keep`,
 appliqué groupe par groupe ; un snapshot est conservé si **au moins une** règle le retient.
 
 | Règle | Conserve |
@@ -265,6 +265,7 @@ appliqué groupe par groupe ; un snapshot est conservé si **au moins une** règ
 | `keep-daily 14` | le plus récent de chacun des 14 derniers **jours ayant au moins un snapshot** |
 | `keep-weekly 8` | le plus récent de chacune des 8 dernières **semaines ISO (lundi–dimanche) ayant un snapshot** |
 | `keep-monthly 12` | le plus récent de chacun des 12 derniers **mois ayant un snapshot** (le mois en cours compte) |
+| `keep-tag keep` | tout snapshot portant le tag `keep` (voir « Protéger un snapshot ») |
 
 Jours, semaines et mois sont pris dans le décalage horaire enregistré dans le snapshot :
 ici UTC (le conteneur de sauvegarde n'a pas de fuseau). 02:30 à Paris tombe toujours le
@@ -281,8 +282,9 @@ oubli, `forget` chaque samedi) :
 
 - En régime établi : 43 à 44 snapshots, le plus ancien d'environ 11 mois ; 6 à 8
   suppressions par semaine (au plus 15,7 %), sous les seuils de 10 et 20 %.
-- **`75eeb351` n'est pas conservé** : le dernier snapshot d'octobre 2026 est celui du 31/10.
-  Première suppression réelle vers le 28/11/2026, `75eeb351` compris.
+- **`75eeb351` n'est pas conservé par les règles de période** : le dernier snapshot d'octobre
+  2026 est celui du 31/10. Première suppression réelle vers le 28/11/2026 ; pour le garder,
+  le marquer `keep` avant (voir « Protéger un snapshot ») : il s'ajoute alors aux 36 / 44.
 - `keep-daily 14` est redondant tant que la sauvegarde est quotidienne : il ne compte que
   si les sauvegardes deviennent espacées.
 - Ce qui change ces résultats : une sauvegarde manquée (le jour n'existe pas, rien n'est
@@ -290,6 +292,55 @@ oubli, `forget` chaque samedi) :
   seulement la dernière du jour, de la semaine ou du mois), l'arrêt des sauvegardes
   (rien ne part par simple passage du temps ; `stale` bloque d'ailleurs toute suppression
   après 48 h).
+
+### Protéger un snapshot (`keep_tags`)
+
+`retention.keep_tags` (défaut `[keep]`) ajoute `--keep-tag keep` à la politique : restic
+conserve **toujours** un snapshot portant ce tag, quelles que soient les autres règles. Le
+script le vérifie aussi de son côté : un candidat portant ce tag est refusé
+(`removal_not_allowed`), même si restic le proposait. Le tag s'ajoute aux tags attendus du
+groupe (`core,prod` + `keep`) sans déclencher `tags_mismatch`.
+
+**`restic tag` change l'identifiant** : restic réécrit le snapshot (même arbre, même date)
+sous un nouvel identifiant, avec `original` = l'ancien, puis supprime l'ancien. Le
+contrôle suivant le reconnaît (`INFO retagged`) si l'ancien a disparu, qu'un seul nouveau
+snapshot s'en réclame et qu'il porte un tag de `keep_tags` ; sinon c'est une anomalie
+(`snapshots_disappeared`, `backdated_snapshot`). Le marquage écrit dans le repository : il
+se fait **sur le NAS**, pas via le REST Server (append-only, il refuserait la suppression).
+
+Procédure (administrateur, hors de la plage protégée et loin de 02:30, après un contrôle
+quotidien `ok`), exemple pour `75eeb351` de `docker-prod` (essayer d'abord sur
+`docker-test`) :
+
+```sh
+REPO=/volume1/Restic/docker-prod
+SECRET=/volume1/docker/restic-maintenance/secrets/restic_password_prod
+IMAGE=restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+RO="sudo docker run --rm --pull never --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH \
+  --security-opt no-new-privileges -v $REPO:/repo:ro -v $SECRET:/run/secrets/restic_password:ro \
+  -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password $IMAGE --no-lock --no-cache"
+# 1. Aucun verrou, et identifiant complet du snapshot (lecture seule)
+$RO list locks | wc -l                                   # attendu : 0
+$RO snapshots --json 75eeb351 | /usr/bin/python3 -I -c '
+import sys, json
+for s in json.load(sys.stdin): print(s["id"], s["time"], s["hostname"], s["tags"], s["tree"])'
+ID='<identifiant complet, 64 caractères, relu ci-dessus>'
+case "$ID" in *[!0-9a-f]*) echo "identifiant invalide";; *) [ ${#ID} -eq 64 ] && echo "identifiant OK";; esac
+# 2. Marquage (écriture, verrou exclusif restic ; refus si une sauvegarde est en cours)
+sudo docker run --rm --pull never --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --hostname restic-tag --user 0:0 --cap-drop ALL --cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE \
+  --security-opt no-new-privileges -v $REPO:/repo -v $SECRET:/run/secrets/restic_password:ro \
+  -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password \
+  $IMAGE --no-cache tag --add keep "$ID"
+# 3. Vérification : nouvel identifiant, original = ancien, même arbre, tags core,keep,prod
+$RO snapshots --json --tag keep | /usr/bin/python3 -I -c '
+import sys, json
+for s in json.load(sys.stdin): print(s["id"], "original", s.get("original"), s["time"], s["tags"], s["tree"])'
+```
+
+`--user` : la valeur de `apply.repository_owner`. Ensuite, le bloc manuel du contrôle
+(`--ignore-window`) doit donner `ok` avec `INFO retagged` ; noter le nouvel identifiant.
+Retirer la protection : même commande avec `tag --remove keep` (nouvel identifiant encore).
 
 ### Accès en écriture
 

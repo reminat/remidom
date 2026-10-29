@@ -156,10 +156,17 @@ def validate_path(key, value, on_volume):
         raise ConfigError("%s ne doit pas être sur un volume de données (ACL Synology) : %r" % (key, value))
 
 
+TAG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
 def validate_retention(retention):
     expected = {"keep_within", "keep_daily", "keep_weekly", "keep_monthly"}
-    if not isinstance(retention, dict) or set(retention) != expected:
-        raise ConfigError("retention doit contenir exactement %s" % ", ".join(sorted(expected)))
+    if not isinstance(retention, dict) or not expected <= set(retention) <= expected | {"keep_tags"}:
+        raise ConfigError("retention doit contenir exactement %s (et, facultatif, keep_tags)" % ", ".join(sorted(expected)))
+    tags = retention.get("keep_tags", [])
+    if not isinstance(tags, list) or len(tags) > 10 or len(set(tags)) != len(tags) \
+            or any(not isinstance(t, str) or not TAG_RE.match(t) for t in tags):
+        raise ConfigError("keep_tags invalide : %r (au plus 10 tags distincts, [a-z0-9_-])" % (tags,))
     within = retention["keep_within"]
     try:
         parse_duration(within)
@@ -823,7 +830,12 @@ def forget_args(retention):
         "--keep-daily", str(retention["keep_daily"]),
         "--keep-weekly", str(retention["keep_weekly"]),
         "--keep-monthly", str(retention["keep_monthly"]),
-    ]
+    ] + [a for tag in retention.get("keep_tags", []) for a in ("--keep-tag", tag)]
+
+
+def keep_tags_of(cfg, sn):
+    """Tags de protection (retention.keep_tags) portés par un snapshot."""
+    return sorted(set(sn.get("tags") or []) & set(cfg["retention"].get("keep_tags", [])))
 
 
 # --------------------------------------------------------------------------- analyse
@@ -872,7 +884,9 @@ def analyze(cfg, snapshots, forget_groups, now, state, state_error=None, policy_
                 findings.append(finding("ERROR", "path_not_allowed", "%s : %s, chemins non autorisés %r"
                                         % (sid[:8], host, sn.get("paths"))))
             continue
-        if "tags" in g and sorted(sn.get("tags") or []) != sorted(g["tags"]):
+        # Un tag de protection (keep_tags) s'ajoute aux tags du groupe sans les remplacer.
+        own = sorted(set(sn.get("tags") or []) - set(keep_tags_of(cfg, sn)))
+        if "tags" in g and own != sorted(g["tags"]):
             findings.append(finding("ERROR", "tags_mismatch", "%s : groupe %s, tags %r au lieu de %r"
                                     % (sid[:8], g["name"], sn.get("tags") or [], g["tags"])))
         frozen = g.get("frozen_ids")
@@ -917,13 +931,25 @@ def analyze(cfg, snapshots, forget_groups, now, state, state_error=None, policy_
                                     "%s réel commencé le %s et non terminé (%d/%d suppressions demandées constatées) :"
                                     " voir « Opération interrompue » dans le README"
                                     % (ip["operation"], ip["started"], len(requested - ids), len(requested))))
-        gone = sorted(previous - ids - requested)
+        # Marquage (« restic tag ») : restic réécrit le snapshot sous un nouvel identifiant et
+        # supprime l'ancien ; le nouveau porte « original » = l'ancien. Admis seulement si
+        # l'ancien a disparu, qu'un seul nouveau s'en réclame et qu'il porte un tag de protection.
+        claims = {}
+        for sn in snapshots:
+            if sn.get("id") not in previous and sn.get("original") in previous - ids:
+                claims.setdefault(sn["original"], []).append(sn)
+        retagged = {orig: c[0] for orig, c in claims.items() if len(c) == 1 and keep_tags_of(cfg, c[0])}
+        for orig, sn in sorted(retagged.items()):
+            findings.append(finding("INFO", "retagged", "%s remplacé par %s (marquage %s), même snapshot"
+                                    % (orig[:8], sn["id"][:8], ",".join(keep_tags_of(cfg, sn)))))
+        retagged_ids = {sn["id"] for sn in retagged.values()}
+        gone = sorted(previous - ids - requested - set(retagged))
         if gone:
             findings.append(finding("ERROR", "snapshots_disappeared",
                                     "%d snapshot(s) disparu(s) depuis la dernière exécution : %s"
                                     % (len(gone), ", ".join(g[:8] for g in gone[:10]))))
         for sn in snapshots:
-            if sn.get("id") in previous:
+            if sn.get("id") in previous or sn.get("id") in retagged_ids:
                 continue
             try:
                 t = parse_time(sn["time"])
@@ -1218,6 +1244,8 @@ def removal_problems(cfg, snapshots, removal):
             problems.append("%s : hors des groupes déclarés" % sid[:8])
         elif g.get("frozen_ids") is not None:
             problems.append("%s : groupe figé %s" % (sid[:8], g["name"]))
+        elif keep_tags_of(cfg, sn):
+            problems.append("%s : porte le tag de protection %s" % (sid[:8], ",".join(keep_tags_of(cfg, sn))))
     if len(set(removal)) != len(removal):
         problems.append("identifiants en double dans la liste de suppression")
     return [finding("ERROR", "removal_not_allowed", p) for p in problems]

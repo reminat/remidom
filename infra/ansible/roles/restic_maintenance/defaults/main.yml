@@ -35,6 +35,9 @@ restic_maintenance_retention:
   keep_daily: 14
   keep_weekly: 8
   keep_monthly: 12
+  # --keep-tag : un snapshot portant l'un de ces tags n'est jamais supprimé (marquage manuel,
+  # voir README « Protéger un snapshot »). Ce tag s'ajoute aux tags attendus du groupe.
+  keep_tags: [keep]
 
 # Fenêtre provisoire : l'horaire définitif reste à fixer (hors sauvegardes, avant 05:00).
 restic_maintenance_window:

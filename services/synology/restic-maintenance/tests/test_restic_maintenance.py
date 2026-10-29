@@ -260,6 +260,73 @@ def utc(text):
     return rm.parse_time_with_offset(text).astimezone(dt.timezone.utc)
 
 
+class KeepTagTest(unittest.TestCase):
+    C = cfg(retention={"keep_within": "30d", "keep_daily": 14, "keep_weekly": 8, "keep_monthly": 12,
+                       "keep_tags": ["keep"]}, groups=GROUPS[:1])
+
+    def test_forget_arguments(self):
+        args = rm.forget_args(self.C["retention"])
+        self.assertEqual(args[-2:], ["--keep-tag", "keep"])
+        self.assertNotIn("--keep-tag", rm.forget_args(cfg()["retention"]))
+        rm.check_safe(rm.build_restic_args("forget", args))
+
+    def test_keep_tag_added_to_group_tags_is_accepted(self):
+        s = daily(10)
+        s[3]["tags"] = TAGS + ["keep"]
+        f, _ = rm.analyze(self.C, s, groups(s), NOW, None)
+        self.assertEqual(codes(f), [])
+        s[4]["tags"] = ["keep"]  # le tag de protection ne remplace pas les tags du groupe
+        f, _ = rm.analyze(self.C, s, groups(s), NOW, None)
+        self.assertEqual(codes(f), ["tags_mismatch"])
+        s[4]["tags"] = TAGS + ["autre"]
+        self.assertEqual(codes(rm.analyze(self.C, s, groups(s), NOW, None)[0]), ["tags_mismatch"])
+
+    def state_for(self, s):
+        return {"last_run": (NOW - dt.timedelta(hours=1)).isoformat(), "snapshot_ids": sorted(x["id"] for x in s)}
+
+    def retag(self, sn, new_id, tags=None):
+        n = dict(sn, id=new_id, original=sn["id"], tags=tags if tags is not None else sn["tags"] + ["keep"])
+        return n
+
+    def test_retag_is_recognised(self):
+        s = daily(10)
+        state = self.state_for(s)
+        n = self.retag(s[8], "e" * 64)
+        now_s = s[:8] + [n] + s[9:]
+        f, _ = rm.analyze(self.C, now_s, groups(now_s), NOW, state)
+        self.assertEqual(codes(f), [])
+        self.assertEqual(codes(f, "INFO"), ["retagged"])
+
+    def test_retag_without_protection_tag_or_ambiguous_is_not_recognised(self):
+        s = daily(10)
+        state = self.state_for(s)
+        plain = self.retag(s[8], "e" * 64, tags=list(TAGS))      # réécrit sans tag de protection
+        now_s = s[:8] + [plain] + s[9:]
+        self.assertEqual(codes(rm.analyze(self.C, now_s, groups(now_s), NOW, state)[0]),
+                         ["backdated_snapshot", "snapshots_disappeared"])
+        a, b = self.retag(s[8], "e" * 64), self.retag(s[8], "f" * 64)  # deux prétendants
+        now_s = s[:8] + [a, b] + s[9:]
+        self.assertEqual(codes(rm.analyze(self.C, now_s, groups(now_s), NOW, state)[0]),
+                         ["backdated_snapshot", "backdated_snapshot", "snapshots_disappeared"])
+        still = self.retag(s[8], "e" * 64)                        # l'original existe toujours
+        now_s = s + [still]
+        self.assertEqual(codes(rm.analyze(self.C, now_s, groups(now_s), NOW, state)[0]), ["backdated_snapshot"])
+
+    def test_protected_snapshot_can_never_be_removed(self):
+        s = daily(40)
+        s[35]["tags"] = TAGS + ["keep"]
+        problems = rm.removal_problems(self.C, s, [s[35]["id"], s[36]["id"]])
+        self.assertEqual([p["code"] for p in problems], ["removal_not_allowed"])
+        self.assertIn("tag de protection", problems[0]["message"])
+
+    def test_config(self):
+        for bad in (["Keep"], ["keep", "keep"], "keep", [""], ["a" * 33], [1], ["k%d" % i for i in range(11)]):
+            with self.assertRaises(rm.ConfigError, msg=bad):
+                rm.validate_retention(dict(self.C["retention"], keep_tags=bad))
+        rm.validate_retention(self.C["retention"])
+        rm.validate_retention(cfg()["retention"])
+
+
 class KeepWithinGuardTest(unittest.TestCase):
     def group(self, keep, remove):
         return [{"host": HOST, "paths": PATHS, "keep": keep, "remove": remove}]
@@ -1484,6 +1551,36 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         fx["forget"][0]["keep"].append(new)
         self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], []), rm.EXIT_OK)
         self.assertIn(new["id"], self.state()["snapshot_ids"])
+
+    def test_keep_tag_end_to_end(self):
+        # Le snapshot marqué n'est ni proposé par restic (fixture : keep) ni supprimable par le script
+        # même s'il apparaissait dans les candidats.
+        with open(self.config) as f:
+            c = json.load(f)
+        c["retention"]["keep_tags"] = ["keep"]
+        with open(self.config, "w") as f:
+            json.dump(c, f)
+        self.enable(forget=True)
+        s, forget, remove = self.aged_repo()
+        self.baseline(s, forget)
+        old = remove[0]
+        marked = dict(old, id="d" * 64, original=old["id"], tags=TAGS + ["keep"])
+        s2 = [marked if x is old else x for x in s]
+        f2 = [dict(g, keep=g["keep"] + [marked], remove=[x for x in g["remove"] if x is not old]) if i == 0 else g
+              for i, g in enumerate(forget)]
+        self.assertEqual(self.run_apply(s2, f2, []), rm.EXIT_OK)        # marquage reconnu au contrôle
+        self.assertIn("retagged", codes(self.report()["findings"], "INFO"))
+        self.assertIn(marked["id"], self.state()["snapshot_ids"])
+        self.assertIn("--keep-tag", self.restic_calls()[-1])
+        self.assertEqual(self.run_apply(s2, f2, ["--apply", "forget"]), rm.EXIT_OK)
+        self.assertEqual(self.write_calls(), [["--no-cache", "forget"] + sorted(x["id"] for x in remove[1:])])
+        # Défense supplémentaire : si restic le proposait quand même, refus.
+        fx = self.current_fixtures()
+        bad = [dict(g, remove=[marked]) if i == 0 else g for i, g in enumerate(fx["forget"])]
+        bad[0]["keep"] = [x for x in bad[0]["keep"] if x["id"] != marked["id"]]
+        code = self.run_apply(fx["snapshots"], bad, ["--apply", "forget"])
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_ANOMALY, "apply_refused"))
+        self.assertIn("removal_not_allowed", codes(self.report()["findings"]))
 
     def test_forget_with_nothing_to_remove_writes_nothing(self):
         self.enable(forget=True)
