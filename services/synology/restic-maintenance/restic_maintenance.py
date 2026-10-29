@@ -48,7 +48,10 @@ FORBIDDEN_TOKENS = ("--prune", "unlock", "repair", "rebuild-index", "key", "init
 SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_UNUSED_RE = re.compile(r"^([0-9]|[1-4][0-9]|50)%$")
 # Opérations réelles : jamais si absentes de la configuration.
-NO_APPLY = {"forget": False, "prune": False, "prune_max_unused": "5%", "repository_owner": "0:0"}
+NO_APPLY = {"forget": False, "prune": False, "prune_max_unused": "5%", "repository_owner": "0:0",
+            "protected": {"start": "04:55", "end": "08:00"}}
+# Durée minimale restant avant la plage protégée pour commencer une opération réelle.
+MIN_APPLY_SECONDS = 10 * 60
 # Entrées du repository dont le propriétaire est vérifié avant toute écriture.
 REPO_ENTRIES = ("config", "data", "index", "keys", "locks", "snapshots")
 # Code de sortie de restic quand il ne peut pas verrouiller le repository (rien n'a été modifié).
@@ -207,6 +210,19 @@ def validate_apply(apply):
     if not isinstance(apply["repository_owner"], str) or not re.match(r"^[0-9]{1,10}:[0-9]{1,10}$",
                                                                      apply["repository_owner"]):
         raise ConfigError("apply.repository_owner invalide : %r (uid:gid)" % (apply["repository_owner"],))
+    if not isinstance(apply["protected"], dict) or set(apply["protected"]) != {"start", "end"}:
+        raise ConfigError("apply.protected doit contenir exactement start et end")
+    parse_window(apply["protected"])
+
+
+def seconds_until(hhmm, now_ts):
+    """Secondes jusqu'à la prochaine occurrence locale de HH:MM (changements d'heure compris)."""
+    minutes = parse_hhmm(hhmm)
+    local = dt.datetime.fromtimestamp(now_ts)
+    target = local.replace(hour=minutes // 60, minute=minutes % 60, second=0, microsecond=0)
+    if target <= local:
+        target += dt.timedelta(days=1)
+    return time.mktime(target.timetuple()) - now_ts
 
 
 def validate_thresholds(thresholds):
@@ -1051,10 +1067,24 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
         return finish("config_error", EXIT_CONFIG)
 
     apply_cfg = cfg.get("apply", NO_APPLY)
+    budget = 60 * cfg["timeout_minutes"]
     if opts.apply:
         if not apply_cfg[opts.apply]:
             log("--apply %s refusé : opération désactivée dans la configuration (apply.%s)" % (opts.apply, opts.apply))
             return finish("apply_disabled", EXIT_CONFIG)
+        # Plage protégée (snapshots Btrfs, Hyper Backup) : jamais d'écriture dedans, même avec
+        # --ignore-window. Le délai est raccourci pour que le conteneur d'écriture soit arrêté
+        # (SIGTERM, puis SIGKILL après STOP_GRACE_SECONDS) avant son début.
+        protected = apply_cfg["protected"]
+        if in_window(protected, dt.datetime.now()):
+            log("--apply refusé : plage protégée %s–%s en cours" % (protected["start"], protected["end"]))
+            return finish("protected_period", EXIT_WINDOW)
+        budget = min(budget, seconds_until(protected["start"], time.time()) - STOP_GRACE_SECONDS - 30)
+        if budget < MIN_APPLY_SECONDS:
+            log("--apply refusé : moins de %d min avant la plage protégée (%s)"
+                % (MIN_APPLY_SECONDS // 60, protected["start"]))
+            return finish("protected_period", EXIT_WINDOW)
+        log("opération réelle : arrêt garanti avant %s (délai %d min)" % (protected["start"], budget // 60))
         problems = repository_owner_problems(cfg["repository"], apply_cfg["repository_owner"])
         if problems:
             for p in problems:
@@ -1077,7 +1107,7 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
 
     # Toute exécution autre que le contrôle quotidien exige un repository sans verrou.
     strict = operation != "control"
-    runner = Runner(cfg, time.monotonic() + 60 * cfg["timeout_minutes"], log)
+    runner = Runner(cfg, time.monotonic() + budget, log)
     try:
         problems = readonly_problems(runner.mounts())
         if problems:
@@ -1102,7 +1132,9 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
                                               % (len(locks), " : aucune suppression automatique de verrou"
                                                  if strict else "")))
         if cfg.get("run_check", True):
-            check_args = read_data_args(cfg.get("read_data", NO_READ_DATA), dt.date.today(), opts.read_data)
+            # Lecture des données réservée au contrôle quotidien : durée des opérations réelles bornée.
+            check_args = read_data_args(cfg.get("read_data", NO_READ_DATA), dt.date.today(),
+                                        opts.read_data) if not strict or opts.read_data else []
             report["check"] = {"read_data": " ".join(check_args) or "aucune", "ok": False}
             runner.restic("check", *check_args)
             report["check"]["ok"] = True
@@ -1234,6 +1266,19 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
     marker = dict(clean_state, in_progress={"operation": op, "started": started.isoformat(),
                                             "ids": sorted(removal) if op == "forget" else []})
     write_json_at(state_fd, "state.json", marker)
+
+    def observe_removed():
+        """Après un échec de forget : constat en lecture seule des suppressions effectives."""
+        if op != "forget":
+            return
+        try:
+            left = {sn["id"] for sn in parse_json_output(runner.restic("snapshots", "--json")) or []}
+        except (StepError, StepTimeout, UnsafeMounts, ValueError) as exc:
+            log("constat impossible : %s" % exc)
+            return
+        result["removed"] = sorted(set(removal) - left)
+        log("constat : %d/%d suppression(s) effectuée(s) avant l'échec" % (len(result["removed"]), len(removal)))
+
     try:
         if op == "forget":
             for sid in sorted(removal, key=lambda i: times[i]):
@@ -1249,6 +1294,7 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
             write_json_at(state_fd, "state.json", clean_state)
             log("repository verrouillé par un autre processus : rien n'a été modifié ; verrou laissé en place")
             return finish("repository_locked", EXIT_RESTIC)
+        observe_removed()
         log("OPÉRATION INTERROMPUE : marqueur conservé dans la référence (voir « Opération interrompue »)")
         return finish("apply_failed", EXIT_RESTIC)
     except UnsafeMounts as exc:
@@ -1262,6 +1308,7 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
         return finish("timeout", EXIT_TIMEOUT)
     except StepError as exc:
         log(str(exc))
+        observe_removed()
         log("OPÉRATION INTERROMPUE : marqueur conservé dans la référence (voir « Opération interrompue »)")
         return finish("apply_failed", EXIT_RESTIC)
 

@@ -255,34 +255,41 @@ ne supprime aucun snapshot). Puis `prune --dry-run` (sortie dans le rapport), ma
 
 ### Politique de rétention (à valider)
 
+**Règles de restic 0.19.1** (indépendantes de toute simulation) :
 `--group-by host,paths --keep-within 30d --keep-daily 14 --keep-weekly 8 --keep-monthly 12`,
-appliquée par restic **groupe par groupe** ; un snapshot est conservé si **au moins une**
-règle le retient :
+appliqué groupe par groupe ; un snapshot est conservé si **au moins une** règle le retient.
 
 | Règle | Conserve |
 |---|---|
-| `keep-within 30d` | tous les snapshots des 30 jours précédant le **dernier snapshot du groupe** (pas la date du jour) |
-| `keep-daily 14` | le dernier snapshot de chacun des 14 derniers **jours ayant un snapshot** |
-| `keep-weekly 8` | le dernier snapshot de chacune des 8 dernières **semaines ISO ayant un snapshot** |
-| `keep-monthly 12` | le dernier snapshot de chacun des 12 derniers **mois ayant un snapshot** |
+| `keep-within 30d` | tous les snapshots strictement postérieurs à « **dernier snapshot du groupe** − 30 jours » (pas la date du jour) |
+| `keep-daily 14` | le plus récent de chacun des 14 derniers **jours ayant au moins un snapshot** |
+| `keep-weekly 8` | le plus récent de chacune des 8 dernières **semaines ISO (lundi–dimanche) ayant un snapshot** |
+| `keep-monthly 12` | le plus récent de chacun des 12 derniers **mois ayant un snapshot** (le mois en cours compte) |
 
-Avec une sauvegarde quotidienne (02:30), simulation de la règle de restic sur 500 jours,
-`forget` chaque samedi :
+Jours, semaines et mois sont pris dans le décalage horaire enregistré dans le snapshot :
+ici UTC (le conteneur de sauvegarde n'a pas de fuseau). 02:30 à Paris tombe toujours le
+même jour en UTC (01:30 ou 00:30), donc sans effet pratique.
 
-- **30 derniers jours** : tous les snapshots (un par jour). `keep-daily 14` est alors
-  redondant ; il ne compte que si les sauvegardes deviennent espacées.
-- **De 30 jours à environ 2 mois** : un par semaine (dernier de la semaine), 3 à 4 snapshots.
-- **De 2 mois à environ 10,5 mois** : un par mois (dernier du mois), 9 à 10 snapshots.
-- **Total en régime établi : environ 43 snapshots**, le plus ancien d'environ 10 mois et
-  demi (le mois en cours compte parmi les 12).
-- **Suppressions** : 6 à 8 par semaine en régime établi (au plus 15,7 %), sous les seuils
-  de 10 et 20 %. Première suppression environ 31 jours après le premier snapshot (en prod,
-  fin novembre 2026), avant cela `nothing_to_remove`.
-- **Sauvegardes arrêtées** : les règles comptent des périodes **ayant un snapshot** et
-  `keep-within` part du dernier snapshot : rien n'est perdu par simple passage du temps.
-  De plus, `stale` bloque toute suppression après 48 h sans sauvegarde.
-- Plusieurs snapshots le même jour (sauvegarde manuelle) : tous gardés 30 jours, puis
-  seul le dernier du jour, de la semaine ou du mois peut rester.
+**Simulation** (résultats particuliers, valables seulement sous ces hypothèses : snapshot
+manuel `75eeb351` le 28/10/2026, puis exactement une sauvegarde par jour à 02:30 sans
+oubli, `forget` chaque samedi) :
+
+| Date | Conservés | Détail |
+|---|---|---|
+| samedi 30/01/2027 (3 mois) | **36** | les 30 quotidiens du 01/01 au 30/01/2027 ; 31/12/2026 (fin de mois), dimanches 27/12, 20/12, 13/12 (fins de semaine) ; 30/11/2026 et 31/10/2026 (fins de mois) |
+| samedi 30/10/2027 (1 an) | **44** | les 30 quotidiens du 01/10 au 30/10/2027 ; 30/09 ; dimanches 26/09, 19/09, 12/09 ; fins de mois 31/08, 31/07, 30/06, 31/05, 30/04, 31/03, 28/02, 31/01/2027, 31/12 et 30/11/2026 |
+
+- En régime établi : 43 à 44 snapshots, le plus ancien d'environ 11 mois ; 6 à 8
+  suppressions par semaine (au plus 15,7 %), sous les seuils de 10 et 20 %.
+- **`75eeb351` n'est pas conservé** : le dernier snapshot d'octobre 2026 est celui du 31/10.
+  Première suppression réelle vers le 28/11/2026, `75eeb351` compris.
+- `keep-daily 14` est redondant tant que la sauvegarde est quotidienne : il ne compte que
+  si les sauvegardes deviennent espacées.
+- Ce qui change ces résultats : une sauvegarde manquée (le jour n'existe pas, rien n'est
+  « rattrapé »), plusieurs sauvegardes le même jour (toutes gardées 30 jours, puis
+  seulement la dernière du jour, de la semaine ou du mois), l'arrêt des sauvegardes
+  (rien ne part par simple passage du temps ; `stale` bloque d'ailleurs toute suppression
+  après 48 h).
 
 ### Accès en écriture
 
@@ -316,9 +323,23 @@ Avec une sauvegarde quotidienne (02:30), simulation de la règle de restic sur 5
 - Toutes les exécutions d'un même repository partagent le verrou `state/lock` : si l'une
   dure encore quand la suivante démarre, la seconde sort en code 75 (e-mail), sans rien
   faire. En pratique, chacune dure quelques secondes.
-- Loin de la sauvegarde de 02:30 ; terminées bien avant les snapshots Btrfs (05:00) et
-  Hyper Backup (06:00). Dans le pire cas (délai de 120 min), un snapshot Btrfs pendant
-  `prune` reste cohérent (voir « Interruption »).
+- **Plage protégée** `apply.protected` (défaut `04:55–08:00`, heure du NAS) : snapshots
+  Btrfs (05:00) et Hyper Backup (06:00). Un décalage d'horaires ne suffit pas (délai de
+  120 min, tâche retardée, lancement manuel) ; le script garantit donc :
+  - aucune opération réelle ne **démarre** dans la plage, même avec `--ignore-window`
+    (`protected_period`, code 3) ;
+  - le délai d'une opération réelle est **raccourci** à « début de la plage − 90 s » : à
+    l'échéance, `docker stop` (SIGTERM, verrou retiré par restic), SIGKILL 60 s plus
+    tard ; aucun conteneur d'écriture ne tourne donc au début de la plage ;
+  - refus s'il reste moins de 10 min (`protected_period`) ;
+  - pas de lecture des données pendant une opération réelle (réservée au contrôle
+    quotidien), pour une durée prévisible.
+
+  Démarrée à 04:00, une opération dispose donc d'au plus 53 min ; à 04:15, 38 min.
+  Le contrôle quotidien (lecture seule) n'est pas concerné. **Limite** : la fin de la plage
+  (08:00) suppose que Hyper Backup se termine avant ; à ajuster à sa durée réelle.
+  Après un SIGKILL, le verrou et le marqueur restent : le snapshot Btrfs ou la copie Hyper
+  Backup contiennent alors un état « interrompu », récupérable comme ci-dessous.
 
 ### Coordination avec les sauvegardes
 
@@ -330,6 +351,26 @@ Avec une sauvegarde quotidienne (02:30), simulation de la règle de restic sur 5
 - Une sauvegarde qui démarre **pendant** une opération réelle échoue (restic `backup` ne
   réessaie pas par défaut). Le timer de `docker-prod-01` réessaiera la nuit suivante, et
   `stale` alertera si cela se répète. D'où les horaires, loin de 02:30.
+
+**Sauvegarde entre le dry-run et l'écriture.** Le contrôle lit sans verrou ; une sauvegarde
+peut donc commencer après lui :
+
+| Moment | Effet |
+|---|---|
+| en cours pendant le contrôle | verrou visible : refus `locks` |
+| commencée après le contrôle, en cours à l'écriture | `forget`/`prune` ne peuvent pas prendre le verrou exclusif : `repository_locked` (code 4), **rien n'est modifié** (vérifié : code 11 de restic) |
+| commencée **pendant** l'écriture | la sauvegarde échoue (verrou exclusif), le repository est intact |
+| terminée entre le contrôle et l'écriture | le nouveau snapshot n'est **jamais** supprimé : `forget` ne reçoit que les identifiants du dry-run. Ces candidats restent valables : ajouter un snapshot ne peut que rendre **plus** de snapshots supprimables (la référence de `keep-within` avance, un nouveau jour, une nouvelle semaine ou un nouveau mois repousse les plus anciens), jamais en faire conserver un qui ne l'était pas. Le nouveau snapshot est journalisé (`INFO`), laissé hors de la référence, et contrôlé comme nouveau à l'exécution suivante (antidatage, groupe, tags). |
+
+**`forget` partiel.** Restic supprime un fichier `snapshots/<id>` par snapshot demandé ; un
+arrêt ou une erreur peut en laisser une partie. Garanties : seuls des identifiants
+demandés peuvent disparaître (commande par identifiants, aucune politique évaluée à
+l'écriture) ; le marqueur liste ces identifiants ; le contrôle suivant accepte leur absence
+mais signale `operation_interrupted`, et toute autre disparition reste
+`snapshots_disappeared` ; `--resolve-interrupted` refuse si une disparition sort de la
+liste. À la reprise, le dry-run recalcule les candidats : supprimer des snapshots non
+conservés ne change pas ceux que les règles conservent, donc seuls les restants
+réapparaissent.
 
 ### Notifications et rapport
 
@@ -346,6 +387,7 @@ Avec une sauvegarde quotidienne (02:30), simulation de la règle de restic sur 5
 | `forget_done`, `prune_done` | 0 | effectuée et vérifiée |
 | `nothing_to_remove` | 0 | aucune |
 | `apply_disabled`, `repository_owner`, `unsafe_mounts` | 2 | aucune |
+| `protected_period` | 3 | aucune (plage protégée en cours ou trop proche) |
 | `apply_refused`, `baseline_required` | 1 / 6 | aucune |
 | `repository_locked` | 4 | aucune (restic n'a pas pu verrouiller) |
 | `apply_failed`, `timeout`, `apply_unverified`, `apply_unexpected` | 4 / 5 / 4 / 1 | **peut-être partielle** : marqueur conservé |
@@ -365,38 +407,70 @@ quotidiennes antidatées (207 Mio), propriétaire `0:0` :
 | `prune` tué par SIGKILL après la prise du verrou | `apply_failed`, **verrou restant** ; contrôle, `--apply prune` et `--resolve-interrupted` refusés ; sauvegarde cliente refusée (code 11, `already locked exclusively`) ; `restic unlock` immédiat : sans effet ; après 31 min : `successfully removed 1 locks` ; `check` OK ; `--resolve-interrupted`, puis `prune_done` (207 → 182 Mio) |
 | après maintenance | `check --read-data` OK, contrôle `ok`, nouvelle sauvegarde cliente OK, restauration identique |
 
+### Validations restant à faire sur le NAS
+
+Non vérifiable sur une VM (ext4, sans ACL Synology) : à faire avant toute activation en prod.
+
+1. **Lecture seule, maintenant** : propriétaires, droits et ACL réels, et identité du REST
+   Server.
+   ```sh
+   R=/volume1/Restic/docker-prod
+   sudo stat -c '%u:%g %A %n' "$R" "$R"/config "$R"/data "$R"/index "$R"/keys "$R"/locks "$R"/snapshots
+   sudo find "$R" -type f -printf '%u:%g %m\n' | sort | uniq -c        # homogénéité des fichiers
+   sudo find "$R" -type d -printf '%u:%g %m\n' | sort | uniq -c
+   sudo synoacltool -get "$R"; sudo synoacltool -get "$R/data"
+   sudo synoacltool -get "$(sudo find "$R/data" -type f | head -n 1)"   # ACL d'un pack écrit par le REST Server
+   N=$(sudo docker ps --format '{{.Names}}' | grep -i rest)
+   sudo docker inspect -f 'User={{.Config.User}} Cmd={{.Config.Cmd}} Args={{.Args}}' "$N"
+   sudo docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}} rw={{.RW}}{{"\n"}}{{end}}' "$N"
+   sudo docker exec "$N" id
+   ```
+   Attendu : un seul `uid:gid` pour tout le repository (`apply.repository_owner`), et le
+   REST Server sous cette même identité ou root.
+2. **Écriture réelle, d'abord sur `docker-test`** (même REST Server, mêmes ACL ; repository
+   de test) : activer `apply` dans `inventories/test`, lancer manuellement `--apply forget`
+   puis `--apply prune` sur un repository de test qui a des candidats, puis comparer les
+   fichiers **réécrits** par `prune` avec ceux du REST Server :
+   ```sh
+   R=/volume1/Restic/docker-test
+   sudo find "$R"/index "$R"/data -type f -newermt '-1 hour' -printf '%u:%g %m %p\n' | head
+   sudo synoacltool -get "$(sudo find "$R/index" -type f -newermt '-1 hour' | head -n 1)"
+   ```
+   puis, **depuis `docker-test-01`, via le REST Server** : `restic-core snapshots`,
+   `restic-core check --read-data`, une restauration dans un dossier vide et la sauvegarde
+   suivante. Restic tente un `chmod` en lecture seule sur ses fichiers ; sur un dossier régi
+   par les ACL Synology, vérifier que l'ACL héritée reste présente (sortie de
+   `synoacltool`, identique à celle d'un pack écrit par le REST Server).
+3. **Sauvegardes externes** : vérifier que les snapshots Btrfs et Hyper Backup couvrent
+   bien `/volume1/Restic` (filet de récupération), et relever la durée de Hyper Backup pour
+   fixer la fin de `apply.protected`.
+
 ### Activation (étape séparée, après validation de la politique)
 
-1. **Propriétaire du repository** (lecture seule), puis utilisateur du REST Server (vide =
-   root) :
-   ```sh
-   sudo stat -c '%u:%g %n' /volume1/Restic/docker-prod/config /volume1/Restic/docker-prod/{data,index,keys,locks,snapshots}
-   sudo docker inspect -f '{{.Config.User}}' "$(sudo docker ps --format '{{.Names}}' | grep -i rest)"
-   ```
-   Les six lignes doivent donner le même `uid:gid`, reporté dans `apply.repository_owner`.
+1. Validations ci-dessus (1 et 3), puis écriture réelle sur `docker-test` (2).
 2. **PR** sur `inventories/prod/group_vars/nas.yml` :
    ```yaml
    restic_maintenance_apply:
      forget: true
      prune: true
      prune_max_unused: "5%"
-     repository_owner: "0:0"      # valeur relevée à l'étape 1
+     repository_owner: "0:0"      # valeur relevée en 1
+     protected: {start: "04:55", end: "08:00"}
    ```
 3. Merge, workflow NAS `prod` (`--check`, puis apply), **mise à jour des empreintes** de la
    tâche `(dry-run)` (`config.json` change).
 4. Lancements manuels (bloc de « Premier lancement manuel », chemins `docker-prod`,
-   `--ignore-window`) : d'abord `--apply forget` (avant fin novembre 2026 :
-   `nothing_to_remove`, aucune écriture), puis `--apply prune`, qui exerce le chemin
-   d'écriture réel (verrou exclusif, éventuel nettoyage) : attendu `prune_done`, aucun
-   verrou restant. La sauvegarde de 02:30 suivante doit réussir (`restic-core snapshots`
-   sur `docker-prod-01`).
-5. Tâches DSM `restic-maintenance-docker-prod (forget)` et `(prune)`, utilisateur `root`,
+   `--ignore-window`, hors de la plage protégée) : `--apply forget` (avant le 28/11/2026 :
+   `nothing_to_remove`), puis `--apply prune` (verrou exclusif, éventuel nettoyage) :
+   `prune_done`, aucun verrou restant ; la sauvegarde de 02:30 suivante doit réussir.
+5. Tâches DSM `restic-maintenance-docker-prod (forget)` et `(prune)`, utilisateur **root**,
    créées **désactivées**, e-mail **toujours**, planification ci-dessus. Script : celui de
    la tâche `(dry-run)` (mêmes empreintes, mêmes chemins), dont la dernière commande devient :
    ```sh
    /usr/bin/python3 -I "$RUN/restic_maintenance.py" --config "$RUN/config.json" --apply forget   # ou prune
    ```
-   jamais avec `--ignore-window`, `--init-baseline` ni `--resolve-interrupted`. Activer
+   jamais avec `--ignore-window`, `--init-baseline` ni `--resolve-interrupted`. Après
+   création : vérifier `synoschedtask --get` (activée, utilisateur root, horaire) ; activer
    après un lancement manuel concluant. Après chaque déploiement, mettre à jour les
    empreintes des **trois** tâches.
 
