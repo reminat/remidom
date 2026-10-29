@@ -57,8 +57,10 @@ def cfg(**overrides):
 
 
 def snap(sid, when, host=HOST, paths=None, tags=None):
-    return {"id": sid * 8 if len(sid) == 1 else sid, "time": when.strftime("%Y-%m-%dT%H:%M:%S.123456789+00:00"),
-            "hostname": host, "paths": paths or PATHS, "tags": TAGS if tags is None else tags}
+    sid = sid * 8 if len(sid) == 1 else sid
+    return {"id": sid, "time": when.strftime("%Y-%m-%dT%H:%M:%S.123456789+00:00"),
+            "hostname": host, "paths": paths or PATHS, "tags": TAGS if tags is None else tags,
+            "tree": ("%064x" % (int(sid[:15], 16) * 7 + 1))[-64:]}
 
 
 def daily(n, end=NOW - dt.timedelta(hours=1)):
@@ -282,35 +284,62 @@ class KeepTagTest(unittest.TestCase):
         self.assertEqual(codes(rm.analyze(self.C, s, groups(s), NOW, None)[0]), ["tags_mismatch"])
 
     def state_for(self, s):
-        return {"last_run": (NOW - dt.timedelta(hours=1)).isoformat(), "snapshot_ids": sorted(x["id"] for x in s)}
+        return rm.state_doc(NOW - dt.timedelta(hours=1), s, [x["id"] for x in s])
 
-    def retag(self, sn, new_id, tags=None):
-        n = dict(sn, id=new_id, original=sn["id"], tags=tags if tags is not None else sn["tags"] + ["keep"])
+    def retag(self, sn, new_id="e" * 64, **changes):
+        n = dict(sn, id=new_id, original=sn["id"], tags=sn["tags"] + ["keep"])
+        n.update(changes)
         return n
+
+    def check(self, s, replaced, *new, state=None):
+        now_s = [x for x in s if x is not replaced] + list(new)
+        return rm.analyze(self.C, now_s, groups(now_s), NOW, state or self.state_for(s))[0]
 
     def test_retag_is_recognised(self):
         s = daily(10)
-        state = self.state_for(s)
-        n = self.retag(s[8], "e" * 64)
-        now_s = s[:8] + [n] + s[9:]
-        f, _ = rm.analyze(self.C, now_s, groups(now_s), NOW, state)
+        f = self.check(s, s[8], self.retag(s[8]))
         self.assertEqual(codes(f), [])
         self.assertEqual(codes(f, "INFO"), ["retagged"])
 
-    def test_retag_without_protection_tag_or_ambiguous_is_not_recognised(self):
+    def test_retag_refused_when_snapshot_changed(self):
         s = daily(10)
-        state = self.state_for(s)
-        plain = self.retag(s[8], "e" * 64, tags=list(TAGS))      # réécrit sans tag de protection
-        now_s = s[:8] + [plain] + s[9:]
-        self.assertEqual(codes(rm.analyze(self.C, now_s, groups(now_s), NOW, state)[0]),
-                         ["backdated_snapshot", "snapshots_disappeared"])
-        a, b = self.retag(s[8], "e" * 64), self.retag(s[8], "f" * 64)  # deux prétendants
-        now_s = s[:8] + [a, b] + s[9:]
-        self.assertEqual(codes(rm.analyze(self.C, now_s, groups(now_s), NOW, state)[0]),
-                         ["backdated_snapshot", "backdated_snapshot", "snapshots_disappeared"])
-        still = self.retag(s[8], "e" * 64)                        # l'original existe toujours
-        now_s = s + [still]
-        self.assertEqual(codes(rm.analyze(self.C, now_s, groups(now_s), NOW, state)[0]), ["backdated_snapshot"])
+        old = s[8]
+        later = (NOW - dt.timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%S.123456789+00:00")
+        cases = {
+            "tree": self.retag(old, tree="f" * 64),
+            "time": self.retag(old, time=later),
+            "hostname": self.retag(old, hostname="docker-test-02"),
+            "paths": self.retag(old, paths=["/srv/docker"]),
+            "tags": self.retag(old, tags=["core", "keep"]),                 # tag initial retiré
+            "autre tag": self.retag(old, tags=TAGS + ["keep", "autre"]),    # ajout hors keep_tags
+            "sans keep": self.retag(old, tags=list(TAGS)),                  # aucun tag de protection
+        }
+        for name, new in cases.items():
+            f = self.check(s, old, new)
+            self.assertIn("retag_mismatch", codes(f), name)
+            self.assertIn("snapshots_disappeared", codes(f), name)          # l'original reste « disparu »
+            self.assertNotIn("retagged", codes(f, "INFO"), name)
+
+    def test_retag_refused_without_metadata_in_reference(self):
+        s = daily(10)
+        legacy = {"last_run": (NOW - dt.timedelta(hours=1)).isoformat(), "snapshot_ids": sorted(x["id"] for x in s)}
+        f = self.check(s, s[8], self.retag(s[8]), state=legacy)
+        self.assertIn("retag_mismatch", codes(f))
+        self.assertIn("métadonnées", [x for x in f if x["code"] == "retag_mismatch"][0]["message"])
+
+    def test_retag_refused_when_ambiguous_or_original_still_present(self):
+        s = daily(10)
+        f = self.check(s, s[8], self.retag(s[8]), self.retag(s[8], new_id="f" * 64))
+        self.assertIn("retag_mismatch", codes(f))
+        f = self.check(s, None, self.retag(s[8]))   # original toujours là : simple nouveau snapshot antidaté
+        self.assertEqual(codes(f), ["backdated_snapshot"])
+
+    def test_reference_keeps_metadata(self):
+        s = daily(3)
+        doc = rm.state_doc(NOW, s, [x["id"] for x in s])
+        self.assertEqual(doc["meta"][s[0]["id"]], {"time": s[0]["time"], "hostname": HOST, "paths": PATHS,
+                                                    "tags": sorted(TAGS), "tree": s[0]["tree"]})
+        self.assertIsNone(rm.validate_state(doc, NOW, dt.timedelta(minutes=60)))
 
     def test_protected_snapshot_can_never_be_removed(self):
         s = daily(40)
@@ -777,6 +806,16 @@ class StateValidationTest(TrustedUser, unittest.TestCase):
                    {"operation": "forget", "started": NOW.isoformat(), "ids": [], "x": 1}):
             self.put(dict(good, in_progress=ip))
             self.assertIsNone(self.read()[0], ip)
+
+    def test_meta(self):
+        good = {"last_run": (NOW - dt.timedelta(days=1)).isoformat(), "snapshot_ids": ["a" * 64]}
+        m = {"time": NOW.isoformat(), "hostname": HOST, "paths": PATHS, "tags": TAGS, "tree": "b" * 64}
+        self.put(dict(good, meta={"a" * 64: m}))
+        self.assertIsNone(self.read()[1])
+        for bad in ({"c" * 64: m}, {"a" * 64: dict(m, tree="x")}, {"a" * 64: dict(m, extra=1)},
+                    {"a" * 64: dict(m, paths="/srv")}, {"a" * 64: dict(m, hostname=None)}, []):
+            self.put(dict(good, meta=bad))
+            self.assertIsNone(self.read()[0], bad)
 
     def test_too_large(self):
         self.put(b" " * (rm.MAX_STATE_BYTES + 1))

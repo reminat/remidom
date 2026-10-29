@@ -302,11 +302,26 @@ script le vérifie aussi de son côté : un candidat portant ce tag est refusé
 groupe (`core,prod` + `keep`) sans déclencher `tags_mismatch`.
 
 **`restic tag` change l'identifiant** : restic réécrit le snapshot (même arbre, même date)
-sous un nouvel identifiant, avec `original` = l'ancien, puis supprime l'ancien. Le
-contrôle suivant le reconnaît (`INFO retagged`) si l'ancien a disparu, qu'un seul nouveau
-snapshot s'en réclame et qu'il porte un tag de `keep_tags` ; sinon c'est une anomalie
-(`snapshots_disappeared`, `backdated_snapshot`). Le marquage écrit dans le repository : il
-se fait **sur le NAS**, pas via le REST Server (append-only, il refuserait la suppression).
+sous un nouvel identifiant, avec `original` = l'ancien, puis supprime l'ancien. Le marquage
+écrit dans le repository : il se fait **sur le NAS**, pas via le REST Server (append-only,
+il refuserait la suppression).
+
+**Reconnaissance au contrôle suivant.** La référence garde, pour chaque snapshot, ses
+**métadonnées** (`meta` : `tree`, `time`, `hostname`, `paths`, `tags`), écrites à chaque
+exécution validée. Le remplacement d'un ancien snapshot par un nouveau n'est admis
+(`INFO retagged`) que si toutes ces conditions sont réunies :
+
+| Condition | Sinon |
+|---|---|
+| l'ancien identifiant a disparu, un **seul** nouveau snapshot a `original` = l'ancien | `retag_mismatch` |
+| métadonnées de l'ancien présentes dans la référence | `retag_mismatch` (référence antérieure : comparaison impossible, jamais d'acceptation par défaut) |
+| `tree`, `time`, `hostname`, `paths` **identiques** | `retag_mismatch` (champ modifié nommé) |
+| tags = tags initiaux + au moins un tag de `keep_tags`, rien retiré, rien d'autre ajouté | `retag_mismatch` |
+
+Un refus laisse en plus `snapshots_disappeared` et `backdated_snapshot` : la référence
+n'est pas mise à jour et l'e-mail part. `original` et la présence de `keep` ne suffisent
+donc jamais. **Après le déploiement**, attendre une exécution quotidienne validée (qui écrit
+`meta`) avant tout marquage.
 
 Procédure (administrateur, hors de la plage protégée et loin de 02:30, après un contrôle
 quotidien `ok`), exemple pour `75eeb351` de `docker-prod` (essayer d'abord sur

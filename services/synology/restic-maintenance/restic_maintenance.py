@@ -429,8 +429,8 @@ def open_lock(state_fd):
 
 def validate_state(obj, now, max_skew):
     if not isinstance(obj, dict) or not {"last_run", "snapshot_ids"} <= set(obj) \
-            or not set(obj) <= {"last_run", "snapshot_ids", "in_progress"}:
-        return "structure inattendue (clés last_run, snapshot_ids et, facultative, in_progress)"
+            or not set(obj) <= {"last_run", "snapshot_ids", "meta", "in_progress"}:
+        return "structure inattendue (clés last_run, snapshot_ids et, facultatives, meta, in_progress)"
     if "in_progress" in obj:
         error = validate_in_progress(obj["in_progress"])
         if error:
@@ -450,7 +450,35 @@ def validate_state(obj, now, max_skew):
         return "identifiant de snapshot invalide"
     if len(set(ids)) != len(ids):
         return "identifiants en double"
+    meta = obj.get("meta", {})
+    if not isinstance(meta, dict) or not set(meta) <= set(ids):
+        return "meta : identifiants absents de snapshot_ids"
+    if any(not valid_meta(m) for m in meta.values()):
+        return "meta : métadonnées de snapshot invalides"
     return None
+
+
+META_KEYS = ("time", "hostname", "paths", "tags", "tree")
+
+
+def snapshot_meta(sn):
+    """Ce que la référence garde de chaque snapshot pour reconnaître un marquage (restic tag)."""
+    return {"time": sn.get("time"), "hostname": sn.get("hostname"), "paths": sn.get("paths") or [],
+            "tags": sorted(sn.get("tags") or []), "tree": sn.get("tree")}
+
+
+def valid_meta(m):
+    return isinstance(m, dict) and set(m) == set(META_KEYS) \
+        and all(isinstance(m[k], str) for k in ("time", "hostname")) \
+        and isinstance(m["tree"], str) and SNAPSHOT_ID_RE.match(m["tree"]) is not None \
+        and all(isinstance(m[k], list) and all(isinstance(x, str) for x in m[k]) for k in ("paths", "tags"))
+
+
+def state_doc(started, snapshots, ids):
+    """Référence : identifiants retenus et, pour chacun, ses métadonnées (si restic les fournit complètes)."""
+    by_id = {sn.get("id"): sn for sn in snapshots}
+    meta = {i: snapshot_meta(by_id[i]) for i in ids if i in by_id and valid_meta(snapshot_meta(by_id[i]))}
+    return {"last_run": started.isoformat(), "snapshot_ids": sorted(ids), "meta": meta}
 
 
 def validate_in_progress(ip):
@@ -840,6 +868,23 @@ def keep_tags_of(cfg, sn):
 
 # --------------------------------------------------------------------------- analyse
 
+def retag_problem(cfg, old, claimants):
+    """None si le seul prétendant est le même snapshot que old, avec seulement un tag de protection en plus."""
+    if len(claimants) != 1:
+        return "%d snapshots se réclament du même original" % len(claimants)
+    if old is None:
+        return "métadonnées de l'original absentes de la référence : comparaison impossible"
+    new = snapshot_meta(claimants[0])
+    diff = [k for k in ("tree", "time", "hostname", "paths") if new[k] != old[k]]
+    if diff:
+        return "%s modifié(s)" % ", ".join(diff)
+    added, removed = set(new["tags"]) - set(old["tags"]), set(old["tags"]) - set(new["tags"])
+    keep = set(cfg["retention"].get("keep_tags", []))
+    if removed or not added or not added <= keep:
+        return "tags %r → %r : seul l'ajout d'un tag de protection %r est admis" % (old["tags"], new["tags"], sorted(keep))
+    return None
+
+
 def finding(level, code, message):
     return {"level": level, "code": code, "message": message}
 
@@ -933,12 +978,21 @@ def analyze(cfg, snapshots, forget_groups, now, state, state_error=None, policy_
                                     % (ip["operation"], ip["started"], len(requested - ids), len(requested))))
         # Marquage (« restic tag ») : restic réécrit le snapshot sous un nouvel identifiant et
         # supprime l'ancien ; le nouveau porte « original » = l'ancien. Admis seulement si
-        # l'ancien a disparu, qu'un seul nouveau s'en réclame et qu'il porte un tag de protection.
+        # l'ancien a disparu, qu'un seul nouveau s'en réclame, et que les métadonnées gardées dans
+        # la référence (arbre, date, hôte, chemins, tags) sont identiques, à l'ajout près d'un tag
+        # de protection. Sans métadonnées (référence antérieure), jamais admis.
         claims = {}
         for sn in snapshots:
             if sn.get("id") not in previous and sn.get("original") in previous - ids:
                 claims.setdefault(sn["original"], []).append(sn)
-        retagged = {orig: c[0] for orig, c in claims.items() if len(c) == 1 and keep_tags_of(cfg, c[0])}
+        retagged = {}
+        for orig, c in sorted(claims.items()):
+            reason = retag_problem(cfg, (state.get("meta") or {}).get(orig), c)
+            if reason:
+                findings.append(finding("ERROR", "retag_mismatch", "%s → %s : %s"
+                                        % (orig[:8], ", ".join(x["id"][:8] for x in c), reason)))
+            else:
+                retagged[orig] = c[0]
         for orig, sn in sorted(retagged.items()):
             findings.append(finding("INFO", "retagged", "%s remplacé par %s (marquage %s), même snapshot"
                                     % (orig[:8], sn["id"][:8], ",".join(keep_tags_of(cfg, sn)))))
@@ -1202,7 +1256,7 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
 
     # Un état invalide produit toujours une anomalie (ci-dessus) : il n'est jamais remplacé.
     current_ids = sorted(sn["id"] for sn in snapshots)
-    new_state = {"last_run": started.isoformat(), "snapshot_ids": current_ids}
+    new_state = state_doc(started, snapshots, current_ids)
     if state is None:
         if not opts.init_baseline:
             log("RÉFÉRENCE ABSENTE : aucune référence créée%s. Après vérification, relancer manuellement avec"
@@ -1262,7 +1316,7 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
     if op == "forget":
         result["requested"] = sorted(removal)
         if not removal:
-            write_json_at(state_fd, "state.json", {"last_run": started.isoformat(), "snapshot_ids": sorted(before)})
+            write_json_at(state_fd, "state.json", state_doc(started, snapshots, before))
             log("forget : aucun snapshot à supprimer selon la politique ; rien n'a été modifié")
             result["ok"] = True
             return finish("nothing_to_remove", EXIT_OK)
@@ -1286,7 +1340,7 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
         log(str(exc))
         return finish("restic_error", EXIT_RESTIC)
 
-    clean_state = {"last_run": started.isoformat(), "snapshot_ids": sorted(before)}
+    clean_state = state_doc(started, snapshots, before)
     if runner.deadline - time.monotonic() < STOP_GRACE_SECONDS:
         log("délai global presque épuisé avant l'écriture : opération non commencée")
         write_json_at(state_fd, "state.json", clean_state)
@@ -1342,7 +1396,8 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
 
     # Vérification après écriture, en lecture seule : ensemble exact des snapshots, verrous, structure.
     try:
-        after = {sn["id"] for sn in parse_json_output(runner.restic("snapshots", "--json")) or []}
+        after_snapshots = parse_json_output(runner.restic("snapshots", "--json")) or []
+        after = {sn["id"] for sn in after_snapshots}
         locks = runner.restic("list", "locks").split()
         runner.restic("check")
     except (StepError, StepTimeout, UnsafeMounts, ValueError) as exc:
@@ -1368,7 +1423,7 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
         # Sauvegarde survenue entre-temps : non intégrée à la référence, le contrôle suivant la vérifiera.
         log("INFO  nouveau(x) snapshot(s) pendant l'opération, laissé(s) au contrôle suivant : %s"
             % ", ".join(i[:8] for i in sorted(after - before)))
-    write_json_at(state_fd, "state.json", {"last_run": started.isoformat(), "snapshot_ids": sorted(after & before)})
+    write_json_at(state_fd, "state.json", state_doc(started, after_snapshots, after & before))
     result["ok"] = True
     report["check_after"] = True
     if op == "forget":
