@@ -1,0 +1,36 @@
+name: Gitleaks — historique complet
+
+# Appelé avant chaque déploiement (applicatif ou NAS) : analyse tout l'historique de la
+# référence déployée, quel que soit l'événement déclencheur. gitleaks-action ne fait une
+# analyse complète que sur workflow_dispatch/schedule ; sur un push, il se limite aux
+# commits poussés (et à aucun pour un merge). Le binaire qu'il installe est donc relancé
+# explicitement sur tout l'historique.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Gitleaks (historique complet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Installation de gitleaks (gitleaks-action)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_VERSION: 8.24.3
+
+      - name: Analyse de tout l'historique
+        run: |
+          GL=/tmp/gitleaks-8.24.3/gitleaks
+          [ -x "$GL" ] || { echo "binaire gitleaks introuvable : $GL" >&2; exit 1; }
+          "$GL" version
+          echo "commits dans l'historique : $(git rev-list --count HEAD)"
+          "$GL" detect --source . --config .gitleaks.toml --redact --no-banner --exit-code 2
