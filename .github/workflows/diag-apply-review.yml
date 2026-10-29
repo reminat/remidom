@@ -96,14 +96,20 @@ jobs:
           echo "  reprise --apply forget :"; run --apply forget; state; echo "  snapshots : $(nsnap)"
           echo "### R2 plage protégée en cours (même avec --ignore-window)"; prot -1 30; run --apply prune
           echo "### R3 plage protégée dans 8 min (< 10 min)"; prot 8 60; run --apply prune
-          echo "### R4 échéance : prune ralenti, plage protégée dans 12 min"
-          prot 12 60; PSTART=$(date -d "12 min" +%s); echo 0.002 > /tmp/throttle
-          run --apply prune; rm -f /tmp/throttle
-          END=$(date +%s); echo "  fin du script $(( PSTART - END )) s avant le début de la plage protégée"
-          echo "  conteneurs restic restants : $(sudo /usr/bin/docker ps -q --filter name=restic-maint | wc -l)"
+          echo "### R4 échéance avec restic bloqué (SIGSTOP après prise du verrou)"
+          # Seule modification de la copie testée : minimum avant la plage protégée abaissé à 60 s.
+          sed 's/^MIN_APPLY_SECONDS = 10 \* 60$/MIN_APPLY_SECONDS = 60/' "$D/restic_maintenance.py" > "$D/r4.py"; diff "$D/restic_maintenance.py" "$D/r4.py" | sed 's/^/    /'
+          sleep $(( 60 - $(date +%-S) + 2 ))   # début de minute : échéance prévisible
+          prot 5 60; PSTART=$(date -d "$(date -d '5 min' +%H:%M)" +%s); echo 0.01 > /tmp/throttle
+          ( set +e; sudo "$PY" -I "$D/r4.py" --config "$D/config.json" --ignore-window --apply prune > /tmp/bg.txt 2>&1; echo $? > /tmp/bg.code ) &
+          for i in $(seq 1 3000); do [ -n "$(sudo ls -A $REPO/locks)" ] && break; sleep 0.05; done
+          W=$(sudo /usr/bin/docker ps --no-trunc --format '{{.Names}} {{.Command}}' | grep -v dry-run | grep -m1 'prune' | cut -d' ' -f1 || true)
+          echo "  $(date +%H:%M:%S) verrou pris ; SIGSTOP de ${W:-?}"; sudo /usr/bin/docker kill --signal STOP "$W" >/dev/null 2>&1 || echo "  (conteneur déjà terminé)"
+          wait; rm -f /tmp/throttle; END=$(date +%s)
+          echo "  script : code $(cat /tmp/bg.code), fin $(date -d @$END +%H:%M:%S), plage protégée à $(date -d @$PSTART +%H:%M:%S) : $(( PSTART - END )) s avant"
+          grep -E "arrêt garanti|délai|INTERROMPUE|statut" /tmp/bg.txt | sed 's/^/    /'
+          echo "  conteneurs restic restants : $(sudo /usr/bin/docker ps -aq --filter name=restic-maint | wc -l)"
           state; locks
           set +e; $R "$IMAGE" --no-lock check > /tmp/c.txt 2>&1; echo "  restic check : code $? ($(tail -1 /tmp/c.txt))"; set -e
-          prot 300 360
-          echo "  --resolve-interrupted :"; run --resolve-interrupted
-          echo "  reprise --apply prune :"; run --apply prune; state; locks
-          set +e; $R "$IMAGE" --no-lock check --read-data > /tmp/c.txt 2>&1; echo "  check --read-data final : code $? ($(tail -1 /tmp/c.txt))"; set -e
+          echo "  (verrou restant attendu après SIGKILL : récupération déjà validée par le run du 28/10)"
+          true

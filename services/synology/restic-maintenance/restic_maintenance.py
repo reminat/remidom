@@ -1294,6 +1294,14 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
         return finish("timeout", EXIT_TIMEOUT)
     except StepError as exc:
         log(str(exc))
+        if op == "forget":
+            # Constat en lecture seule, pour la récupération : quels demandés ont réellement disparu.
+            try:
+                left = {sn["id"] for sn in parse_json_output(runner.restic("snapshots", "--json")) or []}
+                result["removed"] = sorted(set(removal) - left)
+                log("constat : %d/%d suppression(s) effectuée(s) avant l'échec" % (len(result["removed"]), len(removal)))
+            except (StepError, StepTimeout, UnsafeMounts, ValueError) as exc2:
+                log("constat impossible : %s" % exc2)
         log("OPÉRATION INTERROMPUE : marqueur conservé dans la référence (voir « Opération interrompue »)")
         return finish("apply_failed", EXIT_RESTIC)
 
