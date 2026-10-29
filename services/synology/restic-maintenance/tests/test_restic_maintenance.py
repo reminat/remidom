@@ -932,7 +932,9 @@ class ConfigTest(unittest.TestCase):
         for bad in (dict(ok, forget="true"), dict(ok, prune=1), dict(ok, prune_max_unused="60%"),
                     dict(ok, prune_max_unused="5"), dict(ok, prune_max_unused="unlimited"),
                     dict(ok, repository_owner="root"), dict(ok, repository_owner="0:0 --privileged"),
-                    dict(ok, extra=1), {"forget": True}):
+                    dict(ok, extra=1), {"forget": True}, dict(ok, protected={"start": "04:55"}),
+                    dict(ok, protected={"start": "05:00", "end": "05:00"}),
+                    dict(ok, protected={"start": "4:55", "end": "08:00"})):
             with self.assertRaises(rm.ConfigError, msg=bad):
                 rm.load_config(self.write(cfg(apply=bad)))
         with self.assertRaises(rm.ConfigError):
@@ -1002,7 +1004,7 @@ real = sub in ("forget", "prune") and "--dry-run" not in args
 if real and sub == "forget" and fixtures.get("write_exits", {}).get("forget", 0) != 11:
     # Suppression simulée (éventuellement partielle) : le repository simulé est réécrit.
     ids = args[args.index("forget") + 1:][:fixtures.get("forget_partial", 10 ** 6)]
-    fixtures["snapshots"] = [s for s in fixtures["snapshots"] if s["id"] not in ids]
+    fixtures["snapshots"] = [s for s in fixtures["snapshots"] if s["id"] not in ids] + fixtures.get("appear", [])
     for g in fixtures["forget"]:
         g["remove"] = [s for s in g["remove"] if s["id"] not in ids]
     with open(os.environ["FAKE_FIXTURES"], "w") as fx:
@@ -1360,7 +1362,13 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
 
     # ------------------------------------------------------------------ opérations réelles
 
+    @staticmethod
+    def hhmm(minutes_from_now):
+        return (dt.datetime.now() + dt.timedelta(minutes=minutes_from_now)).strftime("%H:%M")
+
     def enable(self, **apply):
+        # Plage protégée loin de l'heure du test, sauf si le test la fixe lui-même.
+        apply.setdefault("protected", {"start": self.hhmm(360), "end": self.hhmm(420)})
         for entry in rm.REPO_ENTRIES:
             path = os.path.join(self.repo, entry)
             if not os.path.exists(path):
@@ -1457,6 +1465,25 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         fx = self.current_fixtures()
         self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], []), rm.EXIT_OK)
         self.assertEqual(self.report()["status"], "ok")
+
+    def test_backup_between_dry_run_and_forget(self):
+        # Une sauvegarde terminée entre le contrôle et l'écriture : jamais supprimée, absente de la
+        # référence, puis vérifiée comme nouvelle par le contrôle suivant.
+        self.enable(forget=True)
+        s, forget, remove = self.aged_repo()
+        self.baseline(s, forget)
+        new = snap("f" * 64, dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1))
+        code = self.run_apply(s, forget, ["--apply", "forget"], appear=[new])
+        r = self.report()
+        self.assertEqual((code, r["status"]), (rm.EXIT_OK, "forget_done"), r["log"])
+        self.assertEqual(self.write_calls(), [["--no-cache", "forget"] + sorted(x["id"] for x in remove)])
+        self.assertTrue(any("laissé(s) au contrôle suivant : ffffffff" in l for l in r["log"]))
+        self.assertNotIn(new["id"], self.state()["snapshot_ids"])
+        fx = self.current_fixtures()
+        self.assertIn(new["id"], [x["id"] for x in fx["snapshots"]])
+        fx["forget"][0]["keep"].append(new)
+        self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], []), rm.EXIT_OK)
+        self.assertIn(new["id"], self.state()["snapshot_ids"])
 
     def test_forget_with_nothing_to_remove_writes_nothing(self):
         self.enable(forget=True)
@@ -1653,6 +1680,47 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         with open(self.log) as f:
             calls = [json.loads(line) for line in f]
         self.assertEqual(calls[-1], ["stop", "--time", str(rm.STOP_GRACE_SECONDS), "conteneur-x"])
+
+    def test_protected_period_refuses_and_bounds_real_operations(self):
+        s, forget, _ = self.aged_repo()
+        # Pendant la plage protégée : refus avant tout conteneur, même avec --ignore-window.
+        self.enable(forget=True, protected={"start": self.hhmm(-2), "end": self.hhmm(3)})
+        self.assertEqual(self.run_apply(s, forget, ["--apply", "forget"]), rm.EXIT_WINDOW)
+        self.assertEqual(self.report()["status"], "protected_period")
+        self.assertEqual(self.restic_calls(), [])
+        # Trop près de son début : refus.
+        self.enable(forget=True, protected={"start": self.hhmm(5), "end": self.hhmm(60)})
+        self.assertEqual(self.run_apply(s, forget, ["--apply", "forget"]), rm.EXIT_WINDOW)
+        self.assertEqual(self.restic_calls(), [])
+        # Plus loin : délai raccourci pour arrêter le conteneur d'écriture avant le début.
+        self.enable(forget=True, protected={"start": self.hhmm(31), "end": self.hhmm(60)})
+        self.baseline(s, forget)
+        self.assertEqual(self.run_apply(s, forget, ["--apply", "forget"]), rm.EXIT_OK)
+        line = [l for l in self.report()["log"] if "arrêt garanti" in l][0]
+        minutes = int(re.search(r"délai (\d+) min", line).group(1))
+        self.assertTrue(27 <= minutes <= 29, line)
+        # Le contrôle quotidien n'est pas concerné par la plage protégée.
+        self.enable(protected={"start": self.hhmm(-2), "end": self.hhmm(3)})
+        fx = self.current_fixtures()
+        self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], []), rm.EXIT_OK)
+
+    def test_real_operations_skip_scheduled_read_data(self):
+        with open(self.config) as f:
+            c = json.load(f)
+        c["read_data"] = {"weekdays": list(range(1, 8)), "parts": 1}
+        with open(self.config, "w") as f:
+            json.dump(c, f)
+        self.enable(forget=True)
+        s, forget, _ = self.aged_repo()
+        self.baseline(s, forget)
+        self.assertIn("--read-data", self.check_call())          # contrôle : lecture des données
+        self.assertEqual(self.run_apply(s, forget, ["--apply", "forget"]), rm.EXIT_OK)
+        self.assertEqual(self.check_call(), ["--no-lock", "--no-cache", "check"])  # opération réelle : structure
+
+    def test_seconds_until(self):
+        now = time.mktime(dt.datetime(2026, 11, 7, 4, 0).timetuple())
+        self.assertEqual(rm.seconds_until("04:55", now), 55 * 60)
+        self.assertEqual(rm.seconds_until("03:00", now), 23 * 3600)
 
     def test_refuses_non_dry_run_config(self):
         with open(self.config) as f:
