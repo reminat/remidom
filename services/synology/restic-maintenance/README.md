@@ -391,17 +391,40 @@ Retirer la protection : même commande avec `tag --remove keep` (nouvel identifi
   faire. En pratique, chacune dure quelques secondes.
 - **Plage protégée** `apply.protected` (défaut `04:55–08:00`, heure du NAS) : snapshots
   Btrfs (05:00) et Hyper Backup (06:00). Un décalage d'horaires ne suffit pas (délai de
-  120 min, tâche retardée, lancement manuel) ; le script garantit donc :
+  120 min, tâche retardée, lancement manuel) ; le script assure donc :
   - aucune opération réelle ne **démarre** dans la plage, même avec `--ignore-window`
     (`protected_period`, code 3) ;
   - le délai d'une opération réelle est **raccourci** à « début de la plage − 90 s » : à
-    l'échéance, `docker stop` (SIGTERM, verrou retiré par restic), SIGKILL 60 s plus
-    tard ; aucun conteneur d'écriture ne tourne donc au début de la plage ;
+    l'échéance, arrêt encadré du conteneur (voir ci-dessous), terminé avant le début de la
+    plage **si le démon Docker et le système répondent** ;
   - refus s'il reste moins de 10 min (`protected_period`) ;
   - pas de lecture des données pendant une opération réelle (réservée au contrôle
     quotidien), pour une durée prévisible.
 
   Démarrée à 04:00, une opération dispose donc d'au plus 53 min ; à 04:15, 38 min.
+
+  **Arrêt encadré à l'échéance** : chaque commande est bornée dans le temps et son
+  résultat vérifié.
+  1. `docker stop --time 60` (SIGTERM : restic s'arrête et retire son verrou ; SIGKILL par
+     Docker après 60 s), borné à 90 s ;
+  2. si `stop` échoue ou ne répond pas : `docker kill`, borné à 30 s ;
+  3. confirmation par `docker inspect`, bornée à 15 s : conteneur **absent** (supprimé par
+     `--rm`) ou **arrêté**.
+
+  Le résultat est dans le rapport (`container_stop` : étapes, codes, état). Si l'arrêt n'est
+  pas confirmé (démon sans réponse, conteneur encore en cours, état inconnu) : statut
+  `timeout_stop_unconfirmed` (code 5, e-mail), constat `stop_unconfirmed`, marqueur
+  d'interruption conservé, ligne `ARRÊT DU CONTENEUR … NON CONFIRMÉ` dans la sortie.
+
+  **Pas de garantie absolue** : si le démon Docker, le noyau ou le NAS ne répondent plus,
+  le script ne peut ni arrêter ni confirmer l'arrêt, et dépasse alors lui-même l'échéance
+  d'au plus 2 min 15 (somme des trois bornes) avant de le signaler ; dans le pire cas (NAS
+  figé), il ne peut rien signaler du tout. Une écriture pourrait alors chevaucher le
+  snapshot Btrfs ou Hyper Backup : le repository reste cohérent à chaque instant (voir
+  « Interruption »), mais la copie peut contenir un état interrompu. Face à
+  `stop_unconfirmed` : `sudo docker ps --filter name=restic-maint-`, état du démon
+  (`sudo systemctl status pkg-ContainerManager-dockerd` ou équivalent), et aucune autre
+  opération avant que le conteneur soit confirmé arrêté.
   Le contrôle quotidien (lecture seule) n'est pas concerné. **Limite** : la fin de la plage
   (08:00) suppose que Hyper Backup se termine avant ; à ajuster à sa durée réelle.
   Après un SIGKILL, le verrou et le marqueur restent : le snapshot Btrfs ou la copie Hyper
@@ -457,6 +480,7 @@ réapparaissent.
 | `apply_refused`, `baseline_required` | 1 / 6 | aucune |
 | `repository_locked` | 4 | aucune (restic n'a pas pu verrouiller) |
 | `apply_failed`, `timeout`, `apply_unverified`, `apply_unexpected` | 4 / 5 / 4 / 1 | **peut-être partielle** : marqueur conservé |
+| `timeout_stop_unconfirmed` | 5 | **peut-être en cours** : arrêt du conteneur non confirmé, marqueur conservé, `stop_unconfirmed` |
 
 ### Validation sur un dépôt jetable
 
@@ -550,7 +574,7 @@ Désactivation d'urgence : décocher les tâches dans DSM (immédiat), puis repa
 | avant l'écriture (refus, verrou d'autrui) | aucun |
 | `forget` arrêté | une partie des snapshots demandés supprimée, **jamais d'autres** ; données intactes |
 | `prune` arrêté | restic écrit les nouveaux packs et index **avant** de supprimer les anciens : données en double ou non référencées, **aucune perte** ; le `prune` suivant nettoie |
-| délai dépassé | `docker stop` : SIGTERM, restic s'arrête et **retire son verrou** ; SIGKILL après 60 s seulement |
+| délai dépassé | arrêt encadré : `docker stop` (SIGTERM, restic **retire son verrou** ; SIGKILL après 60 s), `docker kill` en secours, confirmation par `docker inspect` ; si non confirmé : `timeout_stop_unconfirmed` |
 | SIGKILL, panne, redémarrage du NAS | le **verrou exclusif reste** : les sauvegardes échouent tant qu'il n'est pas retiré |
 
 Dans tous les cas, le marqueur `in_progress` reste : chaque contrôle quotidien échoue en

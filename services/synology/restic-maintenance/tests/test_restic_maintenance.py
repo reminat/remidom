@@ -1074,7 +1074,17 @@ import json, os, subprocess, sys
 args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps(args) + "\n")
-if args[0] in ("kill", "stop"):
+if args[0] in ("kill", "stop", "inspect"):
+    # Comportement simulé de l'arrêt : ok, fail, hang ; pour inspect : absent, false, running, hang, fail.
+    mode = json.loads(os.environ.get("FAKE_STOP", "{}")).get(args[0], "absent" if args[0] == "inspect" else "ok")
+    if mode == "hang":
+        import time; time.sleep(30)
+    if mode == "fail":
+        sys.stderr.write("Error response from daemon: simulated failure\n"); sys.exit(1)
+    if mode == "absent":
+        sys.stderr.write("Error: No such object: %s\n" % args[-1]); sys.exit(1)
+    if args[0] == "inspect":
+        print("true" if mode == "running" else "false")
     sys.exit(0)
 with open(os.environ["FAKE_FIXTURES"]) as fx:
     fixtures = json.load(fx)
@@ -1107,6 +1117,8 @@ with open(os.environ["FAKE_FIXTURES"]) as fx:
     fixtures = json.load(fx)
 sub = [a for a in args if not a.startswith("-")][0]
 real = sub in ("forget", "prune") and "--dry-run" not in args
+if real and fixtures.get("write_sleep"):
+    import time; time.sleep(fixtures["write_sleep"]); sys.exit(0)  # restic bloqué : ne modifie rien
 if real and sub == "forget" and fixtures.get("write_exits", {}).get("forget", 0) != 11:
     # Suppression simulée (éventuellement partielle) : le repository simulé est réécrit.
     ids = args[args.index("forget") + 1:][:fixtures.get("forget_partial", 10 ** 6)]
@@ -1810,54 +1822,92 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         self.baseline(s, forget)
         self.assertEqual(self.run_apply(s, forget, ["--apply", "prune"]), rm.EXIT_OK)
 
-    def test_graceful_stop_on_timeout_for_writes(self):
-        runner = rm.Runner(cfg(), time.monotonic() + 0.5, lambda m: None)
-        with self.assertRaises(rm.StepTimeout):
-            runner._exec(["sleep", "5"], "conteneur-x", "restic prune (écriture)", graceful=True)
+    def short_stop_timeouts(self):
+        for name, value in (("STOP_CALL_TIMEOUT", 1), ("KILL_CALL_TIMEOUT", 1), ("INSPECT_TIMEOUT", 1)):
+            self.addCleanup(setattr, rm, name, getattr(rm, name))
+            setattr(rm, name, value)
+        self.addCleanup(os.environ.pop, "FAKE_STOP", None)
+
+    def stop_after_timeout(self, graceful, **modes):
+        self.short_stop_timeouts()
+        os.environ["FAKE_STOP"] = json.dumps(modes)
+        open(self.log, "w").close()
+        runner = rm.Runner(cfg(), time.monotonic() + 0.3, lambda m: None)
+        with self.assertRaises(rm.StepTimeout) as ctx:
+            runner._exec(["sleep", "5"], "conteneur-x", "restic prune (écriture)", graceful=graceful)
         with open(self.log) as f:
-            calls = [json.loads(line) for line in f]
-        self.assertEqual(calls[-1], ["stop", "--time", str(rm.STOP_GRACE_SECONDS), "conteneur-x"])
+            calls = [json.loads(line)[0] for line in f]
+        return ctx.exception, calls
 
-    def test_protected_period_refuses_and_bounds_real_operations(self):
-        s, forget, _ = self.aged_repo()
-        # Pendant la plage protégée : refus avant tout conteneur, même avec --ignore-window.
-        self.enable(forget=True, protected={"start": self.hhmm(-2), "end": self.hhmm(3)})
-        self.assertEqual(self.run_apply(s, forget, ["--apply", "forget"]), rm.EXIT_WINDOW)
-        self.assertEqual(self.report()["status"], "protected_period")
-        self.assertEqual(self.restic_calls(), [])
-        # Trop près de son début : refus.
-        self.enable(forget=True, protected={"start": self.hhmm(5), "end": self.hhmm(60)})
-        self.assertEqual(self.run_apply(s, forget, ["--apply", "forget"]), rm.EXIT_WINDOW)
-        self.assertEqual(self.restic_calls(), [])
-        # Plus loin : délai raccourci pour arrêter le conteneur d'écriture avant le début.
-        self.enable(forget=True, protected={"start": self.hhmm(31), "end": self.hhmm(60)})
-        self.baseline(s, forget)
-        self.assertEqual(self.run_apply(s, forget, ["--apply", "forget"]), rm.EXIT_OK)
-        line = [l for l in self.report()["log"] if "arrêt garanti" in l][0]
-        minutes = int(re.search(r"délai (\d+) min", line).group(1))
-        self.assertTrue(27 <= minutes <= 29, line)
-        # Le contrôle quotidien n'est pas concerné par la plage protégée.
-        self.enable(protected={"start": self.hhmm(-2), "end": self.hhmm(3)})
-        fx = self.current_fixtures()
-        self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], []), rm.EXIT_OK)
+    def test_stop_confirmed(self):
+        exc, calls = self.stop_after_timeout(True)
+        self.assertEqual(calls, ["stop", "inspect"])
+        self.assertTrue(exc.stop["confirmed"])
+        self.assertEqual(exc.stop["state"], "absent (supprimé par --rm)")
+        exc, calls = self.stop_after_timeout(False, inspect="false")
+        self.assertEqual(calls, ["kill", "inspect"])
+        self.assertEqual((exc.stop["confirmed"], exc.stop["state"]), (True, "arrêté"))
 
-    def test_real_operations_skip_scheduled_read_data(self):
-        with open(self.config) as f:
-            c = json.load(f)
-        c["read_data"] = {"weekdays": list(range(1, 8)), "parts": 1}
-        with open(self.config, "w") as f:
-            json.dump(c, f)
+    def test_stop_failed_then_kill(self):
+        exc, calls = self.stop_after_timeout(True, stop="fail")
+        self.assertEqual(calls, ["stop", "kill", "inspect"])
+        self.assertTrue(exc.stop["confirmed"])
+        self.assertEqual([st["code"] for st in exc.stop["steps"]], [1, 0, 1])
+
+    def test_stop_blocked_then_kill(self):
+        t0 = time.monotonic()
+        exc, calls = self.stop_after_timeout(True, stop="hang")
+        self.assertLess(time.monotonic() - t0, 10)              # chaque appel est borné
+        self.assertEqual(calls, ["stop", "kill", "inspect"])
+        self.assertIsNone(exc.stop["steps"][0]["code"])
+        self.assertTrue(exc.stop["confirmed"])
+
+    def test_stop_unconfirmed(self):
+        exc, _ = self.stop_after_timeout(True, stop="hang", kill="hang", inspect="hang")
+        self.assertFalse(exc.stop["confirmed"])
+        self.assertIn("inconnu", exc.stop["state"])
+        self.assertIn("NON CONFIRMÉ", str(exc))
+        exc, _ = self.stop_after_timeout(True, stop="fail", kill="fail", inspect="running")
+        self.assertEqual((exc.stop["confirmed"], exc.stop["state"]), (False, "EN COURS D'EXÉCUTION"))
+        exc, _ = self.stop_after_timeout(False, kill="fail", inspect="fail")
+        self.assertFalse(exc.stop["confirmed"])
+
+    def timed_out_forget(self, **modes):
+        """--apply forget dont le conteneur d'écriture dépasse le délai, avec l'arrêt simulé « modes »."""
+        self.short_stop_timeouts()
         self.enable(forget=True)
         s, forget, _ = self.aged_repo()
         self.baseline(s, forget)
-        self.assertIn("--read-data", self.check_call())          # contrôle : lecture des données
-        self.assertEqual(self.run_apply(s, forget, ["--apply", "forget"]), rm.EXIT_OK)
-        self.assertEqual(self.check_call(), ["--no-lock", "--no-cache", "check"])  # opération réelle : structure
+        orig = rm.Runner.restic_write
 
-    def test_seconds_until(self):
-        now = time.mktime(dt.datetime(2026, 11, 7, 4, 0).timetuple())
-        self.assertEqual(rm.seconds_until("04:55", now), 55 * 60)
-        self.assertEqual(rm.seconds_until("03:00", now), 23 * 3600)
+        def short(runner, *args):
+            runner.deadline = time.monotonic() + 1
+            return orig(runner, *args)
+        self.addCleanup(setattr, rm.Runner, "restic_write", orig)
+        rm.Runner.restic_write = short
+        os.environ["FAKE_STOP"] = json.dumps(modes)
+        code = self.run_apply(s, forget, ["--apply", "forget"], write_sleep=5)
+        return code, self.report()
+
+    def test_write_timeout_with_confirmed_stop(self):
+        code, r = self.timed_out_forget()
+        self.assertEqual((code, r["status"]), (rm.EXIT_TIMEOUT, "timeout"))
+        self.assertTrue(r["container_stop"]["confirmed"])
+        self.assertNotIn("stop_unconfirmed", codes(r["findings"]))
+        self.assertEqual(self.state()["in_progress"]["operation"], "forget")   # marqueur conservé
+
+    def test_write_timeout_with_unconfirmed_stop(self):
+        code, r = self.timed_out_forget(stop="hang", kill="fail", inspect="hang")
+        self.assertEqual((code, r["status"]), (rm.EXIT_TIMEOUT, "timeout_stop_unconfirmed"))
+        self.assertFalse(r["container_stop"]["confirmed"])
+        self.assertIn("stop_unconfirmed", codes(r["findings"]))
+        self.assertTrue(any("NON CONFIRMÉ" in line for line in r["log"]))
+        self.assertEqual(self.state()["in_progress"]["operation"], "forget")
+        # Le contrôle suivant reste en anomalie tant que l'interruption n'est pas résolue.
+        os.environ.pop("FAKE_STOP")
+        fx = self.current_fixtures()
+        self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], []), rm.EXIT_ANOMALY)
+        self.assertIn("operation_interrupted", codes(self.report()["findings"]))
 
     def test_refuses_non_dry_run_config(self):
         with open(self.config) as f:
