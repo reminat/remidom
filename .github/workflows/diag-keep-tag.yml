@@ -1,0 +1,116 @@
+name: Diag — keep-tag (VM jetable)
+
+on:
+  push:
+    branches: [diag/restic-apply-review]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  IMAGE: restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+  REPO: /volume1/Restic/docker-prod
+  SECRET: /volume1/docker/restic-maintenance/secrets/restic_password_prod
+
+jobs:
+  review:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: "3.8"
+      - name: Préparation (dépôt jetable, 40 sauvegardes antidatées)
+        run: |
+          docker pull -q "$IMAGE"
+          sudo tee /usr/local/bin/docker >/dev/null <<'EOF'
+          #!/bin/bash
+          if [ "$1" = run ] && [ -e /tmp/throttle ] && printf '%s\n' "$@" | grep -qx -- --user; then
+            shift; exec /usr/bin/docker run --cpus="$(cat /tmp/throttle)" "$@"
+          fi
+          exec /usr/bin/docker "$@"
+          EOF
+          sudo chmod 755 /usr/local/bin/docker
+          sudo mkdir -p "$REPO" "$(dirname "$SECRET")" /srv/docker/core
+          head -c 32 /dev/urandom | base64 | sudo tee "$SECRET" >/dev/null; sudo chmod 600 "$SECRET"
+          R="sudo /usr/bin/docker run --rm -v $REPO:/repo -v $SECRET:/pw:ro -v /srv/docker/core:/srv/docker/core:ro -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/pw"
+          $R "$IMAGE" init -q
+          for f in $(seq 1 40); do sudo sh -c "head -c 256K /dev/urandom > /srv/docker/core/f$f"; done
+          for d in $(seq 39 -1 0); do
+            for f in $(seq 1 2 40); do sudo sh -c "head -c 256K /dev/urandom > /srv/docker/core/f$(( (f + d) % 40 + 1 ))"; done
+            $R --hostname docker-prod-01 "$IMAGE" backup -q --host docker-prod-01 --tag core --tag prod --time "$(date -u -d "-$d days -1 hour" '+%Y-%m-%d %H:%M:%S')" /srv/docker/core
+          done
+          echo "dépôt : $(sudo du -sh "$REPO" | cut -f1), 40 snapshots"
+          D="$RUNNER_TEMP/d"; mkdir -p "$D"; cp services/synology/restic-maintenance/restic_maintenance.py "$D/"
+          sha256sum "$D/restic_maintenance.py"
+          cat > "$D/base.json" <<EOF
+          {"name": "docker-prod", "mode": "dry-run", "image": "$IMAGE", "expected_restic_version": "0.19.1",
+           "repository": "$REPO", "password_file": "$SECRET", "private_dir": "/root/restic-maintenance/docker-prod",
+           "keep_reports": 90, "run_check": true, "read_data": {"weekdays": [1,2,3,4,5,6,7], "parts": 1},
+           "apply": {"forget": true, "prune": true, "prune_max_unused": "5%", "repository_owner": "0:0",
+                     "protected": {"start": "PSTART", "end": "PEND"}},
+           "groups": [{"name": "core", "host": "docker-prod-01", "paths": ["/srv/docker/core"], "tags": ["core", "prod"]}],
+           "retention": {"keep_within": "30d", "keep_daily": 14, "keep_weekly": 8, "keep_monthly": 12, "keep_tags": ["keep"]},
+           "window": {"start": "01:00", "end": "04:30"}, "timeout_minutes": 120,
+           "thresholds": {"max_future_skew_minutes": 60, "max_age_hours": 48, "max_snapshots_per_24h": 6,
+                          "backdate_tolerance_hours": 24, "max_remove_count": 10, "max_remove_percent": 20,
+                          "min_keep_per_group": 7}}
+          EOF
+      - name: Scénarios keep-tag
+        run: |
+          set +o pipefail
+          PY="${{ steps.py.outputs.python-path }}"; D="$RUNNER_TEMP/d"
+          sed "s/PSTART/$(date -d '300 min' +%H:%M)/; s/PEND/$(date -d '360 min' +%H:%M)/" "$D/base.json" > "$D/config.json"
+          run() { set +e; sudo "$PY" -I "$D/restic_maintenance.py" --config "$D/config.json" --ignore-window "$@" > /tmp/out.txt 2>&1; c=$?; set -e
+                  sudo sh -c 'cat "$(ls -1 /root/restic-maintenance/docker-prod/logs/report-*.json | tail -1)"' > /tmp/r.json
+                  python3 - "$c" <<'EOF'
+          import json, sys
+          r = json.load(open("/tmp/r.json"))
+          lv = lambda l: sorted({x["code"] for x in r["findings"] if x["level"] == l})
+          a = r.get("apply") or {}
+          print("  → code %s | %s | ERROR %s | INFO %s%s" % (sys.argv[1], r["status"], lv("ERROR") or "-", lv("INFO") or "-",
+                " | supprimés %d" % len(a.get("removed") or []) if a else ""))
+          EOF
+                  grep -E "retagged|SUPPRIMÉ|removal_not|forget :" /tmp/out.txt | sed 's/^[0-9-]* /    /' | head -9 || true; }
+          SECRET_RO="-v $SECRET:/run/secrets/restic_password:ro -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password"
+          # Commandes du README « Protéger un snapshot », à l'identique (sudo docker = /usr/local/bin/docker, sans ralentissement)
+          RO="sudo docker run --rm --pull never --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH --security-opt no-new-privileges -v $REPO:/repo:ro $SECRET_RO $IMAGE --no-lock --no-cache"
+          echo "### K1 référence"; run --init-baseline
+          CANDS=$($RO forget --dry-run --json --group-by host,paths --keep-within 30d --keep-daily 14 --keep-weekly 8 --keep-monthly 12 | python3 -c 'import sys,json; print(" ".join(s["id"] for g in json.load(sys.stdin) for s in sorted(g["remove"], key=lambda s: s["time"])))')
+          OLD=$(echo $CANDS | cut -d' ' -f1); echo "  candidats sans keep-tag : $(echo $CANDS | wc -w) ; snapshot à protéger : ${OLD:0:8} (le plus ancien candidat)"
+          echo "### K2 marquage par identifiant complet (commande du README)"
+          echo "  verrous : $($RO list locks | wc -l)"
+          $RO snapshots --json ${OLD:0:8} | python3 -I -c 'import sys,json; [print("  avant :", s["id"], s["time"], s["tags"], "tree", s["tree"][:12]) for s in json.load(sys.stdin)]'
+          ID="$OLD"; case "$ID" in *[!0-9a-f]*) echo "identifiant invalide";; *) [ ${#ID} -eq 64 ] && echo "  identifiant OK";; esac
+          sudo docker run --rm --pull never --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --hostname restic-tag --user 0:0 --cap-drop ALL --cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges -v $REPO:/repo $SECRET_RO \
+            $IMAGE --no-cache tag --add keep "$ID" 2>&1 | sed 's/^/  restic tag : /'
+          $RO snapshots --json --tag keep | python3 -I -c 'import sys,json; [print("  après :", s["id"], "original", s.get("original"), s["time"], s["tags"], "tree", s["tree"][:12]) for s in json.load(sys.stdin)]'
+          echo "  ancien identifiant encore présent : $($RO snapshots --json | python3 -c "import sys,json; print(any(s['id']=='$OLD' for s in json.load(sys.stdin)))")"
+          echo "  verrous : $($RO list locks | wc -l)"
+          NEW=$($RO snapshots --json --tag keep | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"])')
+          echo "### K3 contrôle quotidien après marquage"; run
+          sudo cat /root/restic-maintenance/docker-prod/state/state.json | python3 -c "import sys,json; ids=json.load(sys.stdin)['snapshot_ids']; print('  référence : %d ids, nouveau présent %s, ancien présent %s' % (len(ids), '$NEW' in ids, '$OLD' in ids))"
+          echo "### K4 politique avec --keep-tag keep (restic direct)"
+          $RO forget --dry-run --json --group-by host,paths --keep-within 30d --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --keep-tag keep | python3 -c "
+          import sys, json
+          g = json.load(sys.stdin)[0]
+          print('  conservés %d, à supprimer %d' % (len(g['keep']), len(g['remove'])))
+          print('  marqué dans keep : %s ; raisons : %s' % (any(s['id'] == '$NEW' for s in g['keep']), [r['matches'] for r in g['reasons'] if r['snapshot']['id'] == '$NEW']))"
+          echo "### K5 --apply forget"; run --apply forget
+          LEFT=$($RO snapshots --json | python3 -c 'import sys,json; print(" ".join(s["id"] for s in json.load(sys.stdin)))')
+          python3 - "$CANDS" "$LEFT" "$OLD" "$NEW" <<'EOF'
+          import sys
+          cands, left, old, new = set(sys.argv[1].split()), set(sys.argv[2].split()), sys.argv[3], sys.argv[4]
+          print("  snapshots restants %d ; marqué présent %s ; candidats non protégés restants %d ; supprimés hors candidats %d"
+                % (len(left), new in left, len((cands - {old}) & left), 40 - len(cands - {old}) - len(left)))
+          EOF
+          echo "### K6 contrôle quotidien final"; run
+          set +e; $RO check > /tmp/c.txt 2>&1; echo "  restic check : code $? ($(tail -1 /tmp/c.txt))"; set -e

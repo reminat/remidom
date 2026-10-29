@@ -1,8 +1,7 @@
 name: Diag — revue PR 17 (VM jetable)
 
 on:
-  push:
-    branches: [diag/restic-apply-review]
+  workflow_dispatch:  # runs du 29/10 conservés ; pas de relance automatique
 
 permissions:
   contents: read
