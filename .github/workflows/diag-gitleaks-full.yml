@@ -1,0 +1,33 @@
+name: Diag — gitleaks-full (sans déploiement)
+
+on:
+  push:
+    branches: [diag/ci-gitleaks]
+
+permissions:
+  contents: read
+
+jobs:
+  full-scan:
+    uses: ./.github/workflows/gitleaks-full.yml
+
+  detection:
+    name: Détection d'un secret factice (commit local, jamais poussé)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_VERSION: 8.24.3
+      - name: Secret factice dans un commit local, puis analyse complète
+        run: |
+          git -c user.name=diag -c user.email=diag@example.invalid commit -q --allow-empty -m base
+          printf 'token = "ghp_%s"\n' "$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 36)" > fake.txt
+          git add fake.txt && git -c user.name=diag -c user.email=diag@example.invalid commit -q -m "secret factice"
+          set +e; /tmp/gitleaks-8.24.3/gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --exit-code 2 > out.txt 2>&1; c=$?; set -e
+          grep -E "RuleID|leaks found|commits scanned" out.txt | sed 's/\x1b\[[0-9;]*m//g'
+          echo "code de sortie : $c (attendu 2)"; [ "$c" -eq 2 ]
