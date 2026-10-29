@@ -769,8 +769,9 @@ Ansible n'utilise pas `sudo` : ces étapes sont manuelles. Ne modifier ni les AC
 Workflow **NAS — Restic maintenance** (`.github/workflows/nas-restic-maintenance.yml`),
 déclenché uniquement à la main, indépendant du workflow `Deploy`. GitHub ne propose un
 `workflow_dispatch` qu'une fois le fichier présent sur `main` : le premier usage suppose
-le merge, qui ne touche pas le NAS (le `Deploy` prod déclenché par ce merge peut être
-rejeté).
+le merge, qui ne touche pas le NAS (et ne déclenche plus aucun déploiement applicatif :
+la prod se déploie par lancement manuel, voir `infra/ansible/HOWTO.md`). Le workflow
+commence par une analyse Gitleaks complète ; la prod n'est acceptée que depuis `main`.
 
 1. *Actions → NAS — Restic maintenance → Run workflow*, `apply` décoché :
    exécute `ansible-playbook --check --diff` (aucune écriture sur le NAS).

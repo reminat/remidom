@@ -107,9 +107,35 @@ Les volumes Docker sont isolés par VM : `/srv/docker/core` existe indépendamme
 
 ## GitHub Actions — Self-hosted runner
 
-Le runner tourne sur `docker-prod` et exécute les déploiements automatiquement :
-- Push sur `feature/**` → deploy sur `test`
-- Push sur `main` → deploy sur `prod`
+Les runners auto-hébergés (`docker-test-01` pour `test`, `docker-prod` pour `prod`)
+exécutent les déploiements :
+
+| Déclencheur | Effet |
+|---|---|
+| Push sur `feature/**` touchant des fichiers applicatifs (`services/docker`, `services/ha`, `infra/ansible` hors NAS, hors `*.md`) | deploy sur `test` |
+| Push sur `feature/**` ne touchant que le NAS ou la documentation | rien |
+| Merge / push sur `main` | **rien** (seul le scan Gitleaks tourne) |
+| *Actions → Deploy → Run workflow*, `test` | deploy sur `test` |
+| *Actions → Deploy → Run workflow* depuis `main`, `prod` | deploy sur `prod` après **approbation** de l'environnement `prod` ; refusé depuis une autre branche |
+| *Actions → NAS — Restic maintenance* | NAS (`test` ou `prod`, prod depuis `main` uniquement), après approbation pour `prod` |
+
+Chaque déploiement (applicatif ou NAS) commence par une analyse Gitleaks de **tout
+l'historique** (`.github/workflows/gitleaks-full.yml`) ; une fuite bloque le déploiement.
+
+### Réglages GitHub attendus (dépôt public)
+
+À vérifier dans *Settings* ; ils ne sont pas versionnés.
+
+- **Environments → prod** : *Required reviewers* = `reminat` ; *Deployment branches and
+  tags* = *Selected branches* `main` ; décocher *Allow administrators to bypass configured
+  protection rules*.
+- **Rules → Rulesets** : ruleset actif sur `main` (*Default branch*) : *Restrict
+  deletions*, *Block force pushes*, *Require a pull request before merging* (0 approbation
+  requise suffit pour un compte seul), *Require status checks to pass* : `Gitleaks`
+  (workflow *Secrets Scan*), *Require branches to be up to date*. Aucun contournement.
+- Ces protections (approbation d'environnement, rulesets) ne sont pas disponibles sur
+  un dépôt **privé** avec l'offre GitHub Free : repasser le dépôt en privé les
+  désactiverait sans avertissement.
 
 ### Prérequis (une seule fois)
 

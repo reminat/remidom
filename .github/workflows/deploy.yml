@@ -1,10 +1,26 @@
 name: Deploy
 
+# test : automatique au push sur feature/**, seulement si des fichiers applicatifs changent
+#        (les changements NAS seuls ne déclenchent rien) ; ou lancement manuel.
+# prod : uniquement par lancement manuel depuis main (jamais au merge), après approbation
+#        de l'environnement GitHub « prod ».
+# Toujours après une analyse Gitleaks de tout l'historique (gitleaks-full.yml).
 on:
   push:
     branches:
       - 'feature/**'
-      - main
+    paths:
+      - 'services/docker/**'
+      - 'services/ha/**'
+      - 'infra/ansible/**'
+      - '.github/workflows/deploy.yml'
+      - '.github/workflows/gitleaks-full.yml'
+      - '!infra/ansible/playbooks/nas.yml'
+      - '!infra/ansible/playbooks/group_vars/nas.yml'
+      - '!infra/ansible/inventories/*/group_vars/nas.yml'
+      - '!infra/ansible/roles/restic_maintenance/**'
+      - '!infra/ansible/nas_known_hosts'
+      - '!**/*.md'
   workflow_dispatch:
     inputs:
       environment:
@@ -14,10 +30,21 @@ on:
         type: choice
         options: [test, prod]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'test' }}
+  cancel-in-progress: false
+
 jobs:
+  gitleaks:
+    uses: ./.github/workflows/gitleaks-full.yml
+
   deploy-test:
     name: Deploy → test
-    if: github.ref != 'refs/heads/main'
+    needs: gitleaks
+    if: github.event_name == 'push' || inputs.environment == 'test'
     runs-on: [self-hosted, homelab, test]
     environment: test
     steps:
@@ -43,10 +70,17 @@ jobs:
 
   deploy-prod:
     name: Deploy → prod
-    if: github.ref == 'refs/heads/main'
+    needs: gitleaks
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'prod'
     runs-on: [self-hosted, homelab, prod]
     environment: prod
     steps:
+      - name: Refuser une autre référence que main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "prod : lancement manuel depuis main uniquement (référence : $GITHUB_REF)" >&2
+          exit 1
+
       - uses: actions/checkout@v4
 
       - name: Setup SSH agent

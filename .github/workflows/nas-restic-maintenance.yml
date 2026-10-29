@@ -25,11 +25,21 @@ permissions:
   contents: read
 
 jobs:
+  gitleaks:
+    uses: ./.github/workflows/gitleaks-full.yml
+
   deploy:
     name: Restic maintenance → NAS (${{ inputs.environment }})
+    needs: gitleaks
     runs-on: [self-hosted, homelab, "${{ inputs.environment }}"]
     environment: ${{ inputs.environment }}
     steps:
+      - name: Refuser une autre référence que main pour la prod
+        if: inputs.environment == 'prod' && github.ref != 'refs/heads/main'
+        run: |
+          echo "NAS prod : lancement depuis main uniquement (référence : $GITHUB_REF)" >&2
+          exit 1
+
       - uses: actions/checkout@v4
 
       # Clé dédiée au NAS (secret de l'environnement GitHub, pas ANSIBLE_SSH_KEY).
