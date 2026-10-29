@@ -1,7 +1,7 @@
 # Connexion au NAS : playbooks/group_vars/nas.yml (commune aux environnements).
 
 # Maintenance Restic du repository docker-prod. Contrôle quotidien en dry-run ; opérations
-# réelles (forget, prune) désactivées tant que restic_maintenance_apply n'est pas surchargé ici.
+# réelles (forget, prune) activées ci-dessous, lancées seulement par les tâches DSM dédiées.
 # Même politique de rétention et mêmes seuils que le test (valeurs par défaut du rôle).
 restic_maintenance_name: docker-prod
 restic_maintenance_repository: /volume1/Restic/docker-prod
@@ -13,3 +13,16 @@ restic_maintenance_groups:
     host: docker-prod-01
     paths: [/srv/docker/core]
     tags: [core, prod]
+
+# Opérations réelles. À ne merger qu'après : relevé du repository docker-prod (propriétaire
+# ci-dessous), conditions du README « Droits des fichiers écrits par restic » (Hyper Backup
+# validé, lecteurs identifiés) et marquage keep de 75eeb351 reconnu au contrôle.
+restic_maintenance_apply:
+  forget: true
+  prune: true
+  prune_max_unused: "5%"
+  repository_owner: "0:0"      # à confirmer par le relevé de docker-prod
+  # Provisoire : fin à confirmer selon la durée réelle de Hyper Backup (06:00).
+  protected:
+    start: "04:55"
+    end: "08:00"
