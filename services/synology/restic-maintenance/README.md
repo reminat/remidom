@@ -670,20 +670,56 @@ localement : packs et index de `prune`, verrous, et snapshot réécrit par `rest
 |---|---|
 | REST Server (root, `DAC_OVERRIDE`) | lecture normale (validé : `check --read-data` via REST) |
 | Maintenance du NAS (root, `DAC_READ_SEARCH`) | lecture normale (contrôle final `ok`) |
-| Hyper Backup, snapshots Btrfs | tournent en root / au niveau du volume : non affectés en principe ; **à confirmer** par la prochaine exécution de Hyper Backup (journal sans fichier ignoré ni erreur de droits sous `/volume1/Restic`) |
-| Comptes de l'ACL (`administrators`, `remi`, `restic`) en SMB, File Station, `rsync` sans `sudo` | **plus de lecture** de ces fichiers : une copie faite ainsi serait incomplète, sans erreur visible selon l'outil. Copier le repository uniquement en root, par Hyper Backup ou depuis un snapshot Btrfs |
+| Hyper Backup | **non validé** : tourne en principe avec des droits système ; à confirmer (journal sans fichier ignoré ni erreur de droits, et restauration d'un fichier réécrit, voir ci-dessous) |
+| Snapshots Btrfs | conservent les fichiers **avec leurs droits** (`root:root 0400`, mode Linux) : ils ne donnent, à eux seuls, **aucun accès en lecture supplémentaire**. Lire dans un snapshot exige les mêmes droits (root) ; une restauration depuis un snapshot rétablit ces mêmes droits |
+| Comptes de l'ACL (`administrators`, `remi`, `restic`) en SMB, File Station, `rsync` sans `sudo` | **plus de lecture** de ces fichiers, y compris dans les snapshots Btrfs : une copie faite ainsi serait incomplète, sans erreur visible selon l'outil. Copier le repository uniquement en root, ou par Hyper Backup une fois validé |
 | Suppression | dépend des droits du **dossier** (ACL inchangée) : un compte qui peut écrire dans `data/xx/` peut toujours supprimer ces fichiers ; le mode `0400` ne les protège pas |
 | Restauration Hyper Backup | restaure les droits sauvegardés (fichiers en mode Linux `0400`) : sans effet pour le REST Server sous root |
 
-**Décision proposée : acceptation documentée**, sans correction des droits :
-- aucun lecteur légitime n'est affecté (REST Server, maintenance, Hyper Backup en root) ;
-- une correction devrait réappliquer l'ACL fichier par fichier après chaque écriture
-  (`synoacltool`, exécuté en root par le script) : du code de plus en root, pour rendre ces
-  fichiers à nouveau modifiables par les administrateurs, ce qui n'apporte rien ;
-- le compte `restic` de l'ACL : vérifier qu'aucun processus ne lit le repository sous ce
-  compte (sinon il perdrait l'accès aux fichiers réécrits).
+**Décision proposée : acceptation conditionnelle**, sans correction des droits. Elle ne
+vaut qu'une fois les deux conditions remplies ; d'ici là, aucune écriture locale en prod
+(`--apply prune`, `restic tag`) :
 
-Conditions qui en découlent : **le REST Server doit rester sous root** (vérification à
+1. **Hyper Backup validé** sur les fichiers réécrits de `docker-test` : exécution
+   suivante sans fichier ignoré ni erreur de droits sous `/volume1/Restic` (journal de la
+   tâche dans DSM), **et** restauration d'un index en `0400` vers un dossier séparé, avec
+   empreinte identique à l'original (commandes ci-dessous). Relever au passage la durée de
+   la tâche (fin de `apply.protected`, provisoirement 08:00).
+2. **Lecteurs du repository identifiés** : tout compte, tâche ou processus qui lit
+   `/volume1/Restic` doit tourner en root, sinon il perd l'accès aux fichiers réécrits.
+   Connus : REST Server (root), maintenance (root). À identifier : le compte `restic` de
+   l'ACL, le partage SMB, les tâches DSM (Hyper Backup, Cloud Sync, rsync, Snapshot
+   Replication), les processus qui ont des fichiers ouverts.
+
+Si une condition échoue, la correction minimale serait de réappliquer l'ACL héritée
+**fichier par fichier** sur les seuls fichiers écrits par une opération réelle (liste des
+fichiers postérieurs à son début, `synoacltool`), jamais récursivement ; elle n'est pas
+préparée tant que le besoin n'est pas établi (elle rendrait aussi ces fichiers à nouveau
+modifiables par les administrateurs).
+
+Commandes (lecture seule ; la restauration Hyper Backup se fait dans DSM, vers un dossier
+dédié, par exemple `/volume1/Restic-restore-test`, jamais par-dessus `/volume1/Restic`) :
+```sh
+# Fichier réécrit à restaurer et son empreinte de référence
+R=/volume1/Restic/docker-test
+F=$(sudo find "$R/index" -type f -perm 0400 | head -n 1); echo "$F"; sudo sha256sum "$F"
+# Après la restauration Hyper Backup de ce fichier dans le dossier de test :
+sudo sha256sum "/volume1/Restic-restore-test/<chemin restauré>"; sudo stat -c '%U:%G %a %n' "/volume1/Restic-restore-test/<chemin restauré>"
+
+# Lecteurs possibles du repository
+sudo synoacltool -get /volume1/Restic
+id restic; sudo synouser --get restic 2>/dev/null | grep -iE 'name|expired|group' 
+sudo synoshare --get Restic 2>/dev/null | grep -iE 'path|browseable|hidden|acl|recycle'
+sudo sqlite3 -readonly /usr/syno/etc/esynoscheduler/esynoscheduler.db \
+  "SELECT id, task_name, owner, enable FROM task WHERE operation LIKE '%Restic%';"
+# Processus ayant un fichier ouvert sous /volume1/Restic (instantané)
+for p in /proc/[0-9]*; do sudo find "$p/fd" -lname '/volume1/Restic*' 2>/dev/null | grep -q . && \
+  ps -o pid=,user=,comm= -p "${p#/proc/}"; done | sort -u
+```
+Tâches Hyper Backup, Cloud Sync, rsync et Snapshot Replication : vérifier dans DSM leurs
+sources et le compte d'exécution.
+
+Conditions permanentes, une fois l'acceptation acquise : **le REST Server doit rester sous root** (vérification à
 chaque modification de son conteneur : `docker exec <rest-server> id`) ; pas de
 « réinitialisation des droits » DSM récursive sur `/volume1/Restic` sans nouvelle analyse.
 Suivi, en lecture seule :
