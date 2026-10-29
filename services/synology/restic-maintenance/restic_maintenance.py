@@ -58,6 +58,10 @@ REPO_ENTRIES = ("config", "data", "index", "keys", "locks", "snapshots")
 RESTIC_EXIT_LOCKED = 11
 # Arrêt d'une opération réelle au délai : SIGTERM (restic libère son verrou), puis SIGKILL.
 STOP_GRACE_SECONDS = 60
+# Délais des commandes d'arrêt elles-mêmes (le démon Docker peut ne plus répondre).
+STOP_CALL_TIMEOUT = STOP_GRACE_SECONDS + 30
+KILL_CALL_TIMEOUT = 30
+INSPECT_TIMEOUT = 15
 
 EXIT_OK = 0
 EXIT_ANOMALY = 1
@@ -92,7 +96,11 @@ class StepError(Exception):
 
 
 class StepTimeout(Exception):
-    pass
+    """Délai dépassé. stop : résultat de l'arrêt du conteneur (None si aucun conteneur n'était lancé)."""
+
+    def __init__(self, message, stop=None):
+        Exception.__init__(self, message)
+        self.stop = stop
 
 
 class UnsafeMounts(Exception):
@@ -804,13 +812,9 @@ class Runner:
         try:
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=remaining)
         except subprocess.TimeoutExpired:
-            if graceful:
-                # docker stop : SIGTERM (restic annule et retire son verrou), SIGKILL après le délai de grâce.
-                subprocess.run([DOCKER_BIN, "stop", "--time", str(STOP_GRACE_SECONDS), name],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                subprocess.run([DOCKER_BIN, "kill", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            raise StepTimeout("délai global dépassé pendant « %s »" % label)
+            stop = self.stop_container(name, graceful)
+            raise StepTimeout("délai global dépassé pendant « %s » ; arrêt du conteneur %s"
+                              % (label, "confirmé" if stop["confirmed"] else "NON CONFIRMÉ"), stop)
         stderr = proc.stderr.decode("utf-8", "replace").strip()
         if proc.returncode == GATE_EXIT and GATE_MARKER in stderr:
             raise UnsafeMounts("%s : barrière du conteneur : %s" % (label, stderr[-500:]))
@@ -818,6 +822,46 @@ class Runner:
             raise ResticFailed("%s a échoué (code %d) : %s" % (label, proc.returncode, stderr[-2000:]),
                                proc.returncode)
         return proc.stdout.decode("utf-8", "replace")
+
+    def _docker(self, args, timeout):
+        """Commande Docker bornée : (code, sortie) ; code None si elle n'a pas répondu à temps."""
+        try:
+            proc = subprocess.run([DOCKER_BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None, "sans réponse après %d s" % timeout
+        except OSError as exc:
+            return None, str(exc)
+        out = (proc.stdout + proc.stderr).decode("utf-8", "replace").strip()
+        return proc.returncode, out[-300:]
+
+    def stop_container(self, name, graceful):
+        """Arrête le conteneur et confirme qu'il ne tourne plus. Chaque étape est bornée dans le temps.
+        graceful : docker stop (SIGTERM, restic retire son verrou ; SIGKILL après le délai de grâce),
+        puis docker kill en secours ; sinon docker kill directement."""
+        steps = []
+        if graceful:
+            code, out = self._docker(["stop", "--time", str(STOP_GRACE_SECONDS), name], STOP_CALL_TIMEOUT)
+            steps.append({"command": "stop", "code": code, "output": out})
+        if not graceful or steps[-1]["code"] != 0:
+            code, out = self._docker(["kill", name], KILL_CALL_TIMEOUT)
+            steps.append({"command": "kill", "code": code, "output": out})
+        code, out = self._docker(["inspect", "-f", "{{.State.Running}}", name], INSPECT_TIMEOUT)
+        if code == 0 and out == "false":
+            state = "arrêté"
+        elif code is not None and code != 0 and "no such" in out.lower():
+            state = "absent (supprimé par --rm)"
+        elif code == 0 and out == "true":
+            state = "EN COURS D'EXÉCUTION"
+        else:
+            state = "inconnu (%s)" % out
+        steps.append({"command": "inspect", "code": code, "output": out})
+        stop = {"container": name, "confirmed": state.startswith(("arrêté", "absent")), "state": state,
+                "steps": steps}
+        self.log("arrêt du conteneur %s : %s (%s)" % (name, state, ", ".join(
+            "%s → %s" % (st["command"], "sans réponse" if st["code"] is None else "code %d" % st["code"])
+            for st in steps)))
+        return stop
 
     def mounts(self, write=False):
         name = self._name()
@@ -1226,7 +1270,7 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
         log(str(exc))
         return finish("unsafe_mounts", EXIT_CONFIG)
     except StepTimeout as exc:
-        log(str(exc))
+        record_timeout(report, log, exc)
         return finish("timeout", EXIT_TIMEOUT)
     except (StepError, ValueError) as exc:
         log(str(exc))
@@ -1285,6 +1329,21 @@ def run(cfg, opts, log, lines, state_fd, log_fd):
                            removal if opts.apply == "forget" else [])
 
 
+def record_timeout(report, log, exc):
+    """Délai dépassé : consigne l'arrêt du conteneur ; s'il n'est pas confirmé, le signale explicitement."""
+    log(str(exc))
+    if exc.stop is None:
+        return
+    report["container_stop"] = exc.stop
+    if not exc.stop["confirmed"]:
+        report["findings"].append(finding("ERROR", "stop_unconfirmed",
+                                          "conteneur %s : arrêt non confirmé, état %s ; vérifier « docker ps » et le"
+                                          " démon Docker avant toute autre action" % (exc.stop["container"],
+                                                                                    exc.stop["state"])))
+        log("ERROR stop_unconfirmed : ARRÊT DU CONTENEUR %s NON CONFIRMÉ (%s)"
+            % (exc.stop["container"], exc.stop["state"]))
+
+
 def removal_problems(cfg, snapshots, removal):
     """Chaque suppression doit viser un identifiant complet, présent, d'un groupe déclaré et non figé."""
     by_id = {sn.get("id"): sn for sn in snapshots}
@@ -1334,7 +1393,7 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
         log(str(exc))
         return finish("unsafe_mounts", EXIT_CONFIG)
     except StepTimeout as exc:
-        log(str(exc))
+        record_timeout(report, log, exc)
         return finish("timeout", EXIT_TIMEOUT)
     except (StepError, ValueError) as exc:
         log(str(exc))
@@ -1355,7 +1414,11 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
             return
         try:
             left = {sn["id"] for sn in parse_json_output(runner.restic("snapshots", "--json")) or []}
-        except (StepError, StepTimeout, UnsafeMounts, ValueError) as exc:
+        except StepTimeout as exc:
+            record_timeout(report, log, exc)
+            log("constat impossible : délai dépassé")
+            return
+        except (StepError, UnsafeMounts, ValueError) as exc:
             log("constat impossible : %s" % exc)
             return
         result["removed"] = sorted(set(removal) - left)
@@ -1385,8 +1448,10 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
         write_json_at(state_fd, "state.json", clean_state)
         return finish("unsafe_mounts", EXIT_CONFIG)
     except StepTimeout as exc:
-        log(str(exc))
+        record_timeout(report, log, exc)
         log("OPÉRATION INTERROMPUE : marqueur conservé dans la référence (voir « Opération interrompue »)")
+        if exc.stop is not None and not exc.stop["confirmed"]:
+            return finish("timeout_stop_unconfirmed", EXIT_TIMEOUT)
         return finish("timeout", EXIT_TIMEOUT)
     except StepError as exc:
         log(str(exc))
@@ -1401,7 +1466,10 @@ def apply_operation(cfg, op, runner, state_fd, report, log, finish, started, sna
         locks = runner.restic("list", "locks").split()
         runner.restic("check")
     except (StepError, StepTimeout, UnsafeMounts, ValueError) as exc:
-        log(str(exc))
+        if isinstance(exc, StepTimeout):
+            record_timeout(report, log, exc)
+        else:
+            log(str(exc))
         log("VÉRIFICATION APRÈS %s IMPOSSIBLE OU EN ÉCHEC : marqueur conservé" % op.upper())
         return finish("apply_unverified", EXIT_RESTIC)
     expected = before - set(removal)

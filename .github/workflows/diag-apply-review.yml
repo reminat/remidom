@@ -106,7 +106,8 @@ jobs:
           echo "  $(date +%H:%M:%S) verrou pris ; SIGSTOP de ${W:-?}"; sudo /usr/bin/docker kill --signal STOP "$W" >/dev/null 2>&1 || echo "  (conteneur déjà terminé)"
           wait; rm -f /tmp/throttle; END=$(date +%s)
           echo "  script : code $(cat /tmp/bg.code), fin $(date -d @$END +%H:%M:%S), plage protégée à $(date -d @$PSTART +%H:%M:%S) : $(( PSTART - END )) s avant"
-          grep -E "arrêt garanti|délai|INTERROMPUE|statut" /tmp/bg.txt | sed 's/^/    /'
+          grep -E "arrêt garanti|délai|arrêt du conteneur|NON CONFIRMÉ|INTERROMPUE|statut" /tmp/bg.txt | sed 's/^/    /'
+          sudo sh -c 'cat "$(ls -1 /root/restic-maintenance/docker-prod/logs/report-*.json | tail -1)"' | python3 -c 'import sys,json; c=json.load(sys.stdin).get("container_stop"); print("  rapport container_stop : confirmé=%s, état=%s, étapes=%s" % (c["confirmed"], c["state"], [(x["command"], x["code"], x["output"][:60]) for x in c["steps"]]))'
           echo "  conteneurs restic restants : $(sudo /usr/bin/docker ps -aq --filter name=restic-maint | wc -l)"
           state; locks
           set +e; $R "$IMAGE" --no-lock check > /tmp/c.txt 2>&1; echo "  restic check : code $? ($(tail -1 /tmp/c.txt))"; set -e
