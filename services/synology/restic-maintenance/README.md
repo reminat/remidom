@@ -4,13 +4,15 @@ Maintenance des repositories Restic exécutée **localement sur le NAS**, et non
 REST Server (qui reste en append-only pour les clients). Le mot de passe du repository
 ne quitte jamais le NAS.
 
-**Version actuelle : dry-run uniquement.** Le script ne supprime rien, et le repository
-n'est accessible qu'en lecture :
+**Contrôle quotidien en dry-run** : il ne supprime rien, et le repository n'y est accessible
+qu'en lecture (tableau ci-dessous). Les **opérations réelles** (`--apply forget`,
+`--apply prune`) existent mais sont **désactivées par défaut** et passent par des tâches
+DSM distinctes : voir « Opérations réelles ».
 
 | Protection | Mécanisme |
 |---|---|
 | Configuration | `mode` doit valoir `dry-run`, sinon arrêt (code 2) avant tout appel à Docker ; le rôle Ansible refuse aussi toute autre valeur. Chemins et paramètres de rétention validés strictement (aucune valeur ne peut ajouter ou modifier un argument). |
-| Commandes | Liste blanche (`version`, `snapshots`, `list`, `check`, `forget`) ; `forget` sans `--dry-run`, `prune`, `unlock`, `key`… sont refusés avant exécution. |
+| Commandes | Liste blanche (`version`, `snapshots`, `list`, `check`, `forget`, `prune`) ; `forget` et `prune` sans `--dry-run`, `unlock`, `repair`, `key`… sont refusés avant exécution. Opérations réelles : seconde liste blanche, encore plus étroite (`forget <identifiants>`, `prune --max-unused=N%`). |
 | Système de fichiers | Repository et secret montés en **lecture seule** (`:ro`, `docker_base()`) ; conteneur `--read-only`, sans réseau, `--cap-drop ALL` (+ `DAC_READ_SEARCH`), `no-new-privileges`. **C'est la protection principale.** |
 | Vérification à l'exécution | Une barrière (busybox `sh`/`awk` de l'image) s'exécute **dans chaque conteneur restic**, avant restic : elle lit les montages de ce conteneur et exige `ro` sur `/`, `/repo`, le secret et **tout sous-montage de `/repo`**, sinon refus (code 97) et arrêt (`unsafe_mounts`, code 2). Un pré-contrôle identique, fait en Python sur un conteneur préalable, produit un message détaillé. Portée exacte : voir « Contrôle des montages ». |
 | Restic | `forget` est toujours lancé avec `--dry-run`. `--no-lock`, ajouté à toutes les commandes, évite seulement d'écrire un fichier de verrou dans le repository (ce qu'un montage en lecture seule interdirait de toute façon) : ce n'est **pas** un équivalent de `--dry-run`. |
@@ -133,7 +135,11 @@ compte pas dans leurs rafales. La disparition d'un identifiant figé est une ano
 Codes de sortie : `0` ok ou référence créée, `1` anomalie, `2` configuration, stockage
 ou montages, `3` hors fenêtre, `4` erreur restic/Docker ou version inattendue, `5` délai
 dépassé, `6` référence absente, `7` référence déjà présente avec `--init-baseline`,
-`75` exécution déjà en cours.
+`75` exécution déjà en cours. Opérations réelles : mêmes codes (voir « Opérations réelles »).
+
+La référence peut porter un marqueur `in_progress` (`operation`, `started`, `ids`) écrit
+juste avant une opération réelle et retiré après sa vérification : tant qu'il est présent,
+chaque contrôle signale `operation_interrupted` (code 1, e-mail).
 
 ## Vérification des données
 
@@ -184,15 +190,431 @@ C'est voulu. Procédure, pour chaque environnement déployé :
    « Show reference checksums » et vérifier l'assertion « Fichiers déployés identiques… ».
 2. Recalculer l'empreinte du script hors du NAS, depuis le commit déployé, et la comparer :
    `git show <commit>:services/synology/restic-maintenance/restic_maintenance.py | sha256sum`.
-3. DSM → Planificateur de tâches → tâche `restic-maintenance-<nom> (dry-run)` → Modifier →
-   Paramètres de tâche : remplacer les valeurs de `REF_PY` et `REF_CFG` (64 caractères
-   chacune), enregistrer.
+3. DSM → Planificateur de tâches → tâche `restic-maintenance-<nom> (dry-run)` (et, si elles
+   existent, `(forget)` et `(prune)`) → Modifier → Paramètres de tâche : remplacer les
+   valeurs de `REF_PY` et `REF_CFG` (64 caractères chacune), enregistrer.
 4. Lancer le bloc manuel (sans `--init-baseline`, avec `--ignore-window`) pour vérifier les
    empreintes et le fonctionnement, ou attendre l'exécution suivante et vérifier
    l'absence d'e-mail et le rapport.
 
 Entre le déploiement et l'étape 3, l'exécution planifiée échouerait avec un e-mail : faire
 les deux dans la même journée, avant 03:30.
+
+## Opérations réelles (`forget`, `prune`)
+
+**Désactivées par défaut** (`restic_maintenance_apply.forget` et `.prune` à `false`) : le
+script refuse alors `--apply` avant tout conteneur (`apply_disabled`, code 2). Les activer
+demande une PR sur l'inventaire, un déploiement, **et** la création d'une tâche DSM dédiée
+par un administrateur.
+
+### Séparation contrôle / opération réelle
+
+| | Contrôle quotidien | Opération réelle |
+|---|---|---|
+| Lancement | sans option ; tâche DSM `(dry-run)` | `--apply forget` ou `--apply prune` ; tâches DSM `(forget)` et `(prune)` distinctes |
+| Condition | — | `apply.<opération>: true` dans `config.json` ; contrôle complet **sans aucune erreur** juste avant |
+| Repository | lecture seule (`:ro`), `--no-lock` | lecture seule pour tout le contrôle ; **un seul conteneur** en écriture, pour la seule commande réelle, sous verrou restic normal |
+| Commandes | liste blanche de lecture | `forget <identifiants complets>` ou `prune --max-unused=N%`, rien d'autre (`check_write_safe`) ; jamais `--no-lock`, `unlock`, `repair`, `--prune`, `--unsafe-*` |
+| Barrière de montages | `/`, `/repo`, secret en `ro` | `/repo` exactement en `rw`, tout le reste en `ro` (même barrière, mode écriture) |
+
+`--apply`, `--init-baseline` et `--resolve-interrupted` sont mutuellement exclusifs.
+
+### Déroulé de `--apply forget`
+
+1. **Contrôle complet**, identique au quotidien : montages, version, `snapshots`,
+   `list locks`, `check` (lecture des données le dimanche), `forget --dry-run`, analyse.
+2. **Refus** (statut `apply_refused`, code 1 ; rien n'est écrit, la référence est intacte) :
+
+   | Demandé | Constat bloquant |
+   |---|---|
+   | contrôle en erreur | toute `ERROR` du contrôle quotidien ; `check` en échec (code 4) |
+   | référence absente ou invalide | `baseline_required` (code 6) ; `state_invalid` |
+   | sauvegardes trop anciennes | `stale`, `no_snapshot` |
+   | groupe inattendu | `host_not_allowed`, `path_not_allowed`, `tags_mismatch`, `frozen_group_changed` ; `removal_not_allowed` (suppression hors groupe déclaré, dans un groupe figé, ou identifiant incomplet) |
+   | volume excessif | `remove_count` (> 10), `remove_percent` (> 20 %), **bloquants ici** ; `min_keep`, `young_removal` |
+   | verrou | `locks` : tout verrou présent, même ancien (**bloquant ici**, simple avertissement au quotidien) |
+   | interruption précédente | `operation_interrupted` |
+   | identité d'écriture | `repository_owner` (code 2) : propriétaire de `config`, `data`, `index`, `keys`, `locks`, `snapshots` différent de `apply.repository_owner` |
+
+3. Aucun candidat : `nothing_to_remove` (code 0), aucune écriture, aucun verrou pris.
+4. Montages du conteneur d'écriture vérifiés, puis **marqueur** `in_progress` écrit dans
+   la référence (avec la liste des identifiants demandés).
+5. `restic forget <id> <id> …` : **exactement les candidats du dry-run**, désignés par leur
+   identifiant complet. La politique n'est pas réévaluée : un snapshot apparu entre-temps
+   ne peut pas être supprimé. Chaque suppression est journalisée (`SUPPRIMÉ : id (date)`).
+6. Vérification en lecture seule : snapshots restants = avant − demandés (rien d'autre n'a
+   disparu), aucun verrou restant, `check` OK. Puis référence mise à jour, marqueur
+   retiré : `forget_done` (code 0). Sinon `apply_unexpected` (code 1), marqueur conservé.
+
+### Déroulé de `--apply prune`
+
+Même contrôle et mêmes refus, sauf les seuils de volume des candidats de `forget` (`prune`
+ne supprime aucun snapshot). Puis `prune --dry-run` (sortie dans le rapport), marqueur,
+`prune --max-unused=5%`, vérification (snapshots **inchangés**, aucun verrou, `check`) :
+`prune_done` (code 0). `prune` ne supprime que des données qu'aucun snapshot ne référence.
+
+### Politique de rétention (à valider)
+
+**Règles de restic 0.19.1** (indépendantes de toute simulation) :
+`--group-by host,paths --keep-within 30d --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --keep-tag keep`,
+appliqué groupe par groupe ; un snapshot est conservé si **au moins une** règle le retient.
+
+| Règle | Conserve |
+|---|---|
+| `keep-within 30d` | tous les snapshots strictement postérieurs à « **dernier snapshot du groupe** − 30 jours » (pas la date du jour) |
+| `keep-daily 14` | le plus récent de chacun des 14 derniers **jours ayant au moins un snapshot** |
+| `keep-weekly 8` | le plus récent de chacune des 8 dernières **semaines ISO (lundi–dimanche) ayant un snapshot** |
+| `keep-monthly 12` | le plus récent de chacun des 12 derniers **mois ayant un snapshot** (le mois en cours compte) |
+| `keep-tag keep` | tout snapshot portant le tag `keep` (voir « Protéger un snapshot ») |
+
+Jours, semaines et mois sont pris dans le décalage horaire enregistré dans le snapshot :
+ici UTC (le conteneur de sauvegarde n'a pas de fuseau). 02:30 à Paris tombe toujours le
+même jour en UTC (01:30 ou 00:30), donc sans effet pratique.
+
+**Simulation** (résultats particuliers, valables seulement sous ces hypothèses : snapshot
+manuel `75eeb351` le 28/10/2026, puis exactement une sauvegarde par jour à 02:30 sans
+oubli, `forget` chaque samedi) :
+
+| Date | Conservés | Détail |
+|---|---|---|
+| samedi 30/01/2027 (3 mois) | **36** | les 30 quotidiens du 01/01 au 30/01/2027 ; 31/12/2026 (fin de mois), dimanches 27/12, 20/12, 13/12 (fins de semaine) ; 30/11/2026 et 31/10/2026 (fins de mois) |
+| samedi 30/10/2027 (1 an) | **44** | les 30 quotidiens du 01/10 au 30/10/2027 ; 30/09 ; dimanches 26/09, 19/09, 12/09 ; fins de mois 31/08, 31/07, 30/06, 31/05, 30/04, 31/03, 28/02, 31/01/2027, 31/12 et 30/11/2026 |
+
+- En régime établi : 43 à 44 snapshots, le plus ancien d'environ 11 mois ; 6 à 8
+  suppressions par semaine (au plus 15,7 %), sous les seuils de 10 et 20 %.
+- **`75eeb351` n'est pas conservé par les règles de période** : le dernier snapshot d'octobre
+  2026 est celui du 31/10. Première suppression réelle vers le 28/11/2026 ; pour le garder,
+  le marquer `keep` avant (voir « Protéger un snapshot ») : il s'ajoute alors aux 36 / 44.
+- `keep-daily 14` est redondant tant que la sauvegarde est quotidienne : il ne compte que
+  si les sauvegardes deviennent espacées.
+- Ce qui change ces résultats : une sauvegarde manquée (le jour n'existe pas, rien n'est
+  « rattrapé »), plusieurs sauvegardes le même jour (toutes gardées 30 jours, puis
+  seulement la dernière du jour, de la semaine ou du mois), l'arrêt des sauvegardes
+  (rien ne part par simple passage du temps ; `stale` bloque d'ailleurs toute suppression
+  après 48 h).
+
+### Protéger un snapshot (`keep_tags`)
+
+`retention.keep_tags` (défaut `[keep]`) ajoute `--keep-tag keep` à la politique : restic
+conserve **toujours** un snapshot portant ce tag, quelles que soient les autres règles. Le
+script le vérifie aussi de son côté : un candidat portant ce tag est refusé
+(`removal_not_allowed`), même si restic le proposait. Le tag s'ajoute aux tags attendus du
+groupe (`core,prod` + `keep`) sans déclencher `tags_mismatch`.
+
+**`restic tag` change l'identifiant** : restic réécrit le snapshot (même arbre, même date)
+sous un nouvel identifiant, avec `original` = l'ancien, puis supprime l'ancien. Le marquage
+écrit dans le repository : il se fait **sur le NAS**, pas via le REST Server (append-only,
+il refuserait la suppression).
+
+**Reconnaissance au contrôle suivant.** La référence garde, pour chaque snapshot, ses
+**métadonnées** (`meta` : `tree`, `time`, `hostname`, `paths`, `tags`), écrites à chaque
+exécution validée. Le remplacement d'un ancien snapshot par un nouveau n'est admis
+(`INFO retagged`) que si toutes ces conditions sont réunies :
+
+| Condition | Sinon |
+|---|---|
+| l'ancien identifiant a disparu, un **seul** nouveau snapshot a `original` = l'ancien | `retag_mismatch` |
+| métadonnées de l'ancien présentes dans la référence | `retag_mismatch` (référence antérieure : comparaison impossible, jamais d'acceptation par défaut) |
+| `tree`, `time`, `hostname`, `paths` **identiques** | `retag_mismatch` (champ modifié nommé) |
+| tags = tags initiaux + au moins un tag de `keep_tags`, rien retiré, rien d'autre ajouté | `retag_mismatch` |
+
+Un refus laisse en plus `snapshots_disappeared` et `backdated_snapshot` : la référence
+n'est pas mise à jour et l'e-mail part. `original` et la présence de `keep` ne suffisent
+donc jamais. **Après le déploiement**, attendre une exécution quotidienne validée (qui écrit
+`meta`) avant tout marquage.
+
+Procédure (administrateur, hors de la plage protégée et loin de 02:30, après un contrôle
+quotidien `ok`), exemple pour `75eeb351` de `docker-prod` (essayer d'abord sur
+`docker-test`) :
+
+```sh
+REPO=/volume1/Restic/docker-prod
+SECRET=/volume1/docker/restic-maintenance/secrets/restic_password_prod
+IMAGE=restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+RO="sudo docker run --rm --pull never --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH \
+  --security-opt no-new-privileges -v $REPO:/repo:ro -v $SECRET:/run/secrets/restic_password:ro \
+  -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password $IMAGE --no-lock --no-cache"
+# 1. Aucun verrou, et identifiant complet du snapshot (lecture seule)
+$RO list locks | wc -l                                   # attendu : 0
+$RO snapshots --json 75eeb351 | /usr/bin/python3 -I -c '
+import sys, json
+for s in json.load(sys.stdin): print(s["id"], s["time"], s["hostname"], s["tags"], s["tree"])'
+ID='<identifiant complet, 64 caractères, relu ci-dessus>'
+case "$ID" in *[!0-9a-f]*) echo "identifiant invalide";; *) [ ${#ID} -eq 64 ] && echo "identifiant OK";; esac
+# 2. Marquage (écriture, verrou exclusif restic ; refus si une sauvegarde est en cours)
+sudo docker run --rm --pull never --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --hostname restic-tag --user 0:0 --cap-drop ALL --cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE \
+  --security-opt no-new-privileges -v $REPO:/repo -v $SECRET:/run/secrets/restic_password:ro \
+  -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password \
+  $IMAGE --no-cache tag --add keep "$ID"
+# 3. Vérification : nouvel identifiant, original = ancien, même arbre, tags core,keep,prod
+$RO snapshots --json --tag keep | /usr/bin/python3 -I -c '
+import sys, json
+for s in json.load(sys.stdin): print(s["id"], "original", s.get("original"), s["time"], s["tags"], s["tree"])'
+```
+
+`--user` : la valeur de `apply.repository_owner`. Ensuite, le bloc manuel du contrôle
+(`--ignore-window`) doit donner `ok` avec `INFO retagged` ; noter le nouvel identifiant.
+Retirer la protection : même commande avec `tag --remove keep` (nouvel identifiant encore).
+
+### Accès en écriture
+
+- **REST Server inchangé** (`--append-only --private-repos`) : `docker-prod-01` ne peut
+  toujours ni supprimer ni réécrire quoi que ce soit dans son repository.
+- Seule la tâche DSM (root, sur le NAS) écrit, directement sur le système de fichiers, dans
+  un conteneur sans réseau où **seul** `/repo` est monté en écriture. Le mot de passe du
+  repository ne quitte pas le NAS.
+- Le conteneur d'écriture tourne sous `--user <apply.repository_owner>` (par défaut
+  `0:0`), avec `DAC_OVERRIDE` en plus de `DAC_READ_SEARCH` (dossiers régis par les ACL
+  Synology) : les fichiers créés (`prune`) ont le même propriétaire que les existants et
+  restent lisibles par le REST Server. Le script vérifie ce propriétaire avant toute
+  écriture (`repository_owner`, code 2).
+- Le compte de déploiement peut modifier la configuration déployée, mais une
+  configuration modifiée ne s'exécute pas : sa copie est vérifiée contre l'empreinte
+  écrite dans la tâche DSM.
+
+### Fréquences et planification
+
+| Tâche DSM | Planification | Commande |
+|---|---|---|
+| `restic-maintenance-docker-prod (dry-run)` | quotidienne 03:45 (inchangée) | sans option |
+| `restic-maintenance-docker-prod (forget)` | **hebdomadaire, samedi 04:00** | `--apply forget` |
+| `restic-maintenance-docker-prod (prune)` | **mensuelle, le 1er, 04:15** | `--apply prune` |
+
+- `forget` chaque semaine garde le volume par exécution sous les seuils (6 à 8) ; le
+  samedi laisse le week-end pour réagir à un e-mail.
+- `prune` une fois par mois suffit : il ne libère que de l'espace (dépôt d'environ
+  70 Mio) et c'est l'opération qui réécrit des fichiers ; `--max-unused 5%` évite de
+  réempaqueter pour quelques octets.
+- Toutes les exécutions d'un même repository partagent le verrou `state/lock` : si l'une
+  dure encore quand la suivante démarre, la seconde sort en code 75 (e-mail), sans rien
+  faire. En pratique, chacune dure quelques secondes.
+- **Plage protégée** `apply.protected` (défaut `04:55–08:00`, heure du NAS) : snapshots
+  Btrfs (05:00) et Hyper Backup (06:00). Un décalage d'horaires ne suffit pas (délai de
+  120 min, tâche retardée, lancement manuel) ; le script assure donc :
+  - aucune opération réelle ne **démarre** dans la plage, même avec `--ignore-window`
+    (`protected_period`, code 3) ;
+  - le délai d'une opération réelle est **raccourci** à « début de la plage − 90 s » : à
+    l'échéance, arrêt encadré du conteneur (voir ci-dessous), terminé avant le début de la
+    plage **si le démon Docker et le système répondent** ;
+  - refus s'il reste moins de 10 min (`protected_period`) ;
+  - pas de lecture des données pendant une opération réelle (réservée au contrôle
+    quotidien), pour une durée prévisible.
+
+  Démarrée à 04:00, une opération dispose donc d'au plus 53 min ; à 04:15, 38 min.
+
+  **Arrêt encadré à l'échéance** : chaque commande est bornée dans le temps et son
+  résultat vérifié.
+  1. `docker stop --time 60` (SIGTERM : restic s'arrête et retire son verrou ; SIGKILL par
+     Docker après 60 s), borné à 90 s ;
+  2. si `stop` échoue ou ne répond pas : `docker kill`, borné à 30 s ;
+  3. confirmation par `docker inspect`, bornée à 15 s : conteneur **absent** (supprimé par
+     `--rm`) ou **arrêté**.
+
+  Le résultat est dans le rapport (`container_stop` : étapes, codes, état). Si l'arrêt n'est
+  pas confirmé (démon sans réponse, conteneur encore en cours, état inconnu) : statut
+  `timeout_stop_unconfirmed` (code 5, e-mail), constat `stop_unconfirmed`, marqueur
+  d'interruption conservé, ligne `ARRÊT DU CONTENEUR … NON CONFIRMÉ` dans la sortie.
+
+  **Pas de garantie absolue** : si le démon Docker, le noyau ou le NAS ne répondent plus,
+  le script ne peut ni arrêter ni confirmer l'arrêt, et dépasse alors lui-même l'échéance
+  d'au plus 2 min 15 (somme des trois bornes) avant de le signaler ; dans le pire cas (NAS
+  figé), il ne peut rien signaler du tout. Une écriture pourrait alors chevaucher le
+  snapshot Btrfs ou Hyper Backup : le repository reste cohérent à chaque instant (voir
+  « Interruption »), mais la copie peut contenir un état interrompu. Face à
+  `stop_unconfirmed` : `sudo docker ps --filter name=restic-maint-`, état du démon
+  (`sudo systemctl status pkg-ContainerManager-dockerd` ou équivalent), et aucune autre
+  opération avant que le conteneur soit confirmé arrêté.
+  Le contrôle quotidien (lecture seule) n'est pas concerné. **Limite** : la fin de la plage
+  (08:00) suppose que Hyper Backup se termine avant ; à ajuster à sa durée réelle.
+  Après un SIGKILL, le verrou et le marqueur restent : le snapshot Btrfs ou la copie Hyper
+  Backup contiennent alors un état « interrompu », récupérable comme ci-dessous.
+
+### Coordination avec les sauvegardes
+
+- Restic prend un **verrou exclusif** pour `forget` et `prune` ; il refuse (code 11) si un
+  autre verrou existe, **même ancien**, et n'en supprime jamais aucun de lui-même (restic
+  0.19.1, `checkForOtherLocks`). Le script refuse même avant (`locks`) ; un verrou apparu
+  entre le contrôle et l'écriture donne `repository_locked` (code 4) : rien n'est modifié.
+- Le script ne lance jamais `unlock` (refusé par les deux listes blanches).
+- Une sauvegarde qui démarre **pendant** une opération réelle échoue (restic `backup` ne
+  réessaie pas par défaut). Le timer de `docker-prod-01` réessaiera la nuit suivante, et
+  `stale` alertera si cela se répète. D'où les horaires, loin de 02:30.
+
+**Sauvegarde entre le dry-run et l'écriture.** Le contrôle lit sans verrou ; une sauvegarde
+peut donc commencer après lui :
+
+| Moment | Effet |
+|---|---|
+| en cours pendant le contrôle | verrou visible : refus `locks` |
+| commencée après le contrôle, en cours à l'écriture | `forget`/`prune` ne peuvent pas prendre le verrou exclusif : `repository_locked` (code 4), **rien n'est modifié** (vérifié : code 11 de restic) |
+| commencée **pendant** l'écriture | la sauvegarde échoue (verrou exclusif), le repository est intact |
+| terminée entre le contrôle et l'écriture | le nouveau snapshot n'est **jamais** supprimé : `forget` ne reçoit que les identifiants du dry-run. Ces candidats restent valables : ajouter un snapshot ne peut que rendre **plus** de snapshots supprimables (la référence de `keep-within` avance, un nouveau jour, une nouvelle semaine ou un nouveau mois repousse les plus anciens), jamais en faire conserver un qui ne l'était pas. Le nouveau snapshot est journalisé (`INFO`), laissé hors de la référence, et contrôlé comme nouveau à l'exécution suivante (antidatage, groupe, tags). |
+
+**`forget` partiel.** Restic supprime un fichier `snapshots/<id>` par snapshot demandé ; un
+arrêt ou une erreur peut en laisser une partie. Garanties : seuls des identifiants
+demandés peuvent disparaître (commande par identifiants, aucune politique évaluée à
+l'écriture) ; le marqueur liste ces identifiants ; le contrôle suivant accepte leur absence
+mais signale `operation_interrupted`, et toute autre disparition reste
+`snapshots_disappeared` ; `--resolve-interrupted` refuse si une disparition sort de la
+liste. À la reprise, le dry-run recalcule les candidats : supprimer des snapshots non
+conservés ne change pas ceux que les règles conservent, donc seuls les restants
+réapparaissent.
+
+### Notifications et rapport
+
+- Tâches `(forget)` et `(prune)` : « Envoyer les détails d'exécution par e-mail » →
+  **toujours**. Chaque exécution envoie alors sa sortie : `SUPPRIMÉ : …` pour chaque
+  snapshot, `forget : N snapshot(s) supprimé(s)…`, ou la sortie de `prune`, ou le motif du
+  refus. Les échecs ont un code non nul.
+- Rapport JSON : `operation` (`forget`, `prune`, `control`, `resolve-interrupted`),
+  `apply.requested`, `apply.removed`, `apply.ok`, `apply.dry_run` / `apply.restic_output`
+  (fin des sorties de restic), `check_after`.
+
+| Statut | Code | Écriture |
+|---|---|---|
+| `forget_done`, `prune_done` | 0 | effectuée et vérifiée |
+| `nothing_to_remove` | 0 | aucune |
+| `apply_disabled`, `repository_owner`, `unsafe_mounts` | 2 | aucune |
+| `protected_period` | 3 | aucune (plage protégée en cours ou trop proche) |
+| `apply_refused`, `baseline_required` | 1 / 6 | aucune |
+| `repository_locked` | 4 | aucune (restic n'a pas pu verrouiller) |
+| `apply_failed`, `timeout`, `apply_unverified`, `apply_unexpected` | 4 / 5 / 4 / 1 | **peut-être partielle** : marqueur conservé |
+| `timeout_stop_unconfirmed` | 5 | **peut-être en cours** : arrêt du conteneur non confirmé, marqueur conservé, `stop_unconfirmed` |
+
+### Validation sur un dépôt jetable
+
+28/10/2026, VM GitHub jetable, restic 0.19.1, Python 3.8, dépôt de 40 sauvegardes
+quotidiennes antidatées (207 Mio), propriétaire `0:0` :
+
+| Scénario | Résultat |
+|---|---|
+| `--apply` avec la configuration par défaut | `apply_disabled` (2), aucun conteneur |
+| sauvegarde en cours (verrou) | `apply_refused` (`locks`), dépôt inchangé, verrou intact ; `restic forget` direct : code 11 |
+| `max_remove_count` 2 / `max_age_hours` 0 / autre propriétaire | refus `remove_count` / `stale` / `repository_owner`, dépôt inchangé |
+| référence absente / snapshot d'un hôte inconnu | `baseline_required` (6) / refus `host_not_allowed` |
+| `forget` arrêté par SIGTERM après la prise du verrou | `apply_failed` (4), **verrou retiré** par restic, aucun snapshot supprimé ; contrôle : `operation_interrupted` ; `--resolve-interrupted` puis reprise : `forget_done`, exactement les 7 candidats du dry-run supprimés, 33 restants |
+| `prune` tué par SIGKILL après la prise du verrou | `apply_failed`, **verrou restant** ; contrôle, `--apply prune` et `--resolve-interrupted` refusés ; sauvegarde cliente refusée (code 11, `already locked exclusively`) ; `restic unlock` immédiat : sans effet ; après 31 min : `successfully removed 1 locks` ; `check` OK ; `--resolve-interrupted`, puis `prune_done` (207 → 182 Mio) |
+| après maintenance | `check --read-data` OK, contrôle `ok`, nouvelle sauvegarde cliente OK, restauration identique |
+
+### Validations restant à faire sur le NAS
+
+Non vérifiable sur une VM (ext4, sans ACL Synology) : à faire avant toute activation en prod.
+
+1. **Lecture seule, maintenant** : propriétaires, droits et ACL réels, et identité du REST
+   Server.
+   ```sh
+   R=/volume1/Restic/docker-prod
+   sudo stat -c '%u:%g %A %n' "$R" "$R"/config "$R"/data "$R"/index "$R"/keys "$R"/locks "$R"/snapshots
+   sudo find "$R" -type f -printf '%u:%g %m\n' | sort | uniq -c        # homogénéité des fichiers
+   sudo find "$R" -type d -printf '%u:%g %m\n' | sort | uniq -c
+   sudo synoacltool -get "$R"; sudo synoacltool -get "$R/data"
+   sudo synoacltool -get "$(sudo find "$R/data" -type f | head -n 1)"   # ACL d'un pack écrit par le REST Server
+   N=$(sudo docker ps --format '{{.Names}}' | grep -i rest)
+   sudo docker inspect -f 'User={{.Config.User}} Cmd={{.Config.Cmd}} Args={{.Args}}' "$N"
+   sudo docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}} rw={{.RW}}{{"\n"}}{{end}}' "$N"
+   sudo docker exec "$N" id
+   ```
+   Attendu : un seul `uid:gid` pour tout le repository (`apply.repository_owner`), et le
+   REST Server sous cette même identité ou root.
+2. **Écriture réelle, d'abord sur `docker-test`** (même REST Server, mêmes ACL ; repository
+   de test) : activer `apply` dans `inventories/test`, lancer manuellement `--apply forget`
+   puis `--apply prune` sur un repository de test qui a des candidats, puis comparer les
+   fichiers **réécrits** par `prune` avec ceux du REST Server :
+   ```sh
+   R=/volume1/Restic/docker-test
+   sudo find "$R"/index "$R"/data -type f -newermt '-1 hour' -printf '%u:%g %m %p\n' | head
+   sudo synoacltool -get "$(sudo find "$R/index" -type f -newermt '-1 hour' | head -n 1)"
+   ```
+   puis, **depuis `docker-test-01`, via le REST Server** : `restic-core snapshots`,
+   `restic-core check --read-data`, une restauration dans un dossier vide et la sauvegarde
+   suivante. Restic tente un `chmod` en lecture seule sur ses fichiers ; sur un dossier régi
+   par les ACL Synology, vérifier que l'ACL héritée reste présente (sortie de
+   `synoacltool`, identique à celle d'un pack écrit par le REST Server).
+3. **Sauvegardes externes** : vérifier que les snapshots Btrfs et Hyper Backup couvrent
+   bien `/volume1/Restic` (filet de récupération), et relever la durée de Hyper Backup pour
+   fixer la fin de `apply.protected`.
+
+### Activation (étape séparée, après validation de la politique)
+
+1. Validations ci-dessus (1 et 3), puis écriture réelle sur `docker-test` (2).
+2. **PR** sur `inventories/prod/group_vars/nas.yml` :
+   ```yaml
+   restic_maintenance_apply:
+     forget: true
+     prune: true
+     prune_max_unused: "5%"
+     repository_owner: "0:0"      # valeur relevée en 1
+     protected: {start: "04:55", end: "08:00"}
+   ```
+3. Merge, workflow NAS `prod` (`--check`, puis apply), **mise à jour des empreintes** de la
+   tâche `(dry-run)` (`config.json` change).
+4. Lancements manuels (bloc de « Premier lancement manuel », chemins `docker-prod`,
+   `--ignore-window`, hors de la plage protégée) : `--apply forget` (avant le 28/11/2026 :
+   `nothing_to_remove`), puis `--apply prune` (verrou exclusif, éventuel nettoyage) :
+   `prune_done`, aucun verrou restant ; la sauvegarde de 02:30 suivante doit réussir.
+5. Tâches DSM `restic-maintenance-docker-prod (forget)` et `(prune)`, utilisateur **root**,
+   créées **désactivées**, e-mail **toujours**, planification ci-dessus. Script : celui de
+   la tâche `(dry-run)` (mêmes empreintes, mêmes chemins), dont la dernière commande devient :
+   ```sh
+   /usr/bin/python3 -I "$RUN/restic_maintenance.py" --config "$RUN/config.json" --apply forget   # ou prune
+   ```
+   jamais avec `--ignore-window`, `--init-baseline` ni `--resolve-interrupted`. Après
+   création : vérifier `synoschedtask --get` (activée, utilisateur root, horaire) ; activer
+   après un lancement manuel concluant. Après chaque déploiement, mettre à jour les
+   empreintes des **trois** tâches.
+
+Désactivation d'urgence : décocher les tâches dans DSM (immédiat), puis repasser
+`apply.forget`/`apply.prune` à `false` par PR.
+
+### Opération interrompue : récupération et limites
+
+| Interruption | Effet sur le repository |
+|---|---|
+| avant l'écriture (refus, verrou d'autrui) | aucun |
+| `forget` arrêté | une partie des snapshots demandés supprimée, **jamais d'autres** ; données intactes |
+| `prune` arrêté | restic écrit les nouveaux packs et index **avant** de supprimer les anciens : données en double ou non référencées, **aucune perte** ; le `prune` suivant nettoie |
+| délai dépassé | arrêt encadré : `docker stop` (SIGTERM, restic **retire son verrou** ; SIGKILL après 60 s), `docker kill` en secours, confirmation par `docker inspect` ; si non confirmé : `timeout_stop_unconfirmed` |
+| SIGKILL, panne, redémarrage du NAS | le **verrou exclusif reste** : les sauvegardes échouent tant qu'il n'est pas retiré |
+
+Dans tous les cas, le marqueur `in_progress` reste : chaque contrôle quotidien échoue en
+`operation_interrupted` (e-mail) et toute nouvelle opération réelle est refusée.
+
+Procédure (administrateur, sur le NAS) :
+
+1. Aucun conteneur de maintenance actif : `sudo docker ps --filter name=restic-maint-`.
+2. Lire le dernier rapport (`/root/restic-maintenance/docker-prod/logs/`) : opération,
+   identifiants demandés, sortie de restic.
+3. **Seulement si un verrou reste** (`list locks`, commande de lecture de « Préparation du
+   NAS ») : attendre **30 min** après l'interruption, puis retirer les verrous **périmés**
+   avec `restic unlock` (sans `--remove-all`, qui supprimerait aussi un verrou actif) :
+   ```sh
+   sudo docker run --rm --pull never --network none --read-only --hostname restic-unlock \
+     --cap-drop ALL --cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE --user 0:0 \
+     --security-opt no-new-privileges \
+     -v /volume1/Restic/docker-prod:/repo \
+     -v /volume1/docker/restic-maintenance/secrets/restic_password_prod:/run/secrets/restic_password:ro \
+     -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password \
+     restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510 unlock
+   ```
+   Restic ne retire qu'un verrou de plus de 30 min ; un verrou récent est conservé.
+4. Clore l'interruption avec le bloc manuel et **`--resolve-interrupted`** (lecture
+   seule) : il exige un repository sans verrou, un `check` OK et que les snapshots
+   disparus soient **tous** parmi ceux demandés ; il met alors la référence à jour et
+   retire le marqueur (`interrupted_resolved`, code 0). Sinon il échoue sans rien changer.
+5. Relancer l'opération (bloc manuel avec `--apply …`) ou attendre la prochaine exécution
+   planifiée. Un `prune` suivant nettoie les restes d'un `prune` interrompu.
+
+Limites :
+- `check` en échec après une interruption : **aucune réparation automatique**
+  (`repair` refusé). Diagnostiquer ; en dernier recours, restaurer le dossier
+  `/volume1/Restic/docker-prod` depuis le snapshot Btrfs de 05:00 ou Hyper Backup (les
+  sauvegardes postérieures sont alors perdues).
+- Le marqueur est dans `/root` : perdu avec lui (réinstallation de DSM), comme la
+  référence (`baseline_required`).
+- Les candidats sont ceux de restic au moment du contrôle ; ils sont vérifiés (seuils,
+  groupes, `young_removal`, référence) mais restent ceux de la politique configurée : une
+  politique mal réglée dans une PR est la principale source de risque, d'où les seuils.
 
 ## Stockage privé
 
@@ -569,7 +991,7 @@ Même script, même rôle, même procédure que `docker-test` ; seules les valeu
 | Stockage privé | `/root/restic-maintenance/docker-test` | `/root/restic-maintenance/docker-prod` |
 | Groupes attendus | `core` (`docker-test-01`, tags `core,test`) + `validation` figé | `core` (`docker-prod-01`, `/srv/docker/core`, tags `core,prod`) |
 | Rétention évaluée, seuils, fenêtre, délai | valeurs par défaut du rôle | identiques (aucune politique propre à la prod) |
-| Mode | dry-run uniquement | dry-run uniquement : aucun `forget` réel, aucun `prune` |
+| Mode | contrôle dry-run ; opérations réelles désactivées | contrôle dry-run ; opérations réelles **désactivées** (voir « Opérations réelles ») |
 | Workflow | environnement GitHub `test` (runner `docker-test-01`) | environnement GitHub `prod` (runner `docker-prod`, approbation requise) |
 
 Le contrôle `stale` (aucun snapshot de moins de 48 h) signale aussi l'arrêt de la
@@ -626,7 +1048,9 @@ D'où l'heure choisie, loin de la sauvegarde de 02:30 (quelques secondes pour 81
 | 02:30 | sauvegarde `restic-backup-core.timer` (docker-prod-01) | `docker-prod` |
 | 03:02 | sauvegarde de `docker-test-01` | `docker-test` |
 | 03:30 | maintenance dry-run (DSM, proposée, pas encore créée) | `docker-test` |
-| **03:45** | **maintenance dry-run (DSM, proposée)** | `docker-prod` |
+| **03:45** | **maintenance dry-run (DSM, active)** | `docker-prod` |
+| 04:00 le samedi | `forget` réel (DSM, proposée, après activation) | `docker-prod` |
+| 04:15 le 1er du mois | `prune` réel (DSM, proposée, après activation) | `docker-prod` |
 | 05:00 | snapshots Btrfs | — |
 | 06:00 | Hyper Backup | — |
 
@@ -661,5 +1085,8 @@ chacune leur verrou.
   verrou visible ne prouve pas l'absence de sauvegarde à venir : se fier aux
   planifications (voir « Premier lancement manuel »).
 - **Snapshots Btrfs (05:00) et Hyper Backup (06:00)** : lecture seule, donc aucun risque de
-  copie incohérente. La fenêtre et le délai sont déjà en place pour les futurs modes
-  destructifs, qui ne devront jamais chevaucher ces horaires.
+  copie incohérente. Les opérations réelles se terminent normalement avant 04:30 ; même
+  interrompues ou copiées en cours, le repository reste cohérent (voir « Opérations
+  réelles »).
+- **Opérations réelles** : verrou exclusif restic ; voir « Coordination avec les
+  sauvegardes ».

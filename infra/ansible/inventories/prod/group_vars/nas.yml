@@ -1,6 +1,7 @@
 # Connexion au NAS : playbooks/group_vars/nas.yml (commune aux environnements).
 
-# Maintenance Restic du repository docker-prod (dry-run uniquement : aucune suppression).
+# Maintenance Restic du repository docker-prod. Contrôle quotidien en dry-run ; opérations
+# réelles (forget, prune) désactivées tant que restic_maintenance_apply n'est pas surchargé ici.
 # Même politique de rétention et mêmes seuils que le test (valeurs par défaut du rôle).
 restic_maintenance_name: docker-prod
 restic_maintenance_repository: /volume1/Restic/docker-prod

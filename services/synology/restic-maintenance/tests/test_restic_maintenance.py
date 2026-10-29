@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 SCRIPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -56,8 +57,10 @@ def cfg(**overrides):
 
 
 def snap(sid, when, host=HOST, paths=None, tags=None):
-    return {"id": sid * 8 if len(sid) == 1 else sid, "time": when.strftime("%Y-%m-%dT%H:%M:%S.123456789+00:00"),
-            "hostname": host, "paths": paths or PATHS, "tags": TAGS if tags is None else tags}
+    sid = sid * 8 if len(sid) == 1 else sid
+    return {"id": sid, "time": when.strftime("%Y-%m-%dT%H:%M:%S.123456789+00:00"),
+            "hostname": host, "paths": paths or PATHS, "tags": TAGS if tags is None else tags,
+            "tree": ("%064x" % (int(sid[:15], 16) * 7 + 1))[-64:]}
 
 
 def daily(n, end=NOW - dt.timedelta(hours=1)):
@@ -259,6 +262,100 @@ def utc(text):
     return rm.parse_time_with_offset(text).astimezone(dt.timezone.utc)
 
 
+class KeepTagTest(unittest.TestCase):
+    C = cfg(retention={"keep_within": "30d", "keep_daily": 14, "keep_weekly": 8, "keep_monthly": 12,
+                       "keep_tags": ["keep"]}, groups=GROUPS[:1])
+
+    def test_forget_arguments(self):
+        args = rm.forget_args(self.C["retention"])
+        self.assertEqual(args[-2:], ["--keep-tag", "keep"])
+        self.assertNotIn("--keep-tag", rm.forget_args(cfg()["retention"]))
+        rm.check_safe(rm.build_restic_args("forget", args))
+
+    def test_keep_tag_added_to_group_tags_is_accepted(self):
+        s = daily(10)
+        s[3]["tags"] = TAGS + ["keep"]
+        f, _ = rm.analyze(self.C, s, groups(s), NOW, None)
+        self.assertEqual(codes(f), [])
+        s[4]["tags"] = ["keep"]  # le tag de protection ne remplace pas les tags du groupe
+        f, _ = rm.analyze(self.C, s, groups(s), NOW, None)
+        self.assertEqual(codes(f), ["tags_mismatch"])
+        s[4]["tags"] = TAGS + ["autre"]
+        self.assertEqual(codes(rm.analyze(self.C, s, groups(s), NOW, None)[0]), ["tags_mismatch"])
+
+    def state_for(self, s):
+        return rm.state_doc(NOW - dt.timedelta(hours=1), s, [x["id"] for x in s])
+
+    def retag(self, sn, new_id="e" * 64, **changes):
+        n = dict(sn, id=new_id, original=sn["id"], tags=sn["tags"] + ["keep"])
+        n.update(changes)
+        return n
+
+    def check(self, s, replaced, *new, state=None):
+        now_s = [x for x in s if x is not replaced] + list(new)
+        return rm.analyze(self.C, now_s, groups(now_s), NOW, state or self.state_for(s))[0]
+
+    def test_retag_is_recognised(self):
+        s = daily(10)
+        f = self.check(s, s[8], self.retag(s[8]))
+        self.assertEqual(codes(f), [])
+        self.assertEqual(codes(f, "INFO"), ["retagged"])
+
+    def test_retag_refused_when_snapshot_changed(self):
+        s = daily(10)
+        old = s[8]
+        later = (NOW - dt.timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%S.123456789+00:00")
+        cases = {
+            "tree": self.retag(old, tree="f" * 64),
+            "time": self.retag(old, time=later),
+            "hostname": self.retag(old, hostname="docker-test-02"),
+            "paths": self.retag(old, paths=["/srv/docker"]),
+            "tags": self.retag(old, tags=["core", "keep"]),                 # tag initial retiré
+            "autre tag": self.retag(old, tags=TAGS + ["keep", "autre"]),    # ajout hors keep_tags
+            "sans keep": self.retag(old, tags=list(TAGS)),                  # aucun tag de protection
+        }
+        for name, new in cases.items():
+            f = self.check(s, old, new)
+            self.assertIn("retag_mismatch", codes(f), name)
+            self.assertIn("snapshots_disappeared", codes(f), name)          # l'original reste « disparu »
+            self.assertNotIn("retagged", codes(f, "INFO"), name)
+
+    def test_retag_refused_without_metadata_in_reference(self):
+        s = daily(10)
+        legacy = {"last_run": (NOW - dt.timedelta(hours=1)).isoformat(), "snapshot_ids": sorted(x["id"] for x in s)}
+        f = self.check(s, s[8], self.retag(s[8]), state=legacy)
+        self.assertIn("retag_mismatch", codes(f))
+        self.assertIn("métadonnées", [x for x in f if x["code"] == "retag_mismatch"][0]["message"])
+
+    def test_retag_refused_when_ambiguous_or_original_still_present(self):
+        s = daily(10)
+        f = self.check(s, s[8], self.retag(s[8]), self.retag(s[8], new_id="f" * 64))
+        self.assertIn("retag_mismatch", codes(f))
+        f = self.check(s, None, self.retag(s[8]))   # original toujours là : simple nouveau snapshot antidaté
+        self.assertEqual(codes(f), ["backdated_snapshot"])
+
+    def test_reference_keeps_metadata(self):
+        s = daily(3)
+        doc = rm.state_doc(NOW, s, [x["id"] for x in s])
+        self.assertEqual(doc["meta"][s[0]["id"]], {"time": s[0]["time"], "hostname": HOST, "paths": PATHS,
+                                                    "tags": sorted(TAGS), "tree": s[0]["tree"]})
+        self.assertIsNone(rm.validate_state(doc, NOW, dt.timedelta(minutes=60)))
+
+    def test_protected_snapshot_can_never_be_removed(self):
+        s = daily(40)
+        s[35]["tags"] = TAGS + ["keep"]
+        problems = rm.removal_problems(self.C, s, [s[35]["id"], s[36]["id"]])
+        self.assertEqual([p["code"] for p in problems], ["removal_not_allowed"])
+        self.assertIn("tag de protection", problems[0]["message"])
+
+    def test_config(self):
+        for bad in (["Keep"], ["keep", "keep"], "keep", [""], ["a" * 33], [1], ["k%d" % i for i in range(11)]):
+            with self.assertRaises(rm.ConfigError, msg=bad):
+                rm.validate_retention(dict(self.C["retention"], keep_tags=bad))
+        rm.validate_retention(self.C["retention"])
+        rm.validate_retention(cfg()["retention"])
+
+
 class KeepWithinGuardTest(unittest.TestCase):
     def group(self, keep, remove):
         return [{"host": HOST, "paths": PATHS, "keep": keep, "remove": remove}]
@@ -434,6 +531,60 @@ class SafetyTest(unittest.TestCase):
         for flag in ("--network none", "--read-only", "--cap-drop ALL", "--pull never", "no-new-privileges"):
             self.assertIn(flag, joined)
         self.assertNotIn("RESTIC_PASSWORD=", joined)
+
+
+class WriteSafetyTest(unittest.TestCase):
+    ID = "a" * 64
+
+    def test_write_allowlist(self):
+        for ok in (["--no-cache", "forget", self.ID], ["--no-cache", "forget", self.ID, "b" * 64],
+                   ["--no-cache", "prune", "--max-unused=5%"], ["--no-cache", "prune", "--max-unused=0%"]):
+            rm.check_write_safe(ok)
+        for bad in (["--no-cache", "forget"], ["--no-cache", "forget", self.ID[:8]],
+                    ["--no-cache", "forget", self.ID, self.ID], ["--no-cache", "forget", "--keep-last", "1"],
+                    ["--no-cache", "forget", self.ID, "--prune"], ["--no-lock", "--no-cache", "forget", self.ID],
+                    ["forget", self.ID], ["--no-cache", "forget", "latest"], ["--no-cache", "prune"],
+                    ["--no-cache", "prune", "--max-unused=unlimited"], ["--no-cache", "prune", "--max-unused=60%"],
+                    ["--no-cache", "prune", "--max-unused=5%", "--repack-uncompressed"],
+                    ["--no-cache", "prune", "--unsafe-recover-no-free-space", "x"], ["--no-cache", "unlock"],
+                    ["--no-cache", "check"], ["--no-cache", "repair", "packs", self.ID]):
+            with self.assertRaises(rm.StepError, msg=bad):
+                rm.check_write_safe(bad)
+
+    def test_readonly_prune_only_as_dry_run(self):
+        rm.check_safe(["--no-lock", "--no-cache", "prune", "--dry-run", "--max-unused=5%"])
+        for bad in (["--no-lock", "--no-cache", "prune", "--max-unused=5%"],
+                    ["--no-lock", "--no-cache", "prune", "--dry-run"],
+                    ["--no-lock", "--no-cache", "prune", "--dry-run", "--max-unused=5%", "--repack-uncompressed"],
+                    ["--no-lock", "--no-cache", "prune", "--dry-run", "--max-unused=unlimited"],
+                    ["--no-lock", "--no-cache", "forget", "--dry-run", self.ID, "--prune"]):
+            with self.assertRaises(rm.StepError, msg=bad):
+                rm.check_safe(bad)
+
+    def test_write_container(self):
+        c = cfg(apply=dict(rm.NO_APPLY, forget=True, repository_owner="1026:100"))
+        w = rm.docker_command(c, "n", ["--no-cache", "forget", self.ID], write=True)
+        joined = " ".join(w)
+        self.assertIn("-v /volume1/Restic/docker-test:/repo -v", joined)
+        self.assertIn("--user 1026:100", joined)
+        self.assertIn("restic_password_test:/run/secrets/restic_password:ro", joined)
+        for flag in ("--network none", "--read-only", "--cap-drop ALL", "--pull never", "no-new-privileges"):
+            self.assertIn(flag, joined)
+        self.assertEqual(w[w.index("-c") + 1], rm.gate_script(True))
+        r = rm.docker_command(c, "n", ["--no-lock", "snapshots"])
+        self.assertNotIn("--user", r)
+        self.assertNotIn("DAC_OVERRIDE", r)
+        self.assertIn("/volume1/Restic/docker-test:/repo:ro", " ".join(r))
+
+    def test_write_mounts(self):
+        rw = MOUNTS_OK.replace("/repo btrfs ro,", "/repo btrfs rw,")
+        self.assertEqual(rm.readonly_problems(rw, write=True), [])
+        self.assertTrue(rm.readonly_problems(MOUNTS_OK, write=True))  # /repo en lecture seule
+        self.assertTrue(rm.readonly_problems(rw.replace("restic_password btrfs ro", "restic_password btrfs rw"),
+                                             write=True))
+        self.assertTrue(rm.readonly_problems(rw + "/dev/sdb1 /repo/data ext4 rw 0 0\n", write=True))
+        self.assertTrue(rm.readonly_problems(rw.replace("overlay / overlay ro,", "overlay / overlay rw,"), write=True))
+        self.assertTrue(rm.readonly_problems(rw))  # le même texte reste refusé en lecture seule
 
 
 class MountAndVersionTest(unittest.TestCase):
@@ -641,6 +792,31 @@ class StateValidationTest(TrustedUser, unittest.TestCase):
             self.assertIsNone(state, content)
             self.assertTrue(error, content)
 
+    def test_in_progress(self):
+        good = {"last_run": (NOW - dt.timedelta(days=1)).isoformat(), "snapshot_ids": ["a" * 64]}
+        for ip in ({"operation": "forget", "started": NOW.isoformat(), "ids": ["b" * 64]},
+                   {"operation": "prune", "started": NOW.isoformat(), "ids": []}):
+            self.put(dict(good, in_progress=ip))
+            self.assertEqual(self.read(), (dict(good, in_progress=ip), None))
+        for ip in (None, {}, {"operation": "unlock", "started": NOW.isoformat(), "ids": []},
+                   {"operation": "forget", "started": "hier", "ids": []},
+                   {"operation": "forget", "started": 1, "ids": []},
+                   {"operation": "forget", "started": NOW.isoformat(), "ids": ["b" * 8]},
+                   {"operation": "prune", "started": NOW.isoformat(), "ids": ["b" * 64]},
+                   {"operation": "forget", "started": NOW.isoformat(), "ids": [], "x": 1}):
+            self.put(dict(good, in_progress=ip))
+            self.assertIsNone(self.read()[0], ip)
+
+    def test_meta(self):
+        good = {"last_run": (NOW - dt.timedelta(days=1)).isoformat(), "snapshot_ids": ["a" * 64]}
+        m = {"time": NOW.isoformat(), "hostname": HOST, "paths": PATHS, "tags": TAGS, "tree": "b" * 64}
+        self.put(dict(good, meta={"a" * 64: m}))
+        self.assertIsNone(self.read()[1])
+        for bad in ({"c" * 64: m}, {"a" * 64: dict(m, tree="x")}, {"a" * 64: dict(m, extra=1)},
+                    {"a" * 64: dict(m, paths="/srv")}, {"a" * 64: dict(m, hostname=None)}, []):
+            self.put(dict(good, meta=bad))
+            self.assertIsNone(self.read()[0], bad)
+
     def test_too_large(self):
         self.put(b" " * (rm.MAX_STATE_BYTES + 1))
         self.assertIn("volumineux", self.read()[1])
@@ -718,6 +894,29 @@ class GateScriptTest(unittest.TestCase):
         os.environ["PATH"] = bindir + os.pathsep + env_path
         self.addCleanup(os.environ.__setitem__, "PATH", env_path)
         self.check_shell([os.path.join(bindir, "sh")])
+
+    def test_write_gate_matches_python(self):
+        rw = MOUNTS_OK.replace("/repo btrfs ro,", "/repo btrfs rw,")
+        cases = {"ok": rw, "repo ro": MOUNTS_OK, "secret rw": rw.replace("restic_password btrfs ro", "restic_password btrfs rw"),
+                 "racine rw": rw.replace("overlay / overlay ro,", "overlay / overlay rw,"),
+                 "sous-montage rw": rw + "/dev/sdb1 /repo/data ext4 rw 0 0\n", "vide": ""}
+        shells = [["sh"]]
+        bindir = busybox_shell()
+        if bindir:
+            self.addCleanup(shutil.rmtree, bindir)
+            shells.append([os.path.join(bindir, "sh")])
+        for shell in shells:
+            for name, text in cases.items():
+                d = tempfile.mkdtemp()
+                self.addCleanup(shutil.rmtree, d)
+                with open(os.path.join(d, "mounts"), "w") as f:
+                    f.write(text)
+                script = rm.gate_script(True).replace("/proc/self/mounts", os.path.join(d, "mounts")).replace(
+                    "exec /usr/bin/restic", "exec echo RESTIC_LANCE")
+                proc = subprocess.run(shell + ["-c", script, "restic-gate"], stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+                self.assertEqual(proc.returncode == 0, rm.readonly_problems(text, write=True) == [], (shell, name))
+                self.assertEqual(proc.returncode == 0, name == "ok", (shell, name))
 
     def test_expected_verdicts(self):
         refused = {n for n, t in self.CASES.items() if rm.readonly_problems(t)}
@@ -832,6 +1031,21 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(rm.ConfigError):
             rm.load_config(self.write(cfg(expected_restic_version="latest")))
 
+    def test_apply_config(self):
+        self.assertEqual(rm.load_config(self.write(cfg())).get("apply", rm.NO_APPLY), rm.NO_APPLY)
+        ok = dict(rm.NO_APPLY, forget=True, prune=True, prune_max_unused="10%", repository_owner="1026:100")
+        self.assertEqual(rm.load_config(self.write(cfg(apply=ok)))["apply"], ok)
+        for bad in (dict(ok, forget="true"), dict(ok, prune=1), dict(ok, prune_max_unused="60%"),
+                    dict(ok, prune_max_unused="5"), dict(ok, prune_max_unused="unlimited"),
+                    dict(ok, repository_owner="root"), dict(ok, repository_owner="0:0 --privileged"),
+                    dict(ok, extra=1), {"forget": True}, dict(ok, protected={"start": "04:55"}),
+                    dict(ok, protected={"start": "05:00", "end": "05:00"}),
+                    dict(ok, protected={"start": "4:55", "end": "08:00"})):
+            with self.assertRaises(rm.ConfigError, msg=bad):
+                rm.load_config(self.write(cfg(apply=bad)))
+        with self.assertRaises(rm.ConfigError):
+            rm.load_config(self.write(cfg(apply=ok, run_check=False)))
+
     def test_read_data_config(self):
         self.assertEqual(rm.load_config(self.write(cfg(read_data={"weekdays": [7], "parts": 1})))["read_data"]["parts"], 1)
         for bad in ({"weekdays": [0], "parts": 1}, {"weekdays": [8], "parts": 1}, {"weekdays": [7, 7], "parts": 1},
@@ -860,13 +1074,26 @@ import json, os, subprocess, sys
 args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps(args) + "\n")
-if args[0] == "kill":
+if args[0] in ("kill", "stop", "inspect"):
+    # Comportement simulé de l'arrêt : ok, fail, hang ; pour inspect : absent, false, running, hang, fail.
+    mode = json.loads(os.environ.get("FAKE_STOP", "{}")).get(args[0], "absent" if args[0] == "inspect" else "ok")
+    if mode == "hang":
+        import time; time.sleep(30)
+    if mode == "fail":
+        sys.stderr.write("Error response from daemon: simulated failure\n"); sys.exit(1)
+    if mode == "absent":
+        sys.stderr.write("Error: No such object: %s\n" % args[-1]); sys.exit(1)
+    if args[0] == "inspect":
+        print("true" if mode == "running" else "false")
     sys.exit(0)
 with open(os.environ["FAKE_FIXTURES"]) as fx:
     fixtures = json.load(fx)
+write = any(a.endswith(":/repo") for a in args)
+mounts_text = fixtures.get("write_mounts", fixtures["mounts"].replace("/repo btrfs ro,", "/repo btrfs rw,")) \
+    if write else fixtures["mounts"]
 entry = args[args.index("--entrypoint") + 1]
 if entry == "/bin/cat":
-    sys.stdout.write(fixtures["mounts"])
+    sys.stdout.write(mounts_text)
     sys.exit(0)
 # /bin/sh -c <barrière> restic-gate <args restic> : la barrière réelle est exécutée,
 # avec les montages simulés du conteneur restic et un faux binaire restic.
@@ -874,7 +1101,7 @@ script = args[args.index("-c") + 1]
 rargs = args[args.index("restic-gate") + 1:]
 mounts = os.path.join(os.environ["FAKE_DIR"], "gate-mounts")
 with open(mounts, "w") as f:
-    f.write(fixtures.get("gate_mounts", fixtures["mounts"]))
+    f.write(fixtures.get("write_gate_mounts", mounts_text) if write else fixtures.get("gate_mounts", mounts_text))
 script = script.replace("/proc/self/mounts", mounts).replace(
     "exec /usr/bin/restic", "exec %s %s" % (sys.executable, os.environ["FAKE_RESTIC"]))
 shell = json.loads(os.environ.get("FAKE_SH", '["sh"]'))
@@ -889,9 +1116,20 @@ with open(os.environ["FAKE_RESTIC_LOG"], "a") as f:
 with open(os.environ["FAKE_FIXTURES"]) as fx:
     fixtures = json.load(fx)
 sub = [a for a in args if not a.startswith("-")][0]
+real = sub in ("forget", "prune") and "--dry-run" not in args
+if real and fixtures.get("write_sleep"):
+    import time; time.sleep(fixtures["write_sleep"]); sys.exit(0)  # restic bloqué : ne modifie rien
+if real and sub == "forget" and fixtures.get("write_exits", {}).get("forget", 0) != 11:
+    # Suppression simulée (éventuellement partielle) : le repository simulé est réécrit.
+    ids = args[args.index("forget") + 1:][:fixtures.get("forget_partial", 10 ** 6)]
+    fixtures["snapshots"] = [s for s in fixtures["snapshots"] if s["id"] not in ids] + fixtures.get("appear", [])
+    for g in fixtures["forget"]:
+        g["remove"] = [s for s in g["remove"] if s["id"] not in ids]
+    with open(os.environ["FAKE_FIXTURES"], "w") as fx:
+        json.dump(fixtures, fx)
 out = fixtures.get(sub, "")
 sys.stdout.write(out if isinstance(out, str) else json.dumps(out))
-code = fixtures.get("exits", {}).get(sub, 0)
+code = fixtures.get("write_exits" if real else "exits", {}).get(sub, 0)
 if code:
     sys.stderr.write("erreur restic simulée\\n")
 sys.exit(code)
@@ -1239,6 +1477,437 @@ class EndToEndTest(TrustedUser, unittest.TestCase):
         code, calls = self.run_with([], [], version="restic 0.18.0 compiled with go1.24 on linux/amd64")
         self.assertEqual(code, rm.EXIT_RESTIC)
         self.assertEqual(self.restic_calls(), [["--no-lock", "--no-cache", "version"]])  # rien d'autre
+
+    # ------------------------------------------------------------------ opérations réelles
+
+    @staticmethod
+    def hhmm(minutes_from_now):
+        return (dt.datetime.now() + dt.timedelta(minutes=minutes_from_now)).strftime("%H:%M")
+
+    def enable(self, **apply):
+        # Plage protégée loin de l'heure du test, sauf si le test la fixe lui-même.
+        apply.setdefault("protected", {"start": self.hhmm(360), "end": self.hhmm(420)})
+        for entry in rm.REPO_ENTRIES:
+            path = os.path.join(self.repo, entry)
+            if not os.path.exists(path):
+                (os.mkdir if entry != "config" else lambda p: open(p, "w").close())(path)
+        with open(self.config) as f:
+            c = json.load(f)
+        c["apply"] = dict(rm.NO_APPLY, repository_owner="%d:%d" % (os.getuid(), os.getgid()), **apply)
+        with open(self.config, "w") as f:
+            json.dump(c, f)
+
+    def aged_repo(self, removed_days=(33, 34, 35), n=40):
+        """n sauvegardes quotidiennes ; forget --dry-run propose de supprimer celles de removed_days."""
+        now = dt.datetime.now(dt.timezone.utc)
+        core = daily(n, end=now - dt.timedelta(hours=1))
+        keep = [s for i, s in enumerate(core) if i not in removed_days]
+        remove = [s for i, s in enumerate(core) if i in removed_days]
+        v = validation()
+        return core + [v], groups(keep, remove) + groups([v], paths=["/tmp/restic-test"]), remove
+
+    def run_apply(self, snapshots, forget, args, locks="", **fixtures_extra):
+        fixtures = {"version": "restic 0.19.1 compiled with go1.26.4 on linux/amd64", "snapshots": snapshots,
+                    "list": locks, "check": "no errors were found", "forget": forget, "mounts": MOUNTS_OK,
+                    "prune": "repacking packs\ndone", "exits": {}}
+        fixtures.update(fixtures_extra)
+        with open(self.fixtures, "w") as f:
+            json.dump(fixtures, f)
+        open(self.restic_log, "w").close()
+        open(self.log, "w").close()
+        return rm.main(["--config", self.config, "--ignore-window"] + args)
+
+    def current_fixtures(self):
+        with open(self.fixtures) as f:
+            return json.load(f)
+
+    def write_calls(self):
+        with open(self.log) as f:
+            calls = [json.loads(line) for line in f]
+        return [c[c.index("restic-gate") + 1:] for c in calls
+                if "restic-gate" in c and any(a.endswith(":/repo") for a in c)]
+
+    def state(self):
+        with open(self.state_path()) as f:
+            return json.load(f)
+
+    def baseline(self, snapshots, forget):
+        self.assertEqual(self.run_apply(snapshots, forget, ["--init-baseline"]), rm.EXIT_OK)
+        with open(self.state_path(), "rb") as f:
+            self.reference = f.read()
+
+    def assert_reference_unchanged(self):
+        with open(self.state_path(), "rb") as f:
+            self.assertEqual(f.read(), self.reference)
+
+    def test_apply_disabled_by_default(self):
+        s, forget, _ = self.aged_repo()
+        for op in ("forget", "prune"):
+            code = self.run_apply(s, forget, ["--apply", op])
+            self.assertEqual(code, rm.EXIT_CONFIG)
+            self.assertEqual(self.report()["status"], "apply_disabled")
+            self.assertEqual(self.restic_calls(), [])
+
+    def test_apply_is_exclusive_with_other_actions(self):
+        with self.assertRaises(SystemExit):
+            rm.main(["--config", self.config, "--apply", "forget", "--init-baseline"])
+        with self.assertRaises(SystemExit):
+            rm.main(["--config", self.config, "--apply", "unlock"])
+
+    def test_forget_removes_exactly_the_dry_run_candidates(self):
+        self.enable(forget=True)
+        s, forget, remove = self.aged_repo()
+        self.baseline(s, forget)
+        code = self.run_apply(s, forget, ["--apply", "forget"])
+        self.assertEqual(code, rm.EXIT_OK, self.report()["log"])
+        ids = sorted(x["id"] for x in remove)
+        self.assertEqual(self.write_calls(), [["--no-cache", "forget"] + ids])
+        with open(self.log) as f:
+            calls = [json.loads(line) for line in f]
+        for c in calls:
+            write = any(a.endswith(":/repo") for a in c)
+            self.assertEqual("--user" in c, write)
+            if write and "restic-gate" in c:
+                self.assertNotIn("--no-lock", c)
+        subs = [[a for a in c if not a.startswith("-")][0] for c in self.restic_calls()]
+        self.assertEqual(subs, ["version", "snapshots", "list", "check", "forget", "forget", "snapshots", "list",
+                                "check"])
+        r = self.report()
+        self.assertEqual((r["status"], r["apply"]["ok"], r["apply"]["removed"]), ("forget_done", True, ids))
+        self.assertTrue(any(line.endswith("SUPPRIMÉ : %s (%s)" % (remove[0]["id"][:8], remove[0]["time"]))
+                            for line in r["log"]))
+        st = self.state()
+        self.assertNotIn("in_progress", st)
+        self.assertEqual(st["snapshot_ids"], sorted(x["id"] for x in s if x not in remove))
+        # Le contrôle quotidien suivant ne voit aucune disparition inattendue.
+        fx = self.current_fixtures()
+        self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], []), rm.EXIT_OK)
+        self.assertEqual(self.report()["status"], "ok")
+
+    def test_backup_between_dry_run_and_forget(self):
+        # Une sauvegarde terminée entre le contrôle et l'écriture : jamais supprimée, absente de la
+        # référence, puis vérifiée comme nouvelle par le contrôle suivant.
+        self.enable(forget=True)
+        s, forget, remove = self.aged_repo()
+        self.baseline(s, forget)
+        new = snap("f" * 64, dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1))
+        code = self.run_apply(s, forget, ["--apply", "forget"], appear=[new])
+        r = self.report()
+        self.assertEqual((code, r["status"]), (rm.EXIT_OK, "forget_done"), r["log"])
+        self.assertEqual(self.write_calls(), [["--no-cache", "forget"] + sorted(x["id"] for x in remove)])
+        self.assertTrue(any("laissé(s) au contrôle suivant : ffffffff" in l for l in r["log"]))
+        self.assertNotIn(new["id"], self.state()["snapshot_ids"])
+        fx = self.current_fixtures()
+        self.assertIn(new["id"], [x["id"] for x in fx["snapshots"]])
+        fx["forget"][0]["keep"].append(new)
+        self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], []), rm.EXIT_OK)
+        self.assertIn(new["id"], self.state()["snapshot_ids"])
+
+    def test_keep_tag_end_to_end(self):
+        # Le snapshot marqué n'est ni proposé par restic (fixture : keep) ni supprimable par le script
+        # même s'il apparaissait dans les candidats.
+        with open(self.config) as f:
+            c = json.load(f)
+        c["retention"]["keep_tags"] = ["keep"]
+        with open(self.config, "w") as f:
+            json.dump(c, f)
+        self.enable(forget=True)
+        s, forget, remove = self.aged_repo()
+        self.baseline(s, forget)
+        old = remove[0]
+        marked = dict(old, id="d" * 64, original=old["id"], tags=TAGS + ["keep"])
+        s2 = [marked if x is old else x for x in s]
+        f2 = [dict(g, keep=g["keep"] + [marked], remove=[x for x in g["remove"] if x is not old]) if i == 0 else g
+              for i, g in enumerate(forget)]
+        self.assertEqual(self.run_apply(s2, f2, []), rm.EXIT_OK)        # marquage reconnu au contrôle
+        self.assertIn("retagged", codes(self.report()["findings"], "INFO"))
+        self.assertIn(marked["id"], self.state()["snapshot_ids"])
+        self.assertIn("--keep-tag", self.restic_calls()[-1])
+        self.assertEqual(self.run_apply(s2, f2, ["--apply", "forget"]), rm.EXIT_OK)
+        self.assertEqual(self.write_calls(), [["--no-cache", "forget"] + sorted(x["id"] for x in remove[1:])])
+        # Défense supplémentaire : si restic le proposait quand même, refus.
+        fx = self.current_fixtures()
+        bad = [dict(g, remove=[marked]) if i == 0 else g for i, g in enumerate(fx["forget"])]
+        bad[0]["keep"] = [x for x in bad[0]["keep"] if x["id"] != marked["id"]]
+        code = self.run_apply(fx["snapshots"], bad, ["--apply", "forget"])
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_ANOMALY, "apply_refused"))
+        self.assertIn("removal_not_allowed", codes(self.report()["findings"]))
+
+    def test_forget_with_nothing_to_remove_writes_nothing(self):
+        self.enable(forget=True)
+        s, forget, _ = self.aged_repo(removed_days=())
+        self.baseline(s, forget)
+        self.assertEqual(self.run_apply(s, forget, ["--apply", "forget"]), rm.EXIT_OK)
+        self.assertEqual(self.report()["status"], "nothing_to_remove")
+        self.assertEqual(self.write_calls(), [])
+
+    def assert_refused(self, code, finding_code, expected_code=rm.EXIT_ANOMALY, status="apply_refused"):
+        """Refus : aucun conteneur d'écriture lancé, référence inchangée."""
+        r = self.report()
+        self.assertEqual((code, r["status"]), (expected_code, status), r["log"])
+        if finding_code:
+            self.assertIn(finding_code, codes(r["findings"]))
+        self.assertEqual(self.write_calls(), [])
+
+    def test_refusals(self):
+        self.enable(forget=True, prune=True)
+        s, forget, remove = self.aged_repo(n=60)
+        self.baseline(s, forget)
+        now = dt.datetime.now(dt.timezone.utc)
+        old = s[:-1][3:]  # les trois dernières sauvegardes manquent : dernière il y a 3 jours
+        intruder = snap("e" * 64, now - dt.timedelta(hours=2), host="inconnu")
+        many = self.aged_repo(removed_days=tuple(range(31, 42)), n=60)  # 11 suppressions > 10, 18 % < 20 %
+        frozen = groups([x for x in s[:-1] if x not in remove], remove + [s[-1]])
+        cases = [
+            ("stale", old + s[-1:], None),
+            ("host_not_allowed", s + [intruder], None),
+            ("remove_count", many[0], many[1]),
+            ("removal_not_allowed", s, frozen),
+            ("snapshots_disappeared", [x for x in s if x is not s[5]], None),
+        ]
+        for finding_code, snaps, fg in cases:
+            fg = fg or groups([x for x in snaps if x["hostname"] == HOST and x["paths"] == PATHS and x not in remove],
+                              [x for x in remove if x in snaps]) + groups([s[-1]], paths=["/tmp/restic-test"])
+            if finding_code == "host_not_allowed":
+                fg.append({"host": "inconnu", "paths": PATHS, "tags": None, "keep": [intruder], "remove": []})
+            code = self.run_apply(snaps, fg, ["--apply", "forget"])
+            self.assert_refused(code, finding_code)
+            if finding_code == "remove_count":
+                self.assertEqual(codes(self.report()["findings"]), ["remove_count"])  # ce seuil seul suffit
+            self.assert_reference_unchanged()
+        # Verrou présent : aucune opération réelle, aucun verrou supprimé.
+        for op in ("forget", "prune"):
+            code = self.run_apply(s, forget, ["--apply", op], locks="f" * 64)
+            self.assert_refused(code, "locks")
+            self.assert_reference_unchanged()
+            self.assertNotIn("unlock", json.dumps(self.restic_calls()))
+        # check en échec.
+        code = self.run_apply(s, forget, ["--apply", "forget"], exits={"check": 1})
+        self.assert_refused(code, None, rm.EXIT_RESTIC, "restic_error")
+        self.assert_reference_unchanged()
+
+    def test_refused_without_or_with_invalid_baseline(self):
+        self.enable(forget=True)
+        s, forget, _ = self.aged_repo()
+        code = self.run_apply(s, forget, ["--apply", "forget"])
+        self.assert_refused(code, None, rm.EXIT_BASELINE_REQUIRED, "baseline_required")
+        self.assertFalse(os.path.exists(self.state_path()))
+        self.write_state(b"{tronque")
+        code = self.run_apply(s, forget, ["--apply", "forget"])
+        self.assert_refused(code, "state_invalid")
+        with open(self.state_path(), "rb") as f:
+            self.assertEqual(f.read(), b"{tronque")
+
+    def test_repository_owner_must_match(self):
+        self.enable(forget=True)
+        with open(self.config) as f:
+            c = json.load(f)
+        c["apply"]["repository_owner"] = "4242:4242"
+        with open(self.config, "w") as f:
+            json.dump(c, f)
+        s, forget, _ = self.aged_repo()
+        code = self.run_apply(s, forget, ["--apply", "forget"])
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_CONFIG, "repository_owner"))
+        self.assertEqual(self.restic_calls(), [])
+
+    def test_write_container_mounts_checked_before_marker(self):
+        self.enable(forget=True)
+        s, forget, _ = self.aged_repo()
+        self.baseline(s, forget)
+        bad = MOUNTS_OK.replace("/repo btrfs ro,", "/repo btrfs rw,").replace("restic_password btrfs ro",
+                                                                              "restic_password btrfs rw")
+        code = self.run_apply(s, forget, ["--apply", "forget"], write_mounts=bad)
+        self.assert_refused(code, None, rm.EXIT_CONFIG, "unsafe_mounts")
+        self.assert_reference_unchanged()
+
+    def test_write_gate_refusal_leaves_nothing_to_resolve(self):
+        self.enable(forget=True)
+        s, forget, _ = self.aged_repo()
+        self.baseline(s, forget)
+        bad = MOUNTS_OK.replace("/repo btrfs ro,", "/repo btrfs rw,") + "/dev/sdb1 /repo/data ext4 rw 0 0\n"
+        code = self.run_apply(s, forget, ["--apply", "forget"], write_gate_mounts=bad)
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_CONFIG, "unsafe_mounts"))
+        self.assertNotIn("in_progress", self.state())
+        self.assertEqual(len(self.current_fixtures()["snapshots"]), len(s))  # restic jamais lancé
+
+    def test_locked_by_backup_leaves_nothing_to_resolve(self):
+        self.enable(forget=True)
+        s, forget, remove = self.aged_repo()
+        self.baseline(s, forget)
+        code = self.run_apply(s, forget, ["--apply", "forget"], write_exits={"forget": 11})
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_RESTIC, "repository_locked"))
+        self.assertNotIn("in_progress", self.state())
+        self.assertEqual(len(self.current_fixtures()["snapshots"]), len(s))
+
+    def test_interrupted_forget_is_reported_until_resolved(self):
+        self.enable(forget=True)
+        s, forget, remove = self.aged_repo()
+        self.baseline(s, forget)
+        code = self.run_apply(s, forget, ["--apply", "forget"], write_exits={"forget": 1}, forget_partial=1)
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_RESTIC, "apply_failed"))
+        self.assertEqual(self.report()["apply"]["removed"], [sorted(x["id"] for x in remove)[0]])
+        ip = self.state()["in_progress"]
+        self.assertEqual((ip["operation"], ip["ids"]), ("forget", sorted(x["id"] for x in remove)))
+        fx = self.current_fixtures()
+        self.assertEqual(len(fx["snapshots"]), len(s) - 1)
+        # Contrôle quotidien : anomalie explicite (e-mail), pas de « disparition » pour l'identifiant demandé.
+        code = self.run_apply(fx["snapshots"], fx["forget"], [])
+        r = self.report()
+        self.assertEqual(code, rm.EXIT_ANOMALY)
+        self.assertEqual(codes(r["findings"]), ["operation_interrupted"])
+        self.assertIn("in_progress", self.state())
+        # Nouvelle opération réelle refusée tant que ce n'est pas résolu.
+        code = self.run_apply(fx["snapshots"], fx["forget"], ["--apply", "forget"])
+        self.assert_refused(code, "operation_interrupted")
+        self.assertIn("in_progress", self.state())
+        # Résolution refusée si un verrou subsiste ; jamais de suppression de verrou.
+        code = self.run_apply(fx["snapshots"], fx["forget"], ["--resolve-interrupted"], locks="f" * 64)
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_ANOMALY, "anomaly"))
+        self.assertIn("in_progress", self.state())
+        self.assertEqual(self.write_calls(), [])
+        # Puis résolution (lecture seule) et retour à la normale.
+        code = self.run_apply(fx["snapshots"], fx["forget"], ["--resolve-interrupted"])
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_OK, "interrupted_resolved"))
+        self.assertEqual(self.write_calls(), [])
+        self.assertNotIn("in_progress", self.state())
+        self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], []), rm.EXIT_OK)
+        # La suppression peut reprendre : les deux restants.
+        self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], ["--apply", "forget"]), rm.EXIT_OK)
+        self.assertEqual(len(self.write_calls()[0]), 2 + 2)
+
+    def test_resolve_refused_without_interruption(self):
+        s, forget = self.clean_repo()
+        self.assertEqual(self.run_apply(s, forget, ["--init-baseline"]), rm.EXIT_OK)
+        code = self.run_apply(s, forget, ["--resolve-interrupted"])
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_CONFIG, "nothing_to_resolve"))
+
+    def test_unexpected_disappearance_during_interruption_still_reported(self):
+        self.enable(forget=True)
+        s, forget, remove = self.aged_repo()
+        self.baseline(s, forget)
+        self.run_apply(s, forget, ["--apply", "forget"], write_exits={"forget": 1}, forget_partial=1)
+        fx = self.current_fixtures()
+        other = fx["snapshots"][2]  # non demandé
+        snaps = [x for x in fx["snapshots"] if x is not other and x["id"] != other["id"]]
+        fg = [dict(g, keep=[x for x in g["keep"] if x["id"] != other["id"]]) for g in fx["forget"]]
+        self.run_apply(snaps, fg, [])
+        self.assertEqual(codes(self.report()["findings"]), ["operation_interrupted", "snapshots_disappeared"])
+        code = self.run_apply(snaps, fg, ["--resolve-interrupted"])
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_ANOMALY, "anomaly"))
+        self.assertIn("in_progress", self.state())
+
+    def test_prune(self):
+        self.enable(prune=True)
+        s, forget, _ = self.aged_repo()
+        self.baseline(s, forget)
+        code = self.run_apply(s, forget, ["--apply", "prune"])
+        r = self.report()
+        self.assertEqual((code, r["status"]), (rm.EXIT_OK, "prune_done"), r["log"])
+        self.assertEqual(self.write_calls(), [["--no-cache", "prune", "--max-unused=5%"]])
+        subs = [[a for a in c if not a.startswith("-")][0] for c in self.restic_calls()]
+        self.assertEqual(subs, ["version", "snapshots", "list", "check", "forget", "prune", "prune", "snapshots",
+                                "list", "check"])
+        self.assertIn("--dry-run", self.restic_calls()[5])
+        self.assertNotIn("in_progress", self.state())
+        # Prune en échec après écriture : marqueur conservé, puis signalé par le contrôle quotidien.
+        code = self.run_apply(s, forget, ["--apply", "prune"], write_exits={"prune": 1})
+        self.assertEqual((code, self.report()["status"]), (rm.EXIT_RESTIC, "apply_failed"))
+        self.assertEqual(self.state()["in_progress"]["operation"], "prune")
+        self.assertEqual(self.run_apply(s, forget, []), rm.EXIT_ANOMALY)
+        self.assertEqual(codes(self.report()["findings"]), ["operation_interrupted"])
+
+    def test_prune_volume_of_pending_candidates_does_not_block_prune(self):
+        self.enable(prune=True)
+        s, forget, _ = self.aged_repo(removed_days=tuple(range(31, 43)), n=50)
+        self.baseline(s, forget)
+        self.assertEqual(self.run_apply(s, forget, ["--apply", "prune"]), rm.EXIT_OK)
+
+    def short_stop_timeouts(self):
+        for name, value in (("STOP_CALL_TIMEOUT", 1), ("KILL_CALL_TIMEOUT", 1), ("INSPECT_TIMEOUT", 1)):
+            self.addCleanup(setattr, rm, name, getattr(rm, name))
+            setattr(rm, name, value)
+        self.addCleanup(os.environ.pop, "FAKE_STOP", None)
+
+    def stop_after_timeout(self, graceful, **modes):
+        self.short_stop_timeouts()
+        os.environ["FAKE_STOP"] = json.dumps(modes)
+        open(self.log, "w").close()
+        runner = rm.Runner(cfg(), time.monotonic() + 0.3, lambda m: None)
+        with self.assertRaises(rm.StepTimeout) as ctx:
+            runner._exec(["sleep", "5"], "conteneur-x", "restic prune (écriture)", graceful=graceful)
+        with open(self.log) as f:
+            calls = [json.loads(line)[0] for line in f]
+        return ctx.exception, calls
+
+    def test_stop_confirmed(self):
+        exc, calls = self.stop_after_timeout(True)
+        self.assertEqual(calls, ["stop", "inspect"])
+        self.assertTrue(exc.stop["confirmed"])
+        self.assertEqual(exc.stop["state"], "absent (supprimé par --rm)")
+        exc, calls = self.stop_after_timeout(False, inspect="false")
+        self.assertEqual(calls, ["kill", "inspect"])
+        self.assertEqual((exc.stop["confirmed"], exc.stop["state"]), (True, "arrêté"))
+
+    def test_stop_failed_then_kill(self):
+        exc, calls = self.stop_after_timeout(True, stop="fail")
+        self.assertEqual(calls, ["stop", "kill", "inspect"])
+        self.assertTrue(exc.stop["confirmed"])
+        self.assertEqual([st["code"] for st in exc.stop["steps"]], [1, 0, 1])
+
+    def test_stop_blocked_then_kill(self):
+        t0 = time.monotonic()
+        exc, calls = self.stop_after_timeout(True, stop="hang")
+        self.assertLess(time.monotonic() - t0, 10)              # chaque appel est borné
+        self.assertEqual(calls, ["stop", "kill", "inspect"])
+        self.assertIsNone(exc.stop["steps"][0]["code"])
+        self.assertTrue(exc.stop["confirmed"])
+
+    def test_stop_unconfirmed(self):
+        exc, _ = self.stop_after_timeout(True, stop="hang", kill="hang", inspect="hang")
+        self.assertFalse(exc.stop["confirmed"])
+        self.assertIn("inconnu", exc.stop["state"])
+        self.assertIn("NON CONFIRMÉ", str(exc))
+        exc, _ = self.stop_after_timeout(True, stop="fail", kill="fail", inspect="running")
+        self.assertEqual((exc.stop["confirmed"], exc.stop["state"]), (False, "EN COURS D'EXÉCUTION"))
+        exc, _ = self.stop_after_timeout(False, kill="fail", inspect="fail")
+        self.assertFalse(exc.stop["confirmed"])
+
+    def timed_out_forget(self, **modes):
+        """--apply forget dont le conteneur d'écriture dépasse le délai, avec l'arrêt simulé « modes »."""
+        self.short_stop_timeouts()
+        self.enable(forget=True)
+        s, forget, _ = self.aged_repo()
+        self.baseline(s, forget)
+        orig = rm.Runner.restic_write
+
+        def short(runner, *args):
+            runner.deadline = time.monotonic() + 1
+            return orig(runner, *args)
+        self.addCleanup(setattr, rm.Runner, "restic_write", orig)
+        rm.Runner.restic_write = short
+        os.environ["FAKE_STOP"] = json.dumps(modes)
+        code = self.run_apply(s, forget, ["--apply", "forget"], write_sleep=5)
+        return code, self.report()
+
+    def test_write_timeout_with_confirmed_stop(self):
+        code, r = self.timed_out_forget()
+        self.assertEqual((code, r["status"]), (rm.EXIT_TIMEOUT, "timeout"))
+        self.assertTrue(r["container_stop"]["confirmed"])
+        self.assertNotIn("stop_unconfirmed", codes(r["findings"]))
+        self.assertEqual(self.state()["in_progress"]["operation"], "forget")   # marqueur conservé
+
+    def test_write_timeout_with_unconfirmed_stop(self):
+        code, r = self.timed_out_forget(stop="hang", kill="fail", inspect="hang")
+        self.assertEqual((code, r["status"]), (rm.EXIT_TIMEOUT, "timeout_stop_unconfirmed"))
+        self.assertFalse(r["container_stop"]["confirmed"])
+        self.assertIn("stop_unconfirmed", codes(r["findings"]))
+        self.assertTrue(any("NON CONFIRMÉ" in line for line in r["log"]))
+        self.assertEqual(self.state()["in_progress"]["operation"], "forget")
+        # Le contrôle suivant reste en anomalie tant que l'interruption n'est pas résolue.
+        os.environ.pop("FAKE_STOP")
+        fx = self.current_fixtures()
+        self.assertEqual(self.run_apply(fx["snapshots"], fx["forget"], []), rm.EXIT_ANOMALY)
+        self.assertIn("operation_interrupted", codes(self.report()["findings"]))
 
     def test_refuses_non_dry_run_config(self):
         with open(self.config) as f:

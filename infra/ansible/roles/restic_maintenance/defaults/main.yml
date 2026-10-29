@@ -1,4 +1,5 @@
-# Seul mode accepté dans cette version (le script refuse toute autre valeur).
+# Mode du contrôle quotidien : seul dry-run est accepté (le script refuse toute autre valeur).
+# Les opérations réelles sont séparées : restic_maintenance_apply ci-dessous.
 restic_maintenance_mode: dry-run
 # Image restic : version et digest vont ensemble (les changer dans la même PR).
 restic_maintenance_image_repo: restic/restic
@@ -34,6 +35,9 @@ restic_maintenance_retention:
   keep_daily: 14
   keep_weekly: 8
   keep_monthly: 12
+  # --keep-tag : un snapshot portant l'un de ces tags n'est jamais supprimé (marquage manuel,
+  # voir README « Protéger un snapshot »). Ce tag s'ajoute aux tags attendus du groupe.
+  keep_tags: [keep]
 
 # Fenêtre provisoire : l'horaire définitif reste à fixer (hors sauvegardes, avant 05:00).
 restic_maintenance_window:
@@ -47,6 +51,25 @@ restic_maintenance_run_check: true
 restic_maintenance_read_data:
   weekdays: [7]
   parts: 1
+
+# Opérations réelles (forget par identifiants, prune), lancées seulement par une tâche DSM
+# dédiée avec « --apply forget » ou « --apply prune », après un contrôle sans aucune erreur.
+# Désactivées par défaut : sans true ici, le script refuse (apply_disabled, code 2).
+# repository_owner : uid:gid propriétaire du repository (vérifié avant toute écriture ; les
+# fichiers écrits le sont sous cette identité, pour rester lisibles par le REST Server).
+# protected : plage (heure locale du NAS) où aucune écriture n'a lieu, même en lancement
+# manuel : snapshots Btrfs (05:00) et Hyper Backup (06:00). Une opération réelle y est
+# refusée, et son délai est raccourci pour que le conteneur d'écriture soit arrêté avant
+# « start » (stop, kill en secours, arrêt confirmé), si Docker et le système répondent ;
+# sinon timeout_stop_unconfirmed (voir README). La fin couvre la durée de Hyper Backup.
+restic_maintenance_apply:
+  forget: false
+  prune: false
+  prune_max_unused: "5%"
+  repository_owner: "0:0"
+  protected:
+    start: "04:55"
+    end: "08:00"
 
 restic_maintenance_thresholds:
   max_future_skew_minutes: 60

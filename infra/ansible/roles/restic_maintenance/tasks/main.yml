@@ -8,6 +8,8 @@
       - restic_maintenance_mode == 'dry-run'
       - restic_maintenance_read_data.weekdays is sequence
       - restic_maintenance_read_data.parts | int >= 1
+      - restic_maintenance_apply.forget is boolean
+      - restic_maintenance_apply.prune is boolean
       - restic_maintenance_name is match('^[a-z0-9][a-z0-9-]*$')
       - restic_maintenance_repository is match('^/volume[0-9]+/')
       - restic_maintenance_password_file is match('^/volume[0-9]+/')
@@ -17,7 +19,8 @@
       - restic_maintenance_restic_version is match('^[0-9]+[.][0-9]+[.][0-9]+$')
       - restic_maintenance_image_digest == '' or restic_maintenance_image_digest is match('^sha256:[0-9a-f]{64}$')
     fail_msg: >-
-      Configuration incomplète ou mode refusé : seul dry-run est autorisé, et nom, repository,
+      Configuration incomplète ou mode refusé : seul dry-run est autorisé pour le contrôle
+      (forget/prune réels : booléens de restic_maintenance_apply), et nom, repository,
       secret et groupes attendus doivent être définis dans group_vars/nas.yml.
     quiet: true
 
