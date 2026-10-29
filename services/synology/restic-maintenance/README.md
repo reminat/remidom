@@ -733,7 +733,8 @@ F=$(sudo find "$R/index" -type f -perm 0400 | head -n 1); [ -n "$F" ] && sudo sy
 
 1. Validations ci-dessus : relevé **du repository `docker-prod`** (1 : propriétaire,
    ACL, REST Server sous root), sauvegardes externes (3) ; écriture réelle sur
-   `docker-test` (2, faite le 29/10). Puis **marquage `keep` de `75eeb351`** (« Protéger un
+   `docker-test` (2, faite le 29/10) ; **conditions de « Droits des fichiers écrits par
+   restic » remplies** (Hyper Backup validé, lecteurs identifiés). Puis **marquage `keep` de `75eeb351`** (« Protéger un
    snapshot ») et contrôle quotidien `ok` avec `INFO retagged`, avant le 28/11/2026.
 2. **PR** sur `inventories/prod/group_vars/nas.yml` :
    ```yaml
