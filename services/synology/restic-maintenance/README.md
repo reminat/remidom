@@ -535,6 +535,109 @@ Non vérifiable sur une VM (ext4, sans ACL Synology) : à faire avant toute acti
    bien `/volume1/Restic` (filet de récupération), et relever la durée de Hyper Backup pour
    fixer la fin de `apply.protected`.
 
+### Protocole de validation sur `docker-test`
+
+Opérations **manuelles** uniquement (aucune tâche DSM `forget`/`prune`), sur le repository
+existant, sans snapshot antidaté. Chaque étape s'arrête au premier écart ; conserver les
+sorties (rapports dans `/root/restic-maintenance/docker-test/logs/`, captures ci-dessous).
+Créneau : hors de la sauvegarde de `docker-test-01` (03:02) et de la plage protégée.
+
+**Limite connue : volume des candidats.** Faute de suppression, les candidats
+s'accumulent (un par jour hors fins de semaine et de mois). Simulation à partir du dépôt
+observé le 28/10 : 8 candidats sur 43 (18,6 %) le 30/10, puis **refus `remove_percent`
+dès le 31/10** (9/44 = 20,5 %) et `remove_count` à partir du 02/11. Le premier `forget`
+réel sera alors refusé, comme prévu (validation du refus en conditions réelles) ; aller
+plus loin demande une décision explicite (seuils propres à `docker-test`, ou attente
+sans fin utile : le volume ne baisse pas tant que rien n'est supprimé). Même phénomène en
+prod si l'activation intervient tard (premier candidat vers le 28/11).
+
+0. **Préalables** : merge, workflow NAS `test` (`--check` puis apply) ; empreintes du
+   journal ; relevés en lecture seule (« Validations restant à faire », point 1, avec
+   `R=/volume1/Restic/docker-test`) ; `apply.repository_owner` conforme au relevé.
+   Sur `docker-test-01`, identifier le mécanisme de sauvegarde de 03:02 (le rôle
+   `restic_backup` n'est pas activé en test) :
+   ```sh
+   systemctl list-timers --all | grep -i restic; crontab -l 2>/dev/null | grep -i restic
+   sudo grep -ril restic /etc/cron* /etc/systemd/system 2>/dev/null
+   ```
+1. **Contrôle et examen des candidats** (aucune écriture) : bloc manuel `docker-test`
+   (empreintes du journal) avec `--ignore-window` seulement ; attendu `ok`, puis :
+   ```sh
+   sudo sh -c 'cat "$(ls -1 /root/restic-maintenance/docker-test/logs/report-*.json | tail -n 1)"' | /usr/bin/python3 -I -c '
+   import sys, json
+   r = json.load(sys.stdin); s = r["summary"]
+   print(r["status"], [(f["level"], f["code"]) for f in r["findings"]])
+   print("à supprimer :", s["would_remove"], "sur", s["snapshots"], "(%s %%)" % s["would_remove_percent"])
+   for g in s["groups"]: print(g["host"], g["paths"], "garder", g["keep"], "supprimer", g["remove"], g["remove_ids"])'
+   ```
+   et la liste détaillée de restic (dates, raisons de conservation), en lecture seule :
+   ```sh
+   RO="sudo docker run --rm --pull never --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH \
+     --security-opt no-new-privileges -v /volume1/Restic/docker-test:/repo:ro \
+     -v /volume1/docker/restic-maintenance/secrets/restic_password_test:/run/secrets/restic_password:ro \
+     -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/run/secrets/restic_password \
+     restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510 --no-lock --no-cache"
+   $RO forget --dry-run --json --group-by host,paths --keep-within 30d --keep-daily 14 --keep-weekly 8 \
+     --keep-monthly 12 --keep-tag keep | /usr/bin/python3 -I -c '
+   import sys, json
+   for g in json.load(sys.stdin):
+       print("==", g["host"], g["paths"])
+       for s in sorted(g["remove"], key=lambda s: s["time"]): print("  SUPPRIMER", s["id"][:8], s["time"])
+       for r in g["reasons"]: print("  garder   ", r["snapshot"]["id"][:8], r["snapshot"]["time"], r["matches"])'
+   ```
+   Vérifier : seulement des snapshots `core` de plus de 30 jours, ni fin de semaine ni fin
+   de mois ; le snapshot de validation `1e30db7a` conservé ; volume sous les seuils.
+2. **État avant écriture** (lecture seule) :
+   ```sh
+   R=/volume1/Restic/docker-test; T0=$(date '+%Y-%m-%d %H:%M:%S'); echo "T0=$T0"
+   sudo find "$R" -type f -printf '%u:%g %m\n' | sort | uniq -c
+   sudo synoacltool -get "$(sudo find "$R/data" -type f | head -n 1)"
+   sudo ls "$R/snapshots" | wc -l; sudo ls -A "$R/locks"            # attendu : aucun verrou
+   ```
+3. **`forget` réel** : même bloc manuel, `--ignore-window --apply forget`. Attendu
+   `forget_done`, lignes `SUPPRIMÉ` identiques à la liste de l'étape 1, `check OK`, aucun
+   verrou. Refus `apply_refused` (par exemple `remove_percent`) : s'arrêter, rien n'est écrit.
+4. **`prune` réel** : `--ignore-window --apply prune`. Attendu `prune_done`, sortie de
+   `prune --dry-run` puis de `prune` dans le rapport, snapshots inchangés, aucun verrou.
+5. **ACL après écriture** (lecture seule) : les fichiers créés depuis T0 doivent avoir le
+   même propriétaire, les mêmes droits et la même ACL qu'un fichier écrit par le REST Server :
+   ```sh
+   sudo find "$R" -type f -newermt "$T0" -printf '%u:%g %m %p\n' | head -n 20
+   sudo find "$R" -type f -printf '%u:%g %m\n' | sort | uniq -c
+   F=$(sudo find "$R/index" -type f -newermt "$T0" | head -n 1); [ -n "$F" ] && sudo synoacltool -get "$F"
+   ```
+6. **Lecture via REST** depuis `docker-test-01` : avec le client identifié à l'étape 0 ; à
+   défaut, conteneur restic avec les secrets saisis à l'invite (jamais affichés, dans un
+   dossier tmpfs supprimé ensuite) :
+   ```sh
+   IMAGE=restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+   sudo docker pull -q "$IMAGE"
+   D=$(sudo mktemp -d /dev/shm/restic-test.XXXXXX)
+   read -rs -p "restic_rest_password_test : " RP; echo; read -rs -p "restic_password_test : " RW; echo
+   printf 'RESTIC_REST_USERNAME=docker-test\nRESTIC_REST_PASSWORD=%s\n' "$RP" | sudo tee "$D/env" >/dev/null
+   printf '%s' "$RW" | sudo tee "$D/pw" >/dev/null; unset RP RW; sudo chmod 600 "$D/env" "$D/pw"
+   C="sudo docker run --rm --pull never --env-file $D/env -v $D/pw:/pw:ro -e RESTIC_PASSWORD_FILE=/pw \
+     -e RESTIC_REPOSITORY=rest:https://restic.reminat.com/docker-test/ --tmpfs /root/.cache $IMAGE"
+   $C snapshots
+   $C check --read-data          # relit via le REST Server les packs et index réécrits par prune
+   ```
+   (Chemin REST à confirmer avec le client existant : `docker-test/` suppose le même schéma
+   que la prod.)
+7. **Restauration isolée** (dossier vide, rien de remplacé) :
+   ```sh
+   sudo mkdir /var/tmp/restore-test-$(date +%Y%m%d)
+   $C restore latest --target /restore -q   # avec -v /var/tmp/restore-test-AAAAMMJJ:/restore ajouté à $C
+   sudo diff -rq --exclude=log /srv/docker/core /var/tmp/restore-test-*/srv/docker/core
+   ```
+   Seules des différences sur des fichiers vivants sont attendues (`mosquitto.db`,
+   `state.json`, `database.db`…). Supprimer le dossier restauré après examen.
+8. **Nouvelle sauvegarde** : par le mécanisme habituel de `docker-test-01` (lancement
+   manuel, mêmes options que 03:02). Puis `sudo rm -rf "$D"` (secrets) et, sur le NAS, bloc
+   manuel `--ignore-window` : attendu `ok`, le nouveau snapshot accepté, aucun
+   `snapshots_disappeared`.
+9. **Preuves** : conserver les rapports (`logs/`, 90 derniers) et les sorties des étapes
+   1 à 8 ; ne pas créer de tâche DSM `forget`/`prune` pour `docker-test`.
+
 ### Activation (étape séparée, après validation de la politique)
 
 1. Validations ci-dessus (1 et 3), puis écriture réelle sur `docker-test` (2).
