@@ -1,0 +1,109 @@
+name: Diag — revue PR 17 (VM jetable)
+
+on:
+  push:
+    branches: [diag/restic-apply-review]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  IMAGE: restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+  REPO: /volume1/Restic/docker-prod
+  SECRET: /volume1/docker/restic-maintenance/secrets/restic_password_prod
+
+jobs:
+  review:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: "3.8"
+      - name: Préparation (dépôt jetable, 40 sauvegardes antidatées)
+        run: |
+          docker pull -q "$IMAGE"
+          sudo tee /usr/local/bin/docker >/dev/null <<'EOF'
+          #!/bin/bash
+          if [ "$1" = run ] && [ -e /tmp/throttle ] && printf '%s\n' "$@" | grep -qx -- --user; then
+            shift; exec /usr/bin/docker run --cpus="$(cat /tmp/throttle)" "$@"
+          fi
+          exec /usr/bin/docker "$@"
+          EOF
+          sudo chmod 755 /usr/local/bin/docker
+          sudo mkdir -p "$REPO" "$(dirname "$SECRET")" /srv/docker/core
+          head -c 32 /dev/urandom | base64 | sudo tee "$SECRET" >/dev/null; sudo chmod 600 "$SECRET"
+          R="sudo /usr/bin/docker run --rm -v $REPO:/repo -v $SECRET:/pw:ro -v /srv/docker/core:/srv/docker/core:ro -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/pw"
+          $R "$IMAGE" init -q
+          for f in $(seq 1 40); do sudo sh -c "head -c 256K /dev/urandom > /srv/docker/core/f$f"; done
+          for d in $(seq 39 -1 0); do
+            for f in $(seq 1 2 40); do sudo sh -c "head -c 256K /dev/urandom > /srv/docker/core/f$(( (f + d) % 40 + 1 ))"; done
+            $R --hostname docker-prod-01 "$IMAGE" backup -q --host docker-prod-01 --tag core --tag prod --time "$(date -u -d "-$d days -1 hour" '+%Y-%m-%d %H:%M:%S')" /srv/docker/core
+          done
+          echo "dépôt : $(sudo du -sh "$REPO" | cut -f1), 40 snapshots"
+          D="$RUNNER_TEMP/d"; mkdir -p "$D"; cp services/synology/restic-maintenance/restic_maintenance.py "$D/"
+          sha256sum "$D/restic_maintenance.py"
+          cat > "$D/base.json" <<EOF
+          {"name": "docker-prod", "mode": "dry-run", "image": "$IMAGE", "expected_restic_version": "0.19.1",
+           "repository": "$REPO", "password_file": "$SECRET", "private_dir": "/root/restic-maintenance/docker-prod",
+           "keep_reports": 90, "run_check": true, "read_data": {"weekdays": [1,2,3,4,5,6,7], "parts": 1},
+           "apply": {"forget": true, "prune": true, "prune_max_unused": "5%", "repository_owner": "0:0",
+                     "protected": {"start": "PSTART", "end": "PEND"}},
+           "groups": [{"name": "core", "host": "docker-prod-01", "paths": ["/srv/docker/core"], "tags": ["core", "prod"]}],
+           "retention": {"keep_within": "30d", "keep_daily": 14, "keep_weekly": 8, "keep_monthly": 12},
+           "window": {"start": "01:00", "end": "04:30"}, "timeout_minutes": 120,
+           "thresholds": {"max_future_skew_minutes": 60, "max_age_hours": 48, "max_snapshots_per_24h": 6,
+                          "backdate_tolerance_hours": 24, "max_remove_count": 10, "max_remove_percent": 20,
+                          "min_keep_per_group": 7}}
+          EOF
+      - name: Scénarios
+        run: |
+          set +o pipefail
+          PY="${{ steps.py.outputs.python-path }}"; D="$RUNNER_TEMP/d"
+          R="sudo /usr/bin/docker run --rm -v $REPO:/repo -v $SECRET:/pw:ro -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/pw"
+          prot() { sed "s/PSTART/$(date -d "$1 min" +%H:%M)/; s/PEND/$(date -d "$2 min" +%H:%M)/" "$D/base.json" > "$D/config.json"; echo "  plage protégée : $(date -d "$1 min" +%H:%M)–$(date -d "$2 min" +%H:%M) (il est $(date +%H:%M:%S))"; }
+          run() { set +e; sudo "$PY" -I "$D/restic_maintenance.py" --config "$D/config.json" --ignore-window "$@" > /tmp/out.txt 2>&1; c=$?; set -e
+                  sudo sh -c 'cat "$(ls -1 /root/restic-maintenance/docker-prod/logs/report-*.json | tail -1)"' > /tmp/r.json
+                  python3 - "$c" <<'EOF'
+          import json, sys
+          r = json.load(open("/tmp/r.json"))
+          f = sorted({x["code"] for x in r["findings"] if x["level"] == "ERROR"})
+          a = r.get("apply") or {}
+          print("  → %s code %s | %s | ERROR %s | check %s%s" % (r["finished"][11:19], sys.argv[1], r["status"], f or "-", (r.get("check") or {}).get("read_data"),
+                " | supprimés %d/%d" % (len(a.get("removed") or []), len(a.get("requested") or [])) if a.get("requested") else ""))
+          EOF
+                  grep -E "SUPPRESSION|SUPPRIMÉ|unable|INTERROMPUE|CLOSE|arrêt garanti|plage|délai|prune :|forget :" /tmp/out.txt | sed 's/^[0-9-]* /    /' | head -8 || true; }
+          state() { sudo cat /root/restic-maintenance/docker-prod/state/state.json | python3 -c 'import sys,json; s=json.load(sys.stdin); ip=s.get("in_progress"); print("  référence : %d ids, in_progress=%s" % (len(s["snapshot_ids"]), (ip["operation"], len(ip["ids"])) if ip else None))'; }
+          locks() { echo "  verrous dans le dépôt : $($R "$IMAGE" --no-lock list locks | wc -l)"; }
+          nsnap() { $R "$IMAGE" --no-lock snapshots --json | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))'; }
+
+          prot 300 360
+          echo "### R0 référence"; run --init-baseline
+          CANDS=$($R "$IMAGE" --no-lock forget --dry-run --json --group-by host,paths --keep-within 30d --keep-daily 14 --keep-weekly 8 --keep-monthly 12 | python3 -c 'import sys,json; print(" ".join(sorted(s["id"] for g in json.load(sys.stdin) for s in g["remove"])))')
+          echo "  candidats : $(echo $CANDS | wc -w)"
+          echo "### R1 forget partiel (un fichier de snapshot rendu non supprimable : chattr +i)"
+          PIN=$(echo $CANDS | cut -d' ' -f4); sudo chattr +i "$REPO/snapshots/$PIN"; echo "  bloqué : ${PIN:0:8}"
+          run --apply forget; state; locks; echo "  snapshots : $(nsnap) (avant 40)"
+          echo "  contrôle (lecture des données tous les jours dans ce banc) :"; run
+          sudo chattr -i "$REPO/snapshots/$PIN"
+          echo "  --resolve-interrupted :"; run --resolve-interrupted; state
+          echo "  reprise --apply forget :"; run --apply forget; state; echo "  snapshots : $(nsnap)"
+          echo "### R2 plage protégée en cours (même avec --ignore-window)"; prot -1 30; run --apply prune
+          echo "### R3 plage protégée dans 8 min (< 10 min)"; prot 8 60; run --apply prune
+          echo "### R4 échéance : prune ralenti, plage protégée dans 12 min"
+          prot 12 60; PSTART=$(date -d "12 min" +%s); echo 0.002 > /tmp/throttle
+          run --apply prune; rm -f /tmp/throttle
+          END=$(date +%s); echo "  fin du script $(( PSTART - END )) s avant le début de la plage protégée"
+          echo "  conteneurs restic restants : $(sudo /usr/bin/docker ps -q --filter name=restic-maint | wc -l)"
+          state; locks
+          set +e; $R "$IMAGE" --no-lock check > /tmp/c.txt 2>&1; echo "  restic check : code $? ($(tail -1 /tmp/c.txt))"; set -e
+          prot 300 360
+          echo "  --resolve-interrupted :"; run --resolve-interrupted
+          echo "  reprise --apply prune :"; run --apply prune; state; locks
+          set +e; $R "$IMAGE" --no-lock check --read-data > /tmp/c.txt 2>&1; echo "  check --read-data final : code $? ($(tail -1 /tmp/c.txt))"; set -e
