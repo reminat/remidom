@@ -113,4 +113,13 @@ jobs:
                 % (len(left), new in left, len((cands - {old}) & left), 40 - len(cands - {old}) - len(left)))
           EOF
           echo "### K6 contrôle quotidien final"; run
+          sudo cat /root/restic-maintenance/docker-prod/state/state.json | python3 -c "import sys,json; m=json.load(sys.stdin)['meta']['$NEW']; print('  métadonnées gardées pour le marqué :', m['time'], m['hostname'], m['paths'], m['tags'], m['tree'][:12])"
+          echo "### K7 refus : marquage qui ajoute aussi un tag non autorisé (keep + autre)"
+          OTHER=$($RO snapshots --json | python3 -c 'import sys,json; print(sorted(json.load(sys.stdin), key=lambda s: s["time"])[3]["id"])')
+          sudo docker run --rm --pull never --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --hostname restic-tag --user 0:0 --cap-drop ALL --cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges -v $REPO:/repo $SECRET_RO \
+            $IMAGE --no-cache tag --add keep --add autre "$OTHER" 2>&1 | sed 's/^/  restic tag : /'
+          run; grep -E "retag_mismatch|disparu" /tmp/out.txt | sed 's/^[0-9-]* /    /'
+          echo "  référence inchangée (ancien encore présent) : $(sudo cat /root/restic-maintenance/docker-prod/state/state.json | python3 -c "import sys,json; print('$OTHER' in json.load(sys.stdin)['snapshot_ids'])")"
           set +e; $RO check > /tmp/c.txt 2>&1; echo "  restic check : code $? ($(tail -1 /tmp/c.txt))"; set -e
