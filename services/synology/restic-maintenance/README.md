@@ -357,6 +357,18 @@ for s in json.load(sys.stdin): print(s["id"], "original", s.get("original"), s["
 (`--ignore-window`) doit donner `ok` avec `INFO retagged` ; noter le nouvel identifiant.
 Retirer la protection : même commande avec `tag --remove keep` (nouvel identifiant encore).
 
+**Fait en prod le 30/10/2026** (bloc protégé : créneau, verrou de la maintenance tenu,
+aucun verrou restic, métadonnées de la référence comparées avant et après) :
+
+| Élément | Valeur |
+|---|---|
+| Avant | `75eeb351a2f3ab265d59ff15ec46ebee25b79434636b8428f578172ca823a73b`, tags `core,prod` |
+| Après | `7215effbac378db021d30ab6ac05525b4945e06b9c22a650838df1a23d63f09a`, `original` = l'ancien, tags `core,keep,prod` ; date, hôte, chemins et arbre identiques ; 3 snapshots, aucun verrou |
+| Contrôle suivant | `INFO retagged`, statut `ok`, code 0, 3 conservés, 0 candidat ; référence mise à jour |
+
+Le snapshot manuel initial de la prod est donc conservé par `--keep-tag keep`, quelles
+que soient les autres règles (identifiant à utiliser désormais : `7215effb…`).
+
 ### Accès en écriture
 
 - **REST Server inchangé** (`--append-only --private-repos`) : `docker-prod-01` ne peut
