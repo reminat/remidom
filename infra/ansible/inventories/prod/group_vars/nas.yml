@@ -14,15 +14,15 @@ restic_maintenance_groups:
     paths: [/srv/docker/core]
     tags: [core, prod]
 
-# Opérations réelles. À ne merger qu'après : relevé du repository docker-prod (propriétaire
-# ci-dessous), conditions du README « Droits des fichiers écrits par restic » (Hyper Backup
-# validé, lecteurs identifiés) et marquage keep de 75eeb351 reconnu au contrôle.
+# Opérations réelles. Préalables remplis le 30/10/2026 : propriétaire du repository relevé
+# (0:0), conditions du README « Droits des fichiers écrits par restic » (Hyper Backup validé,
+# lecteurs identifiés), premier snapshot marqué keep (75eeb351 → 7215effb, INFO retagged).
 restic_maintenance_apply:
   forget: true
   prune: true
   prune_max_unused: "5%"
-  repository_owner: "0:0"      # à confirmer par le relevé de docker-prod
-  # Provisoire : fin à confirmer selon la durée réelle de Hyper Backup (06:00).
+  repository_owner: "0:0"      # relevé du 30/10/2026
+  # Hyper Backup (06:00) : 17 s le 30/10 ; fin conservée à 08:00 par marge.
   protected:
     start: "04:55"
     end: "08:00"
