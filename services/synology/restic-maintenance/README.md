@@ -670,7 +670,7 @@ localement : packs et index de `prune`, verrous, et snapshot réécrit par `rest
 |---|---|
 | REST Server (root, `DAC_OVERRIDE`) | lecture normale (validé : `check --read-data` via REST) |
 | Maintenance du NAS (root, `DAC_READ_SEARCH`) | lecture normale (contrôle final `ok`) |
-| Hyper Backup | **non validé** : tourne en principe avec des droits système ; à confirmer (journal sans fichier ignoré ni erreur de droits, et restauration d'un fichier réécrit, voir ci-dessous) |
+| Hyper Backup | **validé le 30/10/2026** pour un index réécrit (voir ci-dessous) : sauvegardé et restauré à l'identique |
 | Snapshots Btrfs | conservent les fichiers **avec leurs droits** (`root:root 0400`, mode Linux) : ils ne donnent, à eux seuls, **aucun accès en lecture supplémentaire**. Lire dans un snapshot exige les mêmes droits (root) ; une restauration depuis un snapshot rétablit ces mêmes droits |
 | Comptes de l'ACL (`administrators`, `remi`, `restic`) en SMB, File Station, `rsync` sans `sudo` | **plus de lecture** de ces fichiers, y compris dans les snapshots Btrfs : une copie faite ainsi serait incomplète, sans erreur visible selon l'outil. Copier le repository uniquement en root, ou par Hyper Backup une fois validé |
 | Suppression | dépend des droits du **dossier** (ACL inchangée) : un compte qui peut écrire dans `data/xx/` peut toujours supprimer ces fichiers ; le mode `0400` ne les protège pas |
@@ -684,12 +684,27 @@ vaut qu'une fois les deux conditions remplies ; d'ici là, aucune écriture loca
    suivante sans fichier ignoré ni erreur de droits sous `/volume1/Restic` (journal de la
    tâche dans DSM), **et** restauration d'un index en `0400` vers un dossier séparé, avec
    empreinte identique à l'original (commandes ci-dessous). Relever au passage la durée de
-   la tâche (fin de `apply.protected`, provisoirement 08:00).
+   la tâche (fin de `apply.protected`, provisoirement 08:00). **Acquis le 30/10/2026**
+   (ci-dessous).
 2. **Lecteurs du repository identifiés** : tout compte, tâche ou processus qui lit
    `/volume1/Restic` doit tourner en root, sinon il perd l'accès aux fichiers réécrits.
    Connus : REST Server (root), maintenance (root). À identifier : le compte `restic` de
    l'ACL, le partage SMB, les tâches DSM (Hyper Backup, Cloud Sync, rsync, Snapshot
    Replication), les processus qui ont des fichiers ouverts.
+
+**Preuves du 30/10/2026** :
+
+| Vérification | Résultat |
+|---|---|
+| Hyper Backup | exécution de 06:00:06 à 06:00:23 (17 s), réussie |
+| Fichier testé | index de `docker-test` réécrit par `prune` le 29/10, `root:root 0400`, sans ACL (« Linux mode ») |
+| Restauration Hyper Backup | dans `/volume1/download` (hors du repository) ; SHA-256 identique à l'original : `1e6a417a5520fe467258280efaebf8d4d4f1854fb1cd1cd2eecac8afe9e6177e` |
+| Même nuit, prod | sauvegarde de 02:30 réussie (snapshot `c6e5834b`) ; contrôle automatique de 03:45 `ok`, 3 snapshots, aucun constat ; snapshot Btrfs de 05:00 créé |
+
+Portée : la condition 1 est acquise **pour cet index** ; les packs réécrits ont les mêmes
+droits et passent par le même mécanisme. La durée observée (17 s pour un repository de
+quelques centaines de Mio) laisse une large marge sous la fin provisoire de la plage
+protégée (08:00). Supprimer la copie restaurée de `/volume1/download` après examen.
 
 Si une condition échoue, la correction minimale serait de réappliquer l'ACL héritée
 **fichier par fichier** sur les seuls fichiers écrits par une opération réelle (liste des
