@@ -676,9 +676,9 @@ localement : packs et index de `prune`, verrous, et snapshot réécrit par `rest
 | Suppression | dépend des droits du **dossier** (ACL inchangée) : un compte qui peut écrire dans `data/xx/` peut toujours supprimer ces fichiers ; le mode `0400` ne les protège pas |
 | Restauration Hyper Backup | restaure les droits sauvegardés (fichiers en mode Linux `0400`) : sans effet pour le REST Server sous root |
 
-**Décision proposée : acceptation conditionnelle**, sans correction des droits. Elle ne
-vaut qu'une fois les deux conditions remplies ; d'ici là, aucune écriture locale en prod
-(`--apply prune`, `restic tag`) :
+**Décision : acceptation**, sans correction des droits, **acquise le 30/10/2026** pour les
+usages constatés (les deux conditions ci-dessous sont remplies). Elle était subordonnée à
+ces conditions ; tout nouveau lecteur du partage `Restic` la remet en cause :
 
 1. **Hyper Backup validé** sur les fichiers réécrits de `docker-test` : exécution
    suivante sans fichier ignoré ni erreur de droits sous `/volume1/Restic` (journal de la
@@ -690,7 +690,9 @@ vaut qu'une fois les deux conditions remplies ; d'ici là, aucune écriture loca
    `/volume1/Restic` doit tourner en root, sinon il perd l'accès aux fichiers réécrits.
    Connus : REST Server (root), maintenance (root). À identifier : le compte `restic` de
    l'ACL, le partage SMB, les tâches DSM (Hyper Backup, Cloud Sync, rsync, Snapshot
-   Replication), les processus qui ont des fichiers ouverts.
+   Replication), les processus qui ont des fichiers ouverts. **Acquis le 30/10/2026** :
+   aucun accès SMB, rsync, Cloud Sync ni autre lecteur du partage `Restic` ; parmi les
+   conteneurs, seul `rest-server` monte le partage, sous root ; Hyper Backup validé (1).
 
 **Preuves du 30/10/2026** :
 
@@ -700,6 +702,9 @@ vaut qu'une fois les deux conditions remplies ; d'ici là, aucune écriture loca
 | Fichier testé | index de `docker-test` réécrit par `prune` le 29/10, `root:root 0400`, sans ACL (« Linux mode ») |
 | Restauration Hyper Backup | dans `/volume1/download` (hors du repository) ; SHA-256 identique à l'original : `1e6a417a5520fe467258280efaebf8d4d4f1854fb1cd1cd2eecac8afe9e6177e` |
 | Même nuit, prod | sauvegarde de 02:30 réussie (snapshot `c6e5834b`) ; contrôle automatique de 03:45 `ok`, 3 snapshots, aucun constat ; snapshot Btrfs de 05:00 créé |
+
+Relevé du repository `docker-prod` (30/10/2026) : propriétaire `0:0` partout
+(`apply.repository_owner: "0:0"`) ; plage protégée conservée à `04:55–08:00`.
 
 Portée : la condition 1 est acquise **pour cet index** ; les packs réécrits ont les mêmes
 droits et passent par le même mécanisme. La durée observée (17 s pour un repository de
