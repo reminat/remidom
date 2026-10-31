@@ -415,9 +415,12 @@ que soient les autres règles (identifiant à utiliser désormais : `7215effb…
 | `restic-docker-test-prune` (28) | **mensuelle, premier vendredi du mois, 04:15** | `--apply prune` |
 
 Le **premier samedi** (prod) ou **vendredi** (test) **du mois** remplace le « 1er du mois »
-d'abord proposé : c'est la planification mensuelle disponible dans l'interface DSM. Le test
-passe la veille de la prod : une anomalie de version ou de comportement y apparaît d'abord.
-Ce jour-là, `forget` (04:00) précède
+d'abord proposé : c'est la planification mensuelle disponible dans l'interface DSM.
+Le forget hebdomadaire de test précède celui de production d’un jour. Pour prune, le premier
+vendredi et le premier samedi du mois ne sont pas nécessairement consécutifs : si le mois
+commence un samedi, prune prod passe avant prune test. Cette planification ne garantit donc
+pas une validation préalable de chaque opération mensuelle sur test.
+Le jour du `prune`, `forget` (04:00) précède
 `prune` (04:15) : `prune` libère aussitôt les données des snapshots supprimés. Les deux
 partagent le verrou `state/lock` : si `forget` durait plus de 15 min, `prune` sortirait en
 code 75 sans rien faire (en pratique, chacun dure quelques secondes).
