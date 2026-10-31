@@ -423,7 +423,7 @@ Home Assistant (VM HAOS) n'est pas concerné : il utilise ses propres sauvegarde
 Playbook `playbooks/nas.yml` (groupe `[nas]`, sans `become`), déployé uniquement via le
 workflow manuel **NAS — Restic maintenance**, jamais par `deploy.sh`. Contrôle quotidien en
 dry-run ; opérations réelles `forget`/`prune` désactivées par défaut dans le rôle, activées
-par l'inventaire pour `docker-prod` (tâches DSM ID 24 et 25) et `docker-test` (manuel).
+par l'inventaire pour `docker-prod` (tâches DSM ID 24 et 25) et `docker-test` (ID 27 et 28).
 Préparation du NAS, tâches DSM et contrôles :
 [`services/synology/restic-maintenance/README.md`](../../services/synology/restic-maintenance/README.md).
 
