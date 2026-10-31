@@ -8,8 +8,8 @@ ne quitte jamais le NAS.
 qu'en lecture (tableau ci-dessous). Les **opérations réelles** (`--apply forget`,
 `--apply prune`) sont **désactivées par défaut dans le rôle** et passent par des tâches DSM
 distinctes : voir « Opérations réelles ». **État au 31/10/2026** : activées par l'inventaire
-pour `docker-prod` (tâches DSM ID 24 et 25) et pour `docker-test` (lancements manuels
-uniquement) ; voir « État de la production au 31/10/2026 ».
+pour `docker-prod` (tâches DSM ID 24 et 25) et pour `docker-test` (tâches DSM ID 27 et 28) ;
+voir « État de la production au 31/10/2026 » et « État de `docker-test` au 31/10/2026 ».
 
 | Protection | Mécanisme |
 |---|---|
@@ -165,9 +165,9 @@ plus les données** :
   borné par le délai global de 120 min ; à titre indicatif, un disque de NAS relit plusieurs
   centaines de Go dans ce délai. Si le dépôt grossit au point de s'en approcher, passer à
   `parts: 4` (un quart par semaine) plutôt qu'allonger le délai.
-- **Coordination** : rien de nouveau à planifier : même tâche DSM (ID 21), même verrou,
-  même fenêtre (03:45 le dimanche, loin de la sauvegarde de 02:30 et avant les snapshots
-  Btrfs de 05:00). `docker-test` n'a pas de tâche planifiée.
+- **Coordination** : rien de nouveau à planifier : même tâche DSM de contrôle, même verrou,
+  même fenêtre, le dimanche : 03:45 en prod (ID 21, loin de la sauvegarde de 02:30), 03:30 en
+  test (ID 26, après la sauvegarde de 03:00), avant les snapshots Btrfs de 05:00.
 - **Erreurs** : un échec de `check` (données corrompues ou illisibles) donne le statut
   `restic_error`, code 4, donc **l'e-mail DSM existant** ; le rapport indique
   `"check": {"read_data": "--read-data", "ok": false}` et la sortie de restic. Aucune
@@ -192,19 +192,28 @@ C'est voulu. Procédure, pour chaque environnement déployé :
    « Show reference checksums » et vérifier l'assertion « Fichiers déployés identiques… ».
 2. Recalculer l'empreinte du script hors du NAS, depuis le commit déployé, et la comparer :
    `git show <commit>:services/synology/restic-maintenance/restic_maintenance.py | sha256sum`.
-3. DSM → Planificateur de tâches → pour `docker-prod`, **les trois tâches** : ID 21
-   « Restic maintenance docker-prod » (contrôle), ID 24 « restic-docker-prod-forget » et
-   ID 25 « restic-docker-prod-prune » → Modifier → Paramètres de tâche : remplacer les
-   valeurs de `REF_PY` et `REF_CFG` (64 caractères chacune), enregistrer. Les trois tâches
-   portent toujours les mêmes empreintes ; en oublier une la fait échouer à sa prochaine
-   exécution (sans rien exécuter).
+3. DSM → Planificateur de tâches → **les trois tâches de chaque environnement déployé** →
+   Modifier → Paramètres de tâche : remplacer les valeurs de `REF_PY` et `REF_CFG`
+   (64 caractères chacune), enregistrer :
+
+   | Environnement | Tâches | `REF_PY` | `REF_CFG` |
+   |---|---|---|---|
+   | `docker-prod` | ID 21 `restic-docker-prod-control`, 24 `restic-docker-prod-forget`, 25 `restic-docker-prod-prune` | script commun | configuration prod |
+   | `docker-test` | ID 26 `restic-docker-test-control`, 27 `restic-docker-test-forget`, 28 `restic-docker-test-prune` | script commun | configuration test |
+
+   Les trois tâches d'un environnement portent toujours les mêmes empreintes ; en oublier
+   une la fait échouer à sa prochaine exécution (sans rien exécuter). Le script étant
+   **commun**, un déploiement qui le modifie sur test **et** prod impose de mettre à jour
+   `REF_PY` dans les **six** tâches ; un changement de configuration d'un seul
+   environnement ne concerne que le `REF_CFG` de ses trois tâches.
 4. Lancer le bloc manuel (sans `--init-baseline`, avec `--ignore-window`) pour vérifier les
    empreintes et le fonctionnement, ou attendre l'exécution suivante et vérifier
    l'absence d'e-mail et le rapport.
 
 Entre le déploiement et l'étape 3, l'exécution planifiée échouerait : faire les deux dans
-la même journée, avant 03:45 (prochaine exécution de l'ID 21 ; le samedi, 04:00 et 04:15
-suivent). `sudo synoschedtask --get id=21` (puis 24, 25) confirme ensuite l'état des tâches.
+la même journée, avant la prochaine exécution, soit 03:30 en test (ID 26 ; le vendredi,
+04:00 et 04:15 suivent) et 03:45 en prod (ID 21 ; le samedi, 04:00 et 04:15 suivent).
+`sudo synoschedtask --get id=<ID>` confirme ensuite l'état de chaque tâche.
 
 ## Opérations réelles (`forget`, `prune`)
 
@@ -213,14 +222,14 @@ suivent). `sudo synoschedtask --get id=21` (puis 24, 25) confirme ensuite l'éta
 script refuse `--apply` avant tout conteneur (`apply_disabled`, code 2). Les activer demande
 une PR sur l'inventaire, un déploiement, **et** une tâche DSM dédiée créée par un
 administrateur. **État au 31/10/2026** : activées pour `docker-prod` (PR #21, tâches ID 24
-et 25) et pour `docker-test` (PR #19, aucune tâche DSM) ; les valeurs par défaut du rôle
+et 25) et pour `docker-test` (PR #19, tâches ID 27 et 28) ; les valeurs par défaut du rôle
 restent à `false`.
 
 ### Séparation contrôle / opération réelle
 
 | | Contrôle quotidien | Opération réelle |
 |---|---|---|
-| Lancement | sans option ; tâche DSM du contrôle (prod : ID 21) | `--apply forget` ou `--apply prune` ; tâches DSM distinctes (prod : ID 24 et 25) |
+| Lancement | sans option ; tâche DSM du contrôle (prod : ID 21, test : ID 26) | `--apply forget` ou `--apply prune` ; tâches DSM distinctes (prod : ID 24 et 25, test : ID 27 et 28) |
 | Condition | — | `apply.<opération>: true` dans `config.json` ; contrôle complet **sans aucune erreur** juste avant |
 | Repository | lecture seule (`:ro`), `--no-lock` | lecture seule pour tout le contrôle ; **un seul conteneur** en écriture, pour la seule commande réelle, sous verrou restic normal |
 | Commandes | liste blanche de lecture | `forget <identifiants complets>` ou `prune --max-unused=N%`, rien d'autre (`check_write_safe`) ; jamais `--no-lock`, `unlock`, `repair`, `--prune`, `--unsafe-*` |
@@ -398,12 +407,20 @@ que soient les autres règles (identifiant à utiliser désormais : `7215effb…
 
 | Tâche DSM (ID) | Planification | Commande |
 |---|---|---|
-| « Restic maintenance docker-prod » (21) | quotidienne 03:45 | sans option (contrôle) |
-| « restic-docker-prod-forget » (24) | **hebdomadaire, samedi 04:00** | `--apply forget` |
-| « restic-docker-prod-prune » (25) | **mensuelle, premier samedi du mois, 04:15** | `--apply prune` |
+| `restic-docker-prod-control` (21) | quotidienne 03:45 | sans option (contrôle) |
+| `restic-docker-prod-forget` (24) | **hebdomadaire, samedi 04:00** | `--apply forget` |
+| `restic-docker-prod-prune` (25) | **mensuelle, premier samedi du mois, 04:15** | `--apply prune` |
+| `restic-docker-test-control` (26) | quotidienne 03:30 | sans option (contrôle) |
+| `restic-docker-test-forget` (27) | **hebdomadaire, vendredi 04:00** | `--apply forget` |
+| `restic-docker-test-prune` (28) | **mensuelle, premier vendredi du mois, 04:15** | `--apply prune` |
 
-Le **premier samedi du mois** remplace le « 1er du mois » d'abord proposé : c'est la
-planification mensuelle disponible dans l'interface DSM. Ce jour-là, `forget` (04:00) précède
+Le **premier samedi** (prod) ou **vendredi** (test) **du mois** remplace le « 1er du mois »
+d'abord proposé : c'est la planification mensuelle disponible dans l'interface DSM.
+Le forget hebdomadaire de test précède celui de production d’un jour. Pour prune, le premier
+vendredi et le premier samedi du mois ne sont pas nécessairement consécutifs : si le mois
+commence un samedi, prune prod passe avant prune test. Cette planification ne garantit donc
+pas une validation préalable de chaque opération mensuelle sur test.
+Le jour du `prune`, `forget` (04:00) précède
 `prune` (04:15) : `prune` libère aussitôt les données des snapshots supprimés. Les deux
 partagent le verrou `state/lock` : si `forget` durait plus de 15 min, `prune` sortirait en
 code 75 sans rien faire (en pratique, chacun dure quelques secondes).
@@ -490,12 +507,14 @@ réapparaissent.
 
 ### Notifications et rapport
 
-- Tâches ID 24 et 25 : réglage prévu « Envoyer les détails d'exécution par e-mail » →
-  **toujours**. Chaque exécution enverrait alors sa sortie : `SUPPRIMÉ : …` pour chaque
-  snapshot, `forget : N snapshot(s) supprimé(s)…`, ou la sortie de `prune`, ou le motif du
-  refus. Les échecs ont un code non nul. **Non vérifié au 31/10/2026** : la sortie de
-  `synoschedtask --get` ne montre pas ce réglage ; le contrôler dans DSM (Modifier →
-  Paramètres de tâche) et à la réception des e-mails du 07/11.
+- Tâches `forget` et `prune` (prod : ID 24 et 25 ; test : ID 27 et 28) : réglage prévu
+  « Envoyer les détails d'exécution par e-mail » → **toujours**. Chaque exécution enverrait
+  alors sa sortie : `SUPPRIMÉ : …` pour chaque snapshot, `forget : N snapshot(s)
+  supprimé(s)…`, ou la sortie de `prune`, ou le motif du refus. Les échecs ont un code non
+  nul. **Non vérifié au 31/10/2026**, pour ces tâches comme pour celles du contrôle (ID 21
+  et 26) : la sortie de `synoschedtask --get` ne montre pas ce réglage ; le contrôler dans
+  DSM (Modifier → Paramètres de tâche) et à la réception des e-mails des 06/11 (test) et
+  07/11 (prod).
 - Rapport JSON : `operation` (`forget`, `prune`, `control`, `resolve-interrupted`),
   `apply.requested`, `apply.removed`, `apply.ok`, `apply.dry_run` / `apply.restic_output`
   (fin des sorties de restic), `check_after`.
@@ -566,8 +585,8 @@ Non vérifiable sur une VM (ext4, sans ACL Synology) : à faire avant toute acti
 
 ### Protocole de validation sur `docker-test`
 
-Opérations **manuelles** uniquement (aucune tâche DSM `forget`/`prune`), sur le repository
-existant, sans snapshot antidaté. Chaque étape s'arrête au premier écart ; conserver les
+Protocole suivi le 29/10/2026, **avant** la création des tâches de test (ID 26 à 28) :
+opérations **manuelles** uniquement, sur le repository existant, sans snapshot antidaté. Chaque étape s'arrête au premier écart ; conserver les
 sorties (rapports dans `/root/restic-maintenance/docker-test/logs/`, captures ci-dessous).
 Créneau : hors de la sauvegarde de `docker-test-01` (03:00 à 03:05) et de la plage protégée.
 
@@ -665,7 +684,8 @@ prod si l'activation intervient tard (premier candidat vers le 28/11).
    manuel `--ignore-window` : attendu `ok`, le nouveau snapshot accepté, aucun
    `snapshots_disappeared`.
 9. **Preuves** : conserver les rapports (`logs/`, 90 derniers) et les sorties des étapes
-   1 à 8 ; ne pas créer de tâche DSM `forget`/`prune` pour `docker-test`.
+   1 à 8 ; aucune tâche DSM `forget`/`prune` pendant la validation (créées ensuite, le
+   31/10 : voir « État de `docker-test` au 31/10/2026 »).
 
 ### Résultats de la validation sur `docker-test` (29/10/2026)
 
@@ -784,9 +804,9 @@ Constaté sur le NAS (`synoschedtask --get`) :
 
 | ID | Tâche | État | Utilisateur | Planification | Commande | Prochaine exécution |
 |---|---|---|---|---|---|---|
-| 21 | « Restic maintenance docker-prod » | activée | root | quotidienne, 03:45 | contrôle, sans `--apply` | quotidienne |
-| 24 | « restic-docker-prod-forget » | activée | root | chaque samedi, 04:00 | `--apply forget` | 07/11/2026 04:00 |
-| 25 | « restic-docker-prod-prune » | activée | root | premier samedi du mois, 04:15 | `--apply prune` | 07/11/2026 04:15 |
+| 21 | `restic-docker-prod-control` (nommée « Restic maintenance docker-prod » jusqu'au 31/10 ; renommage seul, script et horaire inchangés) | activée | root | quotidienne, 03:45 | contrôle, sans `--apply` | quotidienne |
+| 24 | `restic-docker-prod-forget` | activée | root | chaque samedi, 04:00 | `--apply forget` | 07/11/2026 04:00 |
+| 25 | `restic-docker-prod-prune` | activée | root | premier samedi du mois, 04:15 | `--apply prune` | 07/11/2026 04:15 |
 
 Empreintes des trois tâches (déploiement de la PR #21, workflow NAS `prod`, runs
 `41049960627` et `41050077656`) :
@@ -804,13 +824,59 @@ Preuves :
 | 31/10 | sauvegarde automatique de `docker-prod-01` | terminée à 02:30:10 CET, `Result=success`, `ExecMainStatus=0` ; nouveau snapshot `0162776b` (31/10, 01:30:08 UTC) |
 | 31/10 | snapshot initial | `7215effb` toujours protégé par `keep` |
 | 31/10 | `check` depuis `docker-prod-01` (via REST) | 4 snapshots, aucune erreur |
-| 31/10 | contrôle DSM (ID 21) | `report-20261031-034502.json` : `started=2026-10-31T02:45:02.284681+00:00`, `status=ok`, `check.ok=true`, `read_data=aucune`, `findings=[]`, `summary.per_group={"core":4}` |
+| 31/10 | contrôle DSM (ID 21, alors nommée « Restic maintenance docker-prod ») | `report-20261031-034502.json` : `started=2026-10-31T02:45:02.284681+00:00`, `status=ok`, `check.ok=true`, `read_data=aucune`, `findings=[]`, `summary.per_group={"core":4}` |
 
 **Reste à vérifier le 07/11/2026** : premières exécutions planifiées des tâches 24
 (`forget`, 04:00) et 25 (`prune`, 04:15) : rapports dans
 `/root/restic-maintenance/docker-prod/logs/` (attendu : `nothing_to_remove`, aucun
 candidat avant fin novembre, puis `prune_done`), absence de verrou, contrôle suivant `ok`,
 et e-mails reçus selon le réglage des tâches (non vérifié à ce jour).
+
+### État de `docker-test` au 31/10/2026
+
+Tâches créées le 31/10, constatées par `synoschedtask --get` (activées, root) :
+
+| ID | Tâche | Planification | Commande | Prochaine exécution |
+|---|---|---|---|---|
+| 26 | `restic-docker-test-control` | quotidienne, 03:30 | contrôle, sans `--apply` | 01/11/2026 03:30 |
+| 27 | `restic-docker-test-forget` | chaque vendredi, 04:00 | `--apply forget` | 06/11/2026 04:00 |
+| 28 | `restic-docker-test-prune` | premier vendredi du mois, 04:15 | `--apply prune` | 06/11/2026 04:15 |
+
+Empreintes des trois tâches (déploiement de la PR #19, workflow NAS `test`, runs
+`40958836880` et `40958941914`, commit `660438e`) :
+`REF_PY=833285006783c58dc9a92863a72c9ac91120eb53d1c478e7acea6d3b7348104b` (script commun),
+`REF_CFG=bf66adefc5fade174bbd2ee62adbd9a0708a9c940819bae3b69450fec68a34e5`.
+
+Preuves du 31/10/2026 :
+
+| Vérification | Résultat |
+|---|---|
+| Sauvegarde de `docker-test-01` | 03:01:44 à 03:01:47 CET, `Result=success`, `ExecMainStatus=0` |
+| Timer | `RandomizedDelayUSec=5min`, `Persistent=yes` |
+| Contrôle manuel (09:57) | empreintes OK, montages en lecture seule vérifiés, `check` de structure OK ; 37 snapshots, 36 conservés, 1 candidat (2,7 %) ; statut `ok`, code 0 ; aucune suppression |
+
+**Aucune exécution planifiée des tâches de test n'est encore constatée.** À vérifier :
+- 01/11 à 03:30 : premier contrôle planifié (ID 26) : rapport `ok` dans
+  `/root/restic-maintenance/docker-test/logs/` ;
+- 06/11 à 04:00 : premier `forget` planifié (ID 27), **première suppression automatique**
+  attendue sur test (6 à 7 candidats estimés : la simulation en prévoit 6, le contrôle du
+  31/10 en a trouvé 1 de plus qu'elle ; sous les seuils de 10 et 20 %) ; examiner la veille
+  les candidats réels (« Protocole de validation », étape 1) ;
+- 06/11 à 04:15 : premier `prune` planifié (ID 28) ; aucun verrou restant, contrôle
+  suivant `ok` ;
+- e-mails reçus selon le réglage des tâches (non vérifié à ce jour).
+
+Réserves :
+- **Rattrapage `Persistent=yes`** : si `docker-test-01` est arrêtée à 03:00, la sauvegarde
+  manquée est lancée au démarrage suivant, à n'importe quelle heure. Pendant un `forget` ou
+  un `prune`, elle échoue (verrou exclusif, pas de nouvel essai), ou l'opération réelle est
+  refusée (`locks`, `repository_locked`) : rien n'est supprimé à tort, mais la sauvegarde
+  manque jusqu'à 03:00 le lendemain (`stale` au-delà de 48 h). Pendant le contrôle (lecture
+  sans verrou), le snapshot en cours peut manquer et `check` échouer de façon transitoire.
+- **Exécutions concurrentes** : les trois tâches d'un environnement partagent le verrou
+  `state/lock` ; une exécution qui dure encore quand la suivante démarre fait sortir
+  celle-ci en code 75, sans rien faire. Test et prod ont des verrous et des repositories
+  distincts, et des jours d'opérations réelles différents (vendredi, samedi).
 
 ### Activation (procédure suivie les 30 et 31/10/2026)
 
@@ -1222,16 +1288,16 @@ Limites :
 
 ## Tâche planifiée DSM du contrôle (modèle)
 
-Modèle de création, illustré avec `docker-test`. **État au 31/10/2026** : en prod, la tâche
-existe et est activée (ID 21, « Restic maintenance docker-prod », root, 03:45) ; pour
-`docker-test`, aucune tâche n'a été créée (contrôles et opérations réelles manuels).
+Modèle de création, illustré avec `docker-test`. **État au 31/10/2026** : les tâches
+existent et sont activées, sous root : ID 21 `restic-docker-prod-control` (03:45) et ID 26
+`restic-docker-test-control` (03:30).
 
 *Panneau de configuration → Planificateur de tâches → Créer → Tâche planifiée → Script
 défini par l'utilisateur* :
 
 | Champ | Valeur |
 |---|---|
-| Tâche | `restic-maintenance-docker-test (dry-run)` |
+| Tâche | `restic-docker-test-control` (nom retenu ; ID 26) |
 | Utilisateur | `root` |
 | Activé | **décoché** |
 | Planification | quotidienne, heure **à définir** dans la fenêtre `window` (après les sauvegardes, fin avant 05:00) |
@@ -1278,7 +1344,7 @@ Même script, même rôle, même procédure que `docker-test` ; seules les valeu
 | Stockage privé | `/root/restic-maintenance/docker-test` | `/root/restic-maintenance/docker-prod` |
 | Groupes attendus | `core` (`docker-test-01`, tags `core,test`) + `validation` figé | `core` (`docker-prod-01`, `/srv/docker/core`, tags `core,prod`) |
 | Rétention évaluée, seuils, fenêtre, délai | valeurs par défaut du rôle | identiques (aucune politique propre à la prod) |
-| Mode | `forget`/`prune` activés dans l'inventaire de test ; contrôle et opérations réelles **manuels**, aucune tâche DSM | contrôle quotidien (ID 21) ; `forget` (ID 24) et `prune` (ID 25) **activés** (voir « État de la production au 31/10/2026 ») |
+| Mode | contrôle quotidien (ID 26) ; `forget` (ID 27) et `prune` (ID 28) **activés** (voir « État de `docker-test` au 31/10/2026 ») | contrôle quotidien (ID 21) ; `forget` (ID 24) et `prune` (ID 25) **activés** (voir « État de la production au 31/10/2026 ») |
 | Workflow | environnement GitHub `test` (runner `docker-test-01`) | environnement GitHub `prod` (runner `docker-prod`, approbation requise) |
 
 Le contrôle `stale` (aucun snapshot de moins de 48 h) signale aussi l'arrêt de la
@@ -1326,7 +1392,7 @@ D'où l'heure choisie, loin de la sauvegarde de 02:30 (quelques secondes pour 81
    `restic snapshots`).
 3. Tâche DSM du contrôle, même script que le modèle (chemins `docker-prod`), créée
    **désactivée**, puis activée après un lancement manuel concluant : c'est l'ID 21,
-   « Restic maintenance docker-prod » (activée, root, 03:45).
+   aujourd'hui `restic-docker-prod-control` (activée, root, 03:45).
 
 ### Planification (état au 31/10/2026)
 
@@ -1334,17 +1400,20 @@ D'où l'heure choisie, loin de la sauvegarde de 02:30 (quelques secondes pour 81
 |---|---|---|
 | 02:30 | sauvegarde `restic-backup-core.timer` (docker-prod-01) | `docker-prod` |
 | 03:00 (+ 0 à 5 min) | sauvegarde de `docker-test-01` (`restic-backup.timer`, hors dépôt) | `docker-test` |
-| — | maintenance de `docker-test` : aucune tâche DSM (lancements manuels) | `docker-test` |
+| 03:30 | contrôle dry-run (DSM ID 26, activée ; premier passage le 01/11, à vérifier) | `docker-test` |
 | **03:45** | **contrôle dry-run (DSM ID 21, activée)** | `docker-prod` |
+| 04:00 le vendredi | `forget` réel (DSM ID 27, activée ; première exécution le 06/11, à vérifier) | `docker-test` |
+| 04:15 le premier vendredi du mois | `prune` réel (DSM ID 28, activée ; première exécution le 06/11, à vérifier) | `docker-test` |
 | 04:00 le samedi | `forget` réel (DSM ID 24, activée ; première exécution le 07/11, à vérifier) | `docker-prod` |
 | 04:15 le premier samedi du mois | `prune` réel (DSM ID 25, activée ; première exécution le 07/11, à vérifier) | `docker-prod` |
 | 04:55–08:00 | plage protégée des opérations réelles | — |
 | 05:00 | snapshots Btrfs | — |
 | 06:00 | Hyper Backup | — |
 
-03:45 laisse plus d'une heure après la sauvegarde de prod et reste dans la fenêtre
-`01:00–04:30` ; les deux maintenances portent sur des repositories distincts et ont
-chacune leur verrou.
+03:45 laisse plus d'une heure après la sauvegarde de prod, 03:30 environ 25 min après celle
+de test (03:00 à 03:05), sous réserve d'un rattrapage `Persistent=yes` (voir « État de
+`docker-test` au 31/10/2026 ») ; tout reste dans la fenêtre `01:00–04:30`. Les deux
+maintenances portent sur des repositories distincts et ont chacune leur verrou.
 
 ## Risques
 

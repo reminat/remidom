@@ -1,8 +1,9 @@
 # Connexion au NAS : playbooks/group_vars/nas.yml (commune aux environnements).
 
 # Maintenance Restic du repository docker-test. Contrôle quotidien en dry-run ; opérations
-# réelles (forget, prune) activées pour la validation sur test (lancements manuels, aucune
-# tâche DSM automatique). La production garde les valeurs par défaut du rôle (false).
+# réelles (forget, prune) activées ci-dessous, lancées par les tâches DSM ID 26 (contrôle),
+# 27 (forget) et 28 (prune). La production les active dans son propre inventaire ; les
+# valeurs par défaut du rôle restent à false.
 restic_maintenance_name: docker-test
 restic_maintenance_repository: /volume1/Restic/docker-test
 restic_maintenance_password_file: /volume1/docker/restic-maintenance/secrets/restic_password_test
@@ -20,9 +21,9 @@ restic_maintenance_groups:
     tags: [validation]
     frozen_ids: ["1e30db7a"]
 
-# Opérations réelles : validation sur docker-test avant toute activation en prod.
-# repository_owner : à confirmer avec le relevé du NAS (README « Validations restant à faire »)
-# avant le merge ; le script refuse toute écriture si le propriétaire diffère.
+# Opérations réelles, validées sur docker-test le 29/10/2026 avant l'activation en prod.
+# repository_owner : 0:0 confirmé par le relevé du NAS (README « Validations sur le NAS ») ;
+# le script refuse toute écriture si le propriétaire diffère.
 restic_maintenance_apply:
   forget: true
   prune: true
