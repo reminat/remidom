@@ -33,8 +33,8 @@
 | Inventaire Ansible | [`inventories/test`](../infra/ansible/inventories/test/) | [`inventories/prod`](../infra/ansible/inventories/prod/) |
 | Terraform | [`envs/test/pve/`](../infra/terraform/envs/test/pve/) | [`envs/prod/pve/`](../infra/terraform/envs/prod/pve/) |
 | Runner GitHub | `docker-test-01` | `docker-prod` (nom d'enregistrement) |
-| Déploiement | automatique (branche `feature/**`) ou manuel | manuel depuis `main`, après approbation |
-| Sauvegarde Restic | non activée | activée, quotidienne |
+| Déploiement | automatique (push sur `feature/**`) ou lancement manuel | **lancement manuel uniquement**, depuis `main`, après approbation |
+| Sauvegarde Restic (Git) | non activée par Ansible (timer installé à la main, hors dépôt) | activée, quotidienne |
 
 Le NAS Synology est unique et commun aux deux environnements ; seuls ses repositories
 Restic sont séparés (`docker-test`, `docker-prod`).
@@ -50,12 +50,17 @@ flowchart LR
     W[Poste de travail<br/>dev-agent-01] -->|git push| GH[GitHub<br/>reminat/remidom]
     GH -->|Secrets Scan| GL[Gitleaks]
     GH -->|feature/** : Deploy test| RT[Runner test<br/>docker-test-01]
-    GH -->|main + approbation : Deploy prod| RP[Runner prod<br/>docker-prod-01]
+    GH -->|lancement manuel depuis main<br/>+ approbation : Deploy prod| RP[Runner prod<br/>docker-prod-01]
     RT -->|deploy.sh test| T[docker-test-01<br/>haos-test-01]
     RP -->|deploy.sh prod| P[docker-prod-01<br/>haos-prod-01]
     W -.->|tf.sh, manuel| PVE[Proxmox]
     T & P -.->|Bitwarden Secrets Manager| BWS[(Secrets)]
 ```
+
+La production n'est **jamais** déployée automatiquement : ni un push, ni la fusion d'une PR
+dans `main` ne la déclenchent. Il faut lancer le workflow Deploy à la main
+(*Actions → Deploy → Run workflow*, environnement `prod`) depuis `main`, puis approuver
+l'environnement `prod` (voir [CI/CD](ci-cd.md#règles-de-déclenchement-de-deploy)).
 
 Terraform n'est pas exécuté par la CI : le provisionnement reste manuel, depuis un poste
 disposant de l'accès Proxmox et Bitwarden (voir [`HOW-TO.md`](../infra/terraform/HOW-TO.md)).

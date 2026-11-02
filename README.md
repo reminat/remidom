@@ -23,18 +23,32 @@ Home Assistant OS. Deux environnements, `test` et `prod`, issus du même code.
 └── .github/workflows/            Scan de secrets, déploiement test/prod, maintenance NAS
 ```
 
-## Démarrage rapide
+## Provisionnement et déploiement
 
-```bash
-# Provisionner les VM (depuis infra/terraform, Bitwarden déverrouillé)
-./tf.sh test/pve/docker-host apply
+> **Attention** : ces opérations agissent sur l'infrastructure réelle. `tf.sh … apply`
+> crée ou modifie des VM sur Proxmox (et `destroy` les supprime avec leurs données) ;
+> `deploy.sh` reconfigure les hôtes et redémarre des services. Toujours commencer par
+> `test`, relire le `plan` ou lancer `deploy.sh <env> --check --diff`, et ne jamais viser
+> `prod` sans validation préalable en test.
 
-# Configurer et déployer (depuis infra/ansible)
-./deploy.sh test
-```
+Prérequis :
 
-En pratique, les déploiements passent par GitHub Actions : test automatiquement depuis
-une branche `feature/**`, prod manuellement depuis `main` après approbation.
+- accès SSH à Proxmox avec la clé dédiée, et aux VM cibles ;
+- `terraform`, `ansible`, `bw`, `bws`, `jq`, `python3`, `rsync` installés sur le poste ;
+- Bitwarden déverrouillé, avec les secrets attendus (noms dans
+  [docs/securite.md](docs/securite.md#catalogue-des-secrets-noms-seulement)) ;
+- pour Terraform, l'état de l'environnement présent localement (copie sur le NAS, voir
+  [docs/sauvegardes.md](docs/sauvegardes.md#état-terraform)).
+
+Procédures détaillées :
+
+- provisionnement des VM : [`infra/terraform/PROVISIONING.md`](infra/terraform/PROVISIONING.md)
+  et [`infra/terraform/HOW-TO.md`](infra/terraform/HOW-TO.md) ;
+- configuration et déploiement : [`infra/ansible/HOWTO.md`](infra/ansible/HOWTO.md#déploiement).
+
+En pratique, les déploiements Ansible passent par GitHub Actions : test automatiquement
+au push sur une branche `feature/**`, prod uniquement par lancement manuel depuis `main`,
+après approbation (voir [docs/ci-cd.md](docs/ci-cd.md)).
 
 ## Documentation
 

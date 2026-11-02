@@ -81,7 +81,12 @@ infra/ansible/
 - Séparation test/prod en place dans Terraform, Ansible et la CI.
 - Déploiement test automatique depuis `feature/**`, prod manuel depuis `main` avec
   approbation (GitHub Actions, runners auto-hébergés).
-- Sauvegarde Restic de la prod et maintenance Restic sur le NAS en service.
+- Restic, déclaré dans Git : sauvegarde quotidienne de `docker-prod-01` (rôle
+  `restic_backup`) et maintenance des repositories sur le NAS (rôle `restic_maintenance`).
+- Restic, constats datés : exécutions réussies relevées le 31/10/2026 (voir
+  `services/synology/restic-maintenance/README.md`). Ces constats ne garantissent pas les
+  exécutions suivantes, et la restaurabilité n'est pas vérifiée en continu : seul un test
+  de restauration récent le prouve.
 - Réseau UniFi configuré hors IaC ; segmentation inter-VLAN non encore en place.
 - Poste de travail : `dev-agent-01` (Ubuntu) ; MCP UniFi disponible en lecture seule.
 

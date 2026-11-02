@@ -42,7 +42,7 @@ Coordinateur Zigbee : adaptateur `ember` en prod, `ezsp` en test
 | `haos.<domaine>` | Home Assistant (`haos_url`) | [`haos.yml.j2`](../services/docker/core/traefik/dynamic/haos.yml.j2) | test, prod |
 | `proxmox.<domaine>` | Interface Proxmox, middleware `lan-vpn-only` | [`proxmox.yml.j2`](../services/docker/core/traefik/dynamic/proxmox.yml.j2) | prod |
 | `unifi.<domaine>` | Interface UniFi | [`unifi.yml.j2`](../services/docker/core/traefik/dynamic/unifi.yml.j2) | prod |
-| `code.<domaine>` | Service `code` hors Docker | [`code.yml.j2`](../services/docker/core/traefik/dynamic/code.yml.j2) | prod |
+| `code.<domaine>` | code-server sur `dev-agent-01` (constat du 02/11/2026), hors Docker | [`code.yml.j2`](../services/docker/core/traefik/dynamic/code.yml.j2) | prod |
 
 Les routes `proxmox`, `unifi` et `code` ne sont rendues que si leur URL cible est définie
 (`proxmox_url`, `unifi_url`, `code_url`) : c'est le cas en prod seulement.

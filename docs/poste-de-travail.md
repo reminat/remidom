@@ -11,6 +11,10 @@ Outils constatés le 02/11/2026 : `git`, `gh`, `jq`, `bws`. **Non installés** �
 donc par la CI ; un provisionnement Terraform depuis ce poste demanderait d'installer ces
 outils (versions : Terraform `>= 1.6.0`, voir les `versions.tf`).
 
+Le poste exécute aussi **code-server** (service `code-server@remi`, port 8080), publié par
+Traefik sous `code.reminat.com` (cible `code_url` dans Git). Constat du 02/11/2026 ; ce
+service est installé hors dépôt.
+
 La façon dont `dev-agent-01` est créé et sauvegardé n'est pas documentée.
 
 ## Procédures macOS (historique)

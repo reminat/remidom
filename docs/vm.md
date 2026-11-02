@@ -39,10 +39,13 @@ L'existence et le dimensionnement réels de ces VM ne sont pas vérifiés par ce
 
 | Machine | Rôle | Source |
 |---|---|---|
-| `dev-agent-01` | Poste de travail (Ubuntu 24.04, VM KVM) | Constat (02/11/2026), voir [Poste de travail](poste-de-travail.md) |
+| `dev-agent-01` | Poste de travail (Ubuntu 24.04, VM KVM) ; héberge aussi code-server, cible de la route `code.reminat.com` | Constat (02/11/2026), voir [Poste de travail](poste-de-travail.md) |
 | NAS Synology (`reminatnas`) | Sauvegardes, maintenance Restic | Git (inventaire `nas`) |
-| Serveur du service `code` | Cible de la route Traefik `code.reminat.com` (VLAN Servers) | Git (`code_url`), nature et gestion non documentées |
 | Relais Wake-on-LAN (Raspberry Pi) | Réveil d'une machine à distance | Legacy, non vérifié |
+
+La cible `code_url` (`10.10.20.10:8080`, Git) correspond à `dev-agent-01` : le
+02/11/2026, cette adresse est celle du poste, et le service `code-server@remi` y écoute sur
+le port 8080. Ce service n'est pas géré par le dépôt.
 
 Ces machines sont configurées à la main (sauf la maintenance Restic du NAS, déployée par
 Ansible). Leur reconstruction n'est pas encore documentée.
