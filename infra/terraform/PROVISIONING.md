@@ -4,7 +4,7 @@
 # 1. Déverrouiller Bitwarden
 export BW_SESSION="$(bw unlock --raw)"
 
-# 2. Se placer dans le dossier terraform
+# 2. Se placer dans le dossier terraform (depuis la racine du dépôt)
 cd infra/terraform
 
 # 3. Init (première fois uniquement)
@@ -18,7 +18,7 @@ cd envs/prod/pve/haos        && terraform init && cd -
 ./tf.sh test/pve/haos        apply
 
 # 5. Bootstrap SSH sur les VMs HAOS (une seule fois par VM)
-cd infra/proxmox/scripts
+cd ../proxmox/scripts
 ./bootstrap-haos.sh test
 cd -
 
@@ -27,7 +27,7 @@ cd -
 ./tf.sh prod/pve/haos        apply
 
 # 7. Bootstrap SSH sur les VMs HAOS prod
-cd infra/proxmox/scripts
+cd ../proxmox/scripts
 ./bootstrap-haos.sh prod
 cd -
 ```
@@ -41,7 +41,7 @@ Pour trouver les IPs après boot : UI Proxmox → VM → Summary → IP Address.
 ## Après le provisionnement : déployer avec Ansible
 
 ```bash
-cd infra/ansible
+cd infra/ansible   # depuis la racine du dépôt
 
 # Docker hosts (test puis prod)
 ./deploy.sh test

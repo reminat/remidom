@@ -7,8 +7,8 @@ Ce repository implémente une infrastructure **Infrastructure as Code (IaC)** po
 
 - **Terraform** : provisionnement des VMs
 - **Cloud-init** : bootstrap système (users, SSH, packages)
-- **Ansible** (plus tard) : configuration continue
-- **Docker / docker-compose** (plus tard) : services applicatifs
+- **Ansible** : configuration continue ([`infra/ansible/`](../ansible/HOWTO.md))
+- **Docker / docker-compose** : services applicatifs ([`services/docker/`](../../services/docker/))
 
 L’objectif est d’avoir une infra **reproductible**, **jetable**, sans configuration manuelle cachée.
 
@@ -71,21 +71,24 @@ Un snippet est **passif** :
 infra/
   proxmox/
     README.md
+    scripts/
+      template-docker.sh        template 9000 (Ubuntu cloud-init)
+      template-haos.sh          template 9100 (Home Assistant OS)
+      bootstrap-haos.sh         injection des clés SSH dans les VM HAOS
+      push-snippets.sh          envoi manuel des snippets statiques (premier essai, inutilisé)
     snippets/
-      docker-host.user-data.yaml
-      docker-host.user-data.yaml.tftpl
+      docker-host.user-data.yaml        snippet statique du premier essai (inutilisé)
+      docker-host.user-data.yaml.tftpl  modèle rendu par Terraform
 
 infra/
   terraform/
+    tf.sh
+    modules/
+      vm/        haos/
     envs/
-      prod/
-        pve/
-          docker-host/
-            main.tf
-            variables.tf
-            versions.tf
-            outputs.tf
-            backend.tf
+      test/pve/docker-host/   test/pve/haos/
+      prod/pve/docker-host/   prod/pve/haos/
+        main.tf  variables.tf  versions.tf  outputs.tf  tf.conf  common.auto.tfvars
 ```
 
 ---
@@ -110,8 +113,8 @@ Exemples :
 ### 2. Créer (ou recréer) la VM avec Terraform
 
 ```bash
-cd infra/terraform/envs/prod/pve/docker-host
-./tf.sh apply
+cd infra/terraform
+./tf.sh prod/pve/docker-host apply
 ```
 
 Terraform :
@@ -131,8 +134,8 @@ Si tu modifies le cloud-init **après** la création de la VM :
 - ✅ il faut **détruire et recréer** la VM
 
 ```bash
-./tf.sh destroy
-./tf.sh apply
+./tf.sh prod/pve/docker-host destroy
+./tf.sh prod/pve/docker-host apply
 ```
 
 C’est volontaire.  
@@ -181,7 +184,7 @@ Terraform utilise un **state** (`terraform.tfstate`) pour savoir :
 Règles :
 - le state est **persistant**
 - le state n’est **jamais** versionné dans Git
-- le state est stocké sur un backend (NAS par exemple)
+- le state est local au poste qui lance Terraform ; `tf.sh` en copie chaque version sur le NAS après `apply` et `destroy`
 
 👉 Sans state, Terraform est aveugle.
 
@@ -215,9 +218,10 @@ Règles :
 
 ---
 
-## Étapes suivantes prévues
+## Étapes suivantes
 
-- ajout d’Ansible pour installer Docker
-- déploiement des services via docker-compose
-- factorisation en modules Terraform
-- backend Terraform S3 (MinIO)
+Réalisées : Ansible (installation de Docker), déploiement des services via docker-compose,
+factorisation en modules Terraform.
+
+Envisagée, non décidée : backend Terraform distant (par exemple S3/MinIO). Aujourd'hui,
+l'état est local et `tf.sh` en copie chaque version sur le NAS.

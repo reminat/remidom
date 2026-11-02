@@ -2,29 +2,37 @@
 
 ## Vue d'ensemble
 
-Ce répertoire contient la configuration Ansible pour configurer les hôtes Docker et déployer les stacks de services.
+Ce répertoire contient la configuration Ansible pour configurer les hôtes Docker, déployer les stacks de services, configurer Home Assistant et déposer la maintenance Restic sur le NAS.
 
 ```
 ansible/
 ├── ansible.cfg
 ├── deploy.sh
+├── nas_known_hosts
 ├── playbooks/
-│   └── docker-host.yml
+│   ├── docker-host.yml
+│   ├── haos.yml
+│   ├── nas.yml
+│   └── group_vars/
+│       └── nas.yml
 ├── inventories/
 │   ├── test/
 │   │   ├── hosts.ini
 │   │   └── group_vars/
 │   │       ├── all.yml
-│   │       └── docker_hosts.yml
+│   │       ├── docker_hosts.yml
+│   │       ├── haos.yml
+│   │       └── nas.yml
 │   └── prod/
-│       ├── hosts.ini
-│       └── group_vars/
-│           ├── all.yml
-│           └── docker_hosts.yml
+│       └── (même structure)
 └── roles/
     ├── common/
     ├── docker/
-    └── compose_deploy/
+    ├── compose_deploy/
+    ├── restic_backup/
+    ├── github_runner/
+    ├── haos_config/
+    └── restic_maintenance/
 ```
 
 ---
@@ -34,7 +42,7 @@ ansible/
 ### Prérequis
 
 - [`ansible`](https://docs.ansible.com/ansible/latest/installation_guide/index.html) installé localement
-- [`bw`](https://bitwarden.com/help/cli/) (Bitwarden CLI) installé et configuré
+- [`bw`](https://bitwarden.com/help/cli/) (Bitwarden CLI) installé et configuré (poste local uniquement ; inutile si `BWS_ACCESS_TOKEN` est défini, comme en CI)
 - [`bws`](https://bitwarden.com/help/secrets-manager-cli/) (Bitwarden Secrets Manager CLI) installé
 - [`jq`](https://stedolan.github.io/jq/) installé
 - Accès SSH à la machine cible (clé publique déposée)
@@ -61,15 +69,16 @@ ansible/
 
 ### Ce que fait deploy.sh
 
-1. Vérifie que `bw`, `bws`, `jq` et `ansible-playbook` sont disponibles
-2. S'authentifie à Bitwarden CLI (via API key ou session existante)
-3. Déverrouille le vault si nécessaire
-4. Récupère le token machine `bws` depuis le vault (`bws_machine_token`)
-5. Charge les secrets dans l'environnement :
-   - `MQTT_PASSWORD` (depuis le secret nommé `MQTT_PASSWORD`)
-   - `Z2M_NETWORK_KEY` (depuis le secret nommé `Z2M_NETWORK_KEY_JSON`)
-   - `CF_DNS_API_TOKEN` (depuis le secret nommé `CF_DNS_API_TOKEN`)
-6. Lance `ansible-playbook` avec l'inventaire de l'environnement
+1. Vérifie que `bws`, `jq` et `ansible-playbook` sont disponibles
+2. Si `BWS_ACCESS_TOKEN` n'est pas déjà défini (cas du poste local ; en CI, il vient des secrets GitHub) :
+   vérifie `bw`, s'authentifie à Bitwarden CLI (API key ou session existante), déverrouille le vault si
+   nécessaire et récupère le token machine `bws` depuis le vault (`bws_machine_token`)
+3. Charge les secrets dans l'environnement :
+   - `MQTT_PASSWORD` (depuis le secret `mqtt_password`)
+   - `Z2M_NETWORK_KEY` (depuis le secret `zigbee_network_key_<env>`)
+   - `CF_DNS_API_TOKEN` (depuis le secret `cloudflare_dns_api_token`)
+   - `RESTIC_REST_PASSWORD` et `RESTIC_REPO_PASSWORD` (secrets facultatifs `restic_rest_password_<env>` et `restic_password_<env>`)
+4. Lance `ansible-playbook` avec l'inventaire de l'environnement : `docker-host.yml`, puis `haos.yml`
 
 ---
 
@@ -79,15 +88,15 @@ Les secrets ne sont jamais stockés dans le repo. Ils sont injectés au moment d
 
 | Variable Ansible      | Source                              | Secret Bitwarden        |
 |-----------------------|-------------------------------------|-------------------------|
-| `mqtt_password`       | `lookup('env', 'MQTT_PASSWORD')`    | `MQTT_PASSWORD`         |
-| `z2m_network_key`     | `lookup('env', 'Z2M_NETWORK_KEY')`  | `Z2M_NETWORK_KEY_JSON`  |
-| `cf_api_token`        | `lookup('env', 'CF_DNS_API_TOKEN')` | `CF_DNS_API_TOKEN`      |
+| `mqtt_password`       | `lookup('env', 'MQTT_PASSWORD')`    | `mqtt_password`         |
+| `z2m_network_key`     | `lookup('env', 'Z2M_NETWORK_KEY')`  | `zigbee_network_key_<env>` (JSON) |
+| `cf_api_token`        | `lookup('env', 'CF_DNS_API_TOKEN')` | `cloudflare_dns_api_token` |
 | `restic_backup_rest_password` | `lookup('env', 'RESTIC_REST_PASSWORD')` | `restic_rest_password_<env>` (facultatif) |
 | `restic_backup_password`   | `lookup('env', 'RESTIC_REPO_PASSWORD')`  | `restic_password_<env>` (facultatif)   |
 
 Le token machine `bws` est lui-même stocké dans le vault Bitwarden sous le nom `bws_machine_token`.
 
-Les secrets partagés entre test et prod (même Bitwarden secret, deux machines distinctes) sont acceptables pour un homelab. Pour les séparer, utiliser les variables `MQTT_SECRET_REF`, `Z2M_NETWORK_KEY_SECRET_REF`, `CF_DNS_API_TOKEN_SECRET_REF` dans l'environnement avant d'appeler `deploy.sh`.
+`mqtt_password` et `cloudflare_dns_api_token` sont partagés entre test et prod (même secret Bitwarden, deux machines distinctes), ce qui est acceptable pour un homelab ; la clé Zigbee et les secrets Restic sont propres à chaque environnement. Pour désigner un autre secret (clé, nom ou UUID), définir avant d'appeler `deploy.sh` : `MQTT_SECRET_REF`, `Z2M_NETWORK_KEY_SECRET_REF`, `CF_DNS_API_TOKEN_SECRET_REF`, `RESTIC_REST_PASSWORD_SECRET_REF` ou `RESTIC_PASSWORD_SECRET_REF`.
 
 ---
 
@@ -99,7 +108,10 @@ Toute la logique est partagée. Seules les variables diffèrent :
 |-----------------------|---------------------------------------|-----------------------------------|
 | `ansible_host`        | `docker.test.reminat.com`             | `docker.reminat.com`              |
 | `smlight_serial_url`  | `tcp://smlight.test.reminat.com:6638` | `tcp://smlight.reminat.com:6638`  |
+| `smlight_adapter`     | `ezsp`                                | `ember`                           |
 | `domain_base`         | `test.reminat.com`                    | `reminat.com`                     |
+| `unifi_url`, `code_url`, `proxmox_url` | non définis (routes absentes) | définis (routes Traefik `unifi`, `code`, `proxmox`) |
+| `restic_backup_enabled` | non défini (`false`)                | `true`                            |
 
 Les volumes Docker sont isolés par VM : `/srv/docker/core` existe indépendamment sur chaque machine.
 
@@ -148,8 +160,8 @@ ssh-keygen -t ed25519 -C "github-runner" -f ~/.ssh/id_github_runner -N ""
 Ajouter la clé publique dans `~/.ssh/authorized_keys` sur :
 - `remi@docker.reminat.com`
 - `remi@docker.test.reminat.com`
-- `root@haos.reminat.com` (haos-prod)
-- `root@haos.test.reminat.com` (haos-test)
+- `root@haos-vm.reminat.com`, port `22222` (haos-prod)
+- `root@haos-vm.test.reminat.com`, port `22222` (haos-test)
 
 **2. Secrets GitHub** (Settings → Secrets and variables → Actions → Repository secrets)
 
@@ -174,7 +186,7 @@ Le runner est enregistré, installé comme service systemd et démarré automati
 
 ```bash
 ssh remi@docker.reminat.com
-systemctl status "actions.runner.remi-remidom.docker-prod"
+systemctl status "actions.runner.reminat-remidom.docker-prod"
 ```
 
 Il doit aussi apparaître dans GitHub : Settings → Actions → Runners.
@@ -199,6 +211,7 @@ Il doit aussi apparaître dans GitHub : Settings → Actions → Runners.
 - Rend les templates :
   - `.env.j2` → `.env` (TZ, DOMAIN_BASE, CF_DNS_API_TOKEN)
   - `traefik/traefik.yml.j2` → `traefik/traefik.yml`
+  - `traefik/dynamic/*.yml.j2` → routes hors Docker (`haos`, middlewares ; `unifi`, `code`, `proxmox` si leur URL est définie)
   - `zigbee2mqtt/data/configuration.yaml.j2` → `configuration.yaml`
 - Crée `traefik/acme/acme.json` avec les permissions `600` (requis par Traefik)
 - Configure les permissions (Mosquitto, Node-RED)
@@ -219,7 +232,7 @@ cd infra/proxmox/scripts
 ./bootstrap-haos.sh test   # ou prod
 ```
 
-Le script utilise Bitwarden et le QEMU guest agent — aucune action manuelle sur la console Proxmox. Voir `infra/terraform/HOW-TO.md` pour les détails.
+Le script utilise Bitwarden et le QEMU guest agent — aucune action manuelle sur la console Proxmox. Voir [`infra/terraform/HOW-TO.md`](../terraform/HOW-TO.md#bootstrap-ssh-sur-les-vms-haos) pour les détails.
 
 > L'utilisateur SSH sur HAOS est `root` (pas `remi`).
 
@@ -227,10 +240,14 @@ Le script utilise Bitwarden et le QEMU guest agent — aucune action manuelle su
 
 Les VMs HAOS sont déclarées dans un groupe séparé `haos` dans chaque inventaire :
 
-| Variable        | test                        | prod                   |
-|-----------------|-----------------------------|------------------------|
-| `ansible_host`  | `haos.test.reminat.com`     | `haos.reminat.com`     |
-| `ansible_user`  | `root`                      | `root`                 |
+| Variable         | test                           | prod                      |
+|------------------|--------------------------------|---------------------------|
+| `ansible_host`   | `haos-vm.test.reminat.com`     | `haos-vm.reminat.com`     |
+| `ansible_port`   | `22222`                        | `22222`                   |
+| `ansible_user`   | `root`                         | `root`                    |
+| `docker_host_ip` | adresse de `docker-test-01`    | adresse de `docker-prod-01` (proxy de confiance) |
+
+`haos.<domaine>` (sans `-vm`) est le nom publié par Traefik pour l'interface web.
 
 ### Playbook haos.yml
 
@@ -268,11 +285,13 @@ Traefik est le reverse proxy de la stack. Il gère :
 | Service         | test                            | prod                      |
 |-----------------|---------------------------------|---------------------------|
 | Traefik         | `traefik.test.reminat.com`      | `traefik.reminat.com`     |
-| Zigbee2MQTT     | `zigbee2mqtt.test.reminat.com`  | `zigbee2mqtt.reminat.com` |
+| Zigbee2MQTT     | `z2m.test.reminat.com`          | `z2m.reminat.com`         |
 | Node-RED        | `nodered.test.reminat.com`      | `nodered.reminat.com`     |
 | Portainer       | `portainer.test.reminat.com`    | `portainer.reminat.com`   |
 | Home Assistant  | `haos.test.reminat.com`         | `haos.reminat.com`        |
 | Proxmox (LAN/VPN uniquement) | — | `proxmox.reminat.com` |
+| UniFi           | —                               | `unifi.reminat.com`       |
+| Service `code`  | —                               | `code.reminat.com`        |
 
 ### Labels Docker Compose
 
@@ -290,7 +309,7 @@ Prérequis : le domaine `reminat.com` doit être géré par les DNS Cloudflare.
 2. Template : **Edit zone DNS**
 3. Permissions : `Zone / DNS / Edit`
 4. Zone Resources : `Include / Specific zone / reminat.com`
-5. Créer le token et l'ajouter dans Bitwarden Secrets Manager sous le nom `CF_DNS_API_TOKEN`
+5. Créer le token et l'ajouter dans Bitwarden Secrets Manager sous la clé `cloudflare_dns_api_token`
 
 ### Ports à ouvrir sur le firewall
 
@@ -433,9 +452,9 @@ Préparation du NAS, tâches DSM et contrôles :
 
 ```mermaid
 flowchart TD
-    A([./deploy.sh test|prod]) --> B[Authentification Bitwarden]
-    B --> C[Récupération des secrets\nMQTT_PASSWORD\nZ2M_NETWORK_KEY\nCF_DNS_API_TOKEN]
-    C --> D[ansible-playbook\ndocker-host.yml]
+    A([./deploy.sh test|prod]) --> B[Authentification Bitwarden\nsauf si BWS_ACCESS_TOKEN défini]
+    B --> C[Récupération des secrets\nMQTT_PASSWORD\nZ2M_NETWORK_KEY\nCF_DNS_API_TOKEN\nsecrets Restic facultatifs]
+    C --> D[ansible-playbook\ndocker-host.yml\npuis haos.yml]
 
     D --> E[Rôle: common]
     D --> F[Rôle: docker]
