@@ -45,7 +45,7 @@ graph TD
 
     subgraph Secrets["Bitwarden"]
         BW["Password Manager<br/>bws_machine_token"]
-        BWS["Secrets Manager<br/>pm_endpoint · pm_api_token_id<br/>pm_api_token_secret · ssh_authorized_keys_json"]
+        BWS["Secrets Manager<br/>proxmox_endpoint · proxmox_api_token_id<br/>proxmox_api_token_secret · ssh_authorized_keys"]
     end
 
     C1 & C2 & C3 & C4 -->|"source tf.conf"| TF
@@ -67,12 +67,11 @@ Chaque env a son propre state Terraform — test et prod ne se connaissent pas.
 
 ### Outils à installer
 
-```bash
-brew install terraform
-brew install bitwarden-cli             # bw
-brew install bitwarden/secrets/bws     # bws (Secrets Manager CLI)
-brew install rsync
-```
+`terraform` (>= 1.6.0), `bw` (Bitwarden CLI), `bws` (Bitwarden Secrets Manager CLI),
+`python3` et `rsync`, vérifiés par `tf.sh` au démarrage. Le poste de travail actuel est
+sous Ubuntu : installer depuis les sources officielles listées dans
+[`docs/poste-de-travail.md`](../../docs/poste-de-travail.md#procédures-macos-historique).
+Les commandes `brew` des anciennes versions de ce guide concernaient un poste macOS.
 
 Vérifier :
 
@@ -108,16 +107,16 @@ Un item avec comme **password** le token Bitwarden Secrets Manager :
 
 ### Dans Bitwarden Secrets Manager (bws)
 
-Quatre secrets à créer, identifiés par leur **key** (nom) :
+Quatre secrets à créer, identifiés par leur **key** (nom), tels que lus par `tf.sh` :
 
-| Key                        | Valeur exemple                         |
-|----------------------------|----------------------------------------|
-| `pm_endpoint`              | `https://pve.reminat.com:8006`           |
-| `pm_api_token_id`          | `terraform@pve!tf`                     |
-| `pm_api_token_secret`      | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
-| `ssh_authorized_keys_json` | `["ssh-ed25519 AAAA... remi@mac"]`     |
+| Key                        | Valeur exemple                         | Variable Terraform        |
+|----------------------------|----------------------------------------|---------------------------|
+| `proxmox_endpoint`         | `https://pve.reminat.com:8006`         | `pm_endpoint`             |
+| `proxmox_api_token_id`     | `terraform@pve!tf`                     | `pm_api_token_id`         |
+| `proxmox_api_token_secret` | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` | `pm_api_token_secret`     |
+| `ssh_authorized_keys`      | `["ssh-ed25519 AAAA... remi@poste"]`   | `ssh_authorized_keys`     |
 
-> `ssh_authorized_keys_json` est un tableau JSON de clés publiques SSH. Ces clés seront injectées dans cloud-init et seront les seules autorisées à se connecter en SSH sur les VMs.
+> `ssh_authorized_keys` est un tableau JSON de clés publiques SSH. Ces clés seront injectées dans cloud-init et seront les seules autorisées à se connecter en SSH sur les VMs. `tf.sh` ne l'injecte que pour les modules qui déclarent cette variable (hôtes Docker). `bootstrap-haos.sh` lit le même secret pour les VM HAOS.
 
 ### Créer le token API Proxmox
 
@@ -169,7 +168,7 @@ TFWRAP_SKIP_TEMPLATE_BUILD=1 ./tf.sh test/pve/docker-host apply
 ```bash
 cd infra/terraform/envs/test/pve/docker-host && terraform init
 cd ../haos                                    && terraform init
-cd ../../prod/pve/docker-host                 && terraform init
+cd ../../../prod/pve/docker-host              && terraform init
 cd ../haos                                    && terraform init
 ```
 
@@ -239,7 +238,7 @@ La VM apparaîtra dans les baux DHCP avec son hostname (`docker-test-01`, etc.).
 Une fois que tu connais l'IP attribuée la première fois :
 
 1. Relève l'adresse MAC dans Proxmox (VM → Hardware → Network Device)
-2. Crée une réservation DHCP dans ton routeur / pfSense / OPNsense
+2. Crée une réservation DHCP dans UniFi (réseau VLAN-20-SERVERS)
 3. Les VMs auront toujours la même IP sans rien changer dans Terraform
 
 Plage suggérée :
@@ -270,8 +269,8 @@ cd infra/proxmox/scripts
 
 Le script :
 1. S'authentifie à Bitwarden (même pattern que `tf.sh`)
-2. Récupère les clés SSH depuis `ssh_authorized_keys_json` dans Bitwarden Secrets Manager
-3. Récupère l'endpoint Proxmox depuis `pm_endpoint`
+2. Récupère les clés SSH depuis `ssh_authorized_keys` dans Bitwarden Secrets Manager (autre secret possible via `SSH_KEYS_SECRET_REF`)
+3. Récupère l'endpoint Proxmox depuis `proxmox_endpoint`
 4. Trouve le VMID de la VM par son nom via `qm list`
 5. Attend que le QEMU guest agent soit prêt (jusqu'à 2 min)
 6. Injecte les clés dans `/root/.ssh/authorized_keys` via `qm guest exec`
@@ -289,7 +288,7 @@ Le script :
 ```
 1. terraform apply haos              → VM créée et démarrée
 2. ./bootstrap-haos.sh <env>         → clés SSH injectées automatiquement
-3. ansible deploy.sh <env> --limit haos  → configuration.yaml déployé
+3. ./deploy.sh <env> --limit haos     → configuration.yaml déployé (depuis infra/ansible)
 ```
 
 ---
@@ -331,13 +330,13 @@ Où `<env>` est un chemin relatif depuis `envs/`, par exemple `test/pve/docker-h
 ## Résolution de problèmes courants
 
 **`Missing command: bws`**
-→ `brew install bitwarden/secrets/bws`
+→ installer `bws` (voir [Prérequis](#prérequis)).
 
-**`Could not resolve Bitwarden Secrets Manager secret 'pm_endpoint'`**
+**`Could not resolve Bitwarden Secrets Manager secret 'proxmox_endpoint'`**
 → Vérifier que le secret existe dans BSM avec exactement ce **key** (pas juste le nom d'affichage).
 
 **`Error: could not connect to Proxmox`**
-→ Vérifier que `pm_endpoint` pointe sur l'API Proxmox et que le token est valide.
+→ Vérifier que le secret `proxmox_endpoint` pointe sur l'API Proxmox et que le token est valide.
 
 **`Error cloning VM: template not found`**
 → Le template n'a pas été créé. Vérifier que `TEMPLATE_VM_ID` est bien défini dans `tf.conf` et que `TFWRAP_SKIP_TEMPLATE_BUILD` n'est pas forcé à `1`. En dernier recours, créer le template manuellement en copiant le script sur Proxmox :
