@@ -4,10 +4,10 @@
 
 Constat du 02/11/2026 : `dev-agent-01` est une VM (KVM) sous **Ubuntu 24.04 LTS**. C'est le
 poste de travail actuel : édition du dépôt, revue, agents (Claude Code), consultation en
-lecture seule du contrôleur UniFi.
+lecture seule du contrôleur UniFi et de Proxmox VE.
 
-Outils constatés le 02/11/2026 : `git`, `gh`, `jq`, `bws`. **Non installés** à cette date :
-`terraform`, `ansible`, `bw`, `gitleaks`, `pre-commit`. Les déploiements Ansible passent
+Outils constatés le 02/11/2026 : `git`, `gh`, `jq`, `bws`, chaîne Rust (`cargo`). **Non
+installés** à cette date : `terraform`, `ansible`, `bw`, `gitleaks`, `pre-commit`. Les déploiements Ansible passent
 donc par la CI ; un provisionnement Terraform depuis ce poste demanderait d'installer ces
 outils (versions : Terraform `>= 1.6.0`, voir les `versions.tf`).
 
@@ -60,3 +60,44 @@ UniFi ; un résultat vide ne suffit pas à conclure sur le filtrage réseau.
 
 Le certificat du contrôleur et le jeton d'accès ont des échéances de renouvellement,
 suivies hors dépôt.
+
+## MCP Proxmox
+
+Un serveur MCP Proxmox VE (projet open source [`3kirt/proxmox-mcp`](https://github.com/3kirt/proxmox-mcp),
+version 0.12.0) est enregistré dans Claude Code sur `dev-agent-01`, **en portée locale**,
+sous le nom `proxmox`. Il n'est pas déclaré dans le dépôt (aucun `.mcp.json`). Installé et
+validé le 03/11/2026.
+
+- **Lecture seule par construction** : le client HTTP du projet n'émet que des requêtes GET
+  (code relu à la révision installée), et aucun outil n'exécute de commande dans les
+  invités.
+- **Compte dédié** : jeton d'API propre au MCP, avec séparation des privilèges, rôle
+  `PVEAuditor` sur `/` (privilèges `*.Audit` uniquement, vérifiés par `/access/permissions`).
+  Le jeton de Terraform n'est pas utilisé.
+- **Installation** : compilé avec `cargo install --locked` depuis le commit du tag `v0.12.0`,
+  dans l'environnement de l'utilisateur ; aucun service ni port d'écoute.
+- **TLS** : vérification active. Le nœud est joint sous le nom `pve` (présent dans le
+  certificat, résolu par `/etc/hosts` sur le poste) et la seule autorité approuvée est la CA
+  du cluster, celle versionnée dans
+  [`roles/compose_deploy/files/pve-root-ca.pem`](../infra/ansible/roles/compose_deploy/files/pve-root-ca.pem).
+  Le nom `pve.reminat.com` n'est pas dans le certificat du nœud et est refusé.
+- **Secrets** : la valeur du jeton est lue au démarrage dans Bitwarden Secrets Manager, dans
+  un projet dédié et avec un jeton d'accès propre à ce MCP, distinct de ceux de déploiement
+  et du MCP UniFi. Aucun secret dans la configuration de Claude Code ni en argument de
+  commande.
+- **Configuration** : hors dépôt, sur le poste uniquement. Identifiants, jeton et
+  emplacement des fichiers sensibles ne sont pas documentés ici.
+
+Usage : état du nœud, VM et templates, stockages, réseau de l'hôte, snapshots, sauvegardes
+vzdump, comparaison avec Terraform (voir [Proxmox](proxmox.md) et
+[Machines virtuelles](vm.md)). Les écarts sont signalés, jamais corrigés par ce biais. Les
+résultats bruts (configurations de VM, adresses MAC et IP, journaux de tâches) ne doivent
+jamais être copiés dans le dépôt.
+
+Limites : pas d'outil de détail pour les conteneurs LXC (seulement la liste des
+ressources), ni pour le SDN, le pare-feu ou les ACL ; un résultat absent n'est pas une
+preuve. Projet récent maintenu par une seule personne : relire le code avant toute montée
+de version.
+
+Le certificat du nœud, le jeton d'API et le jeton d'accès Bitwarden ont des échéances de
+renouvellement, suivies hors dépôt.

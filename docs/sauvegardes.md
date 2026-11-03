@@ -9,9 +9,9 @@ Vue d'ensemble. Les procédures détaillées restent dans les guides liés.
 | Repositories Restic | Contrôle quotidien, `forget` et `prune` planifiés sur le NAS | NAS (exécution locale) | Git (rôle `restic_maintenance`) ; constat du 31/10/2026 |
 | État Terraform | Copie horodatée par `tf.sh` après `apply` ou `destroy` | NAS (SSH, `rsync`) | Git |
 | Home Assistant | Sauvegardes propres à Home Assistant | Non documenté | Non vérifié |
-| VM Proxmox (vzdump) | — | — | Aucune sauvegarde décrite dans le dépôt |
+| VM Proxmox (vzdump) | — | — | Aucune sauvegarde décrite dans le dépôt ; aucune visible au constat du 03/11/2026 (voir [ci-dessous](#vm-proxmox-vzdump)) |
 | NAS | Snapshots Btrfs (05:00) et Hyper Backup (06:00) | Destination Hyper Backup non documentée | Mentionné dans le README Restic ; non détaillé |
-| Poste de travail `dev-agent-01` | — | — | Non documenté |
+| Poste de travail `dev-agent-01` | — | — | Non documenté ; aucune sauvegarde vzdump au constat du 03/11/2026 |
 
 ## Restic
 
@@ -39,6 +39,22 @@ Non couvert par Restic. Deux scénarios de reprise figurent dans l'ancienne docu
 (Legacy, non testés) : restaurer une sauvegarde vzdump de la VM, ou recréer la VM avec
 Terraform puis restaurer une sauvegarde Home Assistant. Aucun des deux n'est outillé dans
 le dépôt.
+
+## VM Proxmox (vzdump)
+
+- **Git** : aucune tâche vzdump ni Proxmox Backup Server n'est déclarée.
+- **Constat du 03/11/2026** (MCP Proxmox, lecture seule) : aucune tâche de sauvegarde
+  planifiée, aucune sauvegarde présente sur les stockages `local` et `Reminas`, aucun
+  snapshot ; Proxmox signale les neuf VM et templates comme non sauvegardés.
+- **Portée** : ce constat ne concerne que les sauvegardes au niveau de Proxmox. Il ne dit
+  rien des sauvegardes Restic des hôtes Docker ni des sauvegardes internes de Home
+  Assistant, qui ne passent pas par Proxmox et ne sont pas visibles par ce relevé.
+- **Conséquence** : `dev-agent-01` et les VM hors Terraform n'ont aucune sauvegarde au
+  niveau de la VM ; leur restauration n'est pas possible depuis Proxmox. Les VM Terraform
+  se recréent, mais leurs données dépendent de Restic (hôtes Docker) ou des sauvegardes
+  Home Assistant.
+- **Cible** : non définie (voir « Stratégie de sauvegarde de Home Assistant et des VM
+  Proxmox » dans les [décisions à formaliser](decisions/index.md#à-formaliser-justification-non-établie)).
 
 ## Reprise après sinistre (cible)
 

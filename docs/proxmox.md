@@ -13,7 +13,43 @@
 | Accès web | `proxmox.reminat.com` via Traefik, réservé LAN et VPN | Git ([Services Docker](services-docker.md#traefik)) |
 
 La version de Proxmox VE, le matériel et la configuration réseau de l'hôte ne sont pas
-versionnés ni relevés : non vérifiés.
+versionnés dans Git.
+
+## État constaté (03/11/2026)
+
+Relevé en lecture seule par le [MCP Proxmox](poste-de-travail.md#mcp-proxmox). Ponctuel :
+ne garantit pas l'état ultérieur.
+
+| Élément | Constat |
+|---|---|
+| Version | Proxmox VE 9.1.9 |
+| Nœud | `pve` en ligne, nœud unique |
+| Ressources | 8 cœurs / 16 threads, 32 Go de RAM ; mémoire utilisée à environ 82 % au relevé |
+| Réseau des VM | Un seul pont, `vmbr0`, sans gestion des VLAN : aucune VM n'est étiquetée, toutes sont sur le VLAN du port du switch |
+| Conteneurs LXC | Aucun |
+| Snapshots | Aucun, sur aucune VM |
+| Sauvegardes vzdump | Aucune tâche planifiée, aucune sauvegarde visible (voir [Sauvegardes](sauvegardes.md#vm-proxmox-vzdump)) |
+
+### Stockages
+
+| Stockage | Type | Contenu | Source |
+|---|---|---|---|
+| `local` | Répertoire | Snippets, ISO, templates, sauvegardes | Git (snippets) ; constat |
+| `local-lvm` | LVM-thin | Disques des VM ; environ 100 Go utilisés sur 350 | Git (`vm_storage`) ; constat |
+| `Reminas` | NFS (NAS), partagé | Tous types de contenu | **Constat seulement**, absent de Git ; héberge le disque d'une VM hors Terraform |
+
+### Contraintes observées
+
+- **Mémoire** : la RAM allouée aux VM actives (environ 24 Go) laisse peu de marge pour une
+  VM supplémentaire ou l'augmentation d'une VM existante.
+- **Certificat du nœud** : signé par la CA du cluster, il expire le **29/12/2026** ; son
+  renouvellement automatique n'est pas vérifié. Il ne couvre pas le nom `pve.reminat.com`,
+  ce qui explique la vérification sous le nom `pve` par Traefik et par le MCP.
+
+### À vérifier
+
+- Rôle du stockage `Reminas` et dépendance des VM au NAS.
+- Renouvellement du certificat du nœud avant le 29/12/2026.
 
 ## Accès utilisés par l'IaC
 
@@ -38,6 +74,8 @@ un `apply` s'il est absent (paramètres dans `tf.conf` de chaque environnement).
 Le template HAOS n'est pas épinglé sur une version : le recréer change la version de HAOS
 des futures VM.
 
+Constat du 03/11/2026 : les deux templates sont présents, sous ces VMID et ces noms.
+
 ## Snippets cloud-init
 
 Le module Terraform `vm` rend [`docker-host.user-data.yaml.tftpl`](../infra/proxmox/snippets/docker-host.user-data.yaml.tftpl)
@@ -53,6 +91,6 @@ Principes de cloud-init (exécution au premier démarrage seulement, VM jetables
 
 ## Sauvegardes de l'hôte et des VM
 
-Aucune sauvegarde Proxmox (vzdump, Proxmox Backup Server) n'est décrite dans le dépôt. La
-reconstruction prévue repose sur Terraform, Ansible et les sauvegardes de données (voir
-[Sauvegardes](sauvegardes.md)).
+Aucune sauvegarde Proxmox (vzdump, Proxmox Backup Server) n'est décrite dans le dépôt, et
+aucune n'est visible au relevé du 03/11/2026. La reconstruction prévue repose sur
+Terraform, Ansible et les sauvegardes de données (voir [Sauvegardes](sauvegardes.md)).
