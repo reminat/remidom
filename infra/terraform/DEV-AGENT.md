@@ -23,7 +23,7 @@ dédié. Statut : **cible, rien n'a encore été exécuté**.
   05/11/2026 ; voir [Confidentialité des journaux](#confidentialité-des-journaux-traité)).
 - **Vérifié en partie** : la confiance TLS et SSH depuis le Mac (voir
   [Confiance TLS et SSH](#confiance-tls-et-ssh-vérifications-partielles)). L'authentification
-  et le provider ne sont pas testés.
+  (API, SSH) et le provider ne sont pas testés.
 - **Ouverts** : les contrôles Proxmox restants (voir
   [Paramètres](#paramètres-à-déterminer-avant-exécution)) et la
   [fenêtre mémoire](#fenêtre-mémoire-pour-lexercice-à-6144-mio), à planifier.
@@ -71,17 +71,19 @@ pm_endpoint = "https://pve:8006"
   l'hôte extrait de l'endpoint (`main.tf`). Avec cette surcharge, il se connecte donc à
   `pve`, et non plus à `pve.reminat.com`.
 
-**Vérifications sur le Mac.** Constat du 05/11/2026, rapporté par le propriétaire, pour les
-trois contrôles marqués comme réalisés ; aucun résultat brut n'est publié ici.
+**Vérifications sur le Mac.** Constat du 05/11/2026, rapporté par le propriétaire : les
+contrôles marqués « Réussi » ont abouti ; aucun résultat brut n'est publié ici.
 
 | Point | Statut | Vérification |
 |---|---|---|
-| Résolution du nom | Réalisé | `pve` doit résoudre vers le nœud attendu (`dscacheutil -q host -a name pve`) |
-| CA pour le provider (Go) | `security verify-cert` réalisé ; provider non testé | Sur macOS, un programme Go valide les certificats avec le trousseau du système et ignore `SSL_CERT_FILE` : la CA du cluster doit y être approuvée. Empreinte à comparer avec la copie du dépôt [`pve-root-ca.pem`](../ansible/roles/compose_deploy/files/pve-root-ca.pem) (`openssl x509 -noout -fingerprint -sha256`). Contrôle par le trousseau, sans authentification : `security verify-cert -c <certificat du nœud> -p ssl -s pve` |
-| Confiance SSH | Concordance de la clé ED25519 réalisée ; connexion du provider non testée | Une entrée `known_hosts` pour `pve` dont l'empreinte a été vérifiée par un autre canal (console Proxmox). Le comportement exact du provider vis-à-vis de `known_hosts` reste à confirmer |
+| Résolution du nom | Réussi | `pve` doit résoudre vers le nœud attendu (`dscacheutil -q host -a name pve`) |
+| CA pour le provider (Go) | Réussi : certificat vérifié avec la CA du dépôt, puis `security verify-cert` valide après approbation de cette CA dans le trousseau utilisateur. Provider non testé | Sur macOS, un programme Go valide les certificats avec le trousseau du système et ignore `SSL_CERT_FILE` : la CA du cluster doit y être approuvée. Empreinte à comparer avec la copie du dépôt [`pve-root-ca.pem`](../ansible/roles/compose_deploy/files/pve-root-ca.pem) (`openssl x509 -noout -fingerprint -sha256`). Contrôle par le trousseau, sans authentification : `security verify-cert -c <certificat du nœud> -p ssl -s pve` |
+| Confiance SSH | Réussi : la clé d'hôte SSH ED25519 de Proxmox concorde avec celle déjà enregistrée pour `pve.reminat.com`, puis ajout sous l'alias `pve`. Authentification SSH et connexion du provider non testées | Une entrée `known_hosts` pour `pve` dont l'empreinte a été vérifiée par un autre canal (console Proxmox). Le comportement exact du provider vis-à-vis de `known_hosts` reste à confirmer |
 
-Ces contrôles ne prouvent ni l'authentification (jeton API, SSH root), ni le comportement du
-provider : ils n'ont pas été testés. Le premier `plan` reste le premier essai réel.
+La clé ED25519 contrôlée est la **clé d'hôte** de Proxmox, pas la clé cliente
+`id_ed25519_pve`. Ces contrôles ne prouvent ni l'authentification (jeton API, SSH root), ni le
+comportement du provider : ils n'ont pas été testés. Le premier `plan` reste le premier essai
+réel.
 
 Ces prérequis concernent le Mac, Bitwarden et le certificat Proxmox, qui ne sont pas
 modifiés par cette PR. Alternative à plus long terme : un certificat du nœud couvrant
@@ -140,9 +142,11 @@ propriétaire.
    (`qm shutdown <VMID>`).
 2. **Mesurer de nouveau la mémoire disponible avant de démarrer dev-agent-02** (`free -m` sur
    le nœud). `started = true` dans le module : **`apply` démarre la VM**, la mesure se fait
-   donc avant `apply`. Sous 7168 Mio disponibles (6144 Mio et 1 Gio de marge, seuil de
-   prudence de cet exercice), ne pas appliquer.
-3. Mener l'exercice, puis détruire dev-agent-02 (voir [section 2](#2-création-de-la-vm)).
+   donc avant `apply`. Sous 7168 Mio disponibles (6144 Mio et 1 Gio de marge), ne pas
+   appliquer. Ce seuil minimal de prudence ne garantit pas l'absence de pression mémoire.
+3. Mener l'exercice, puis **arrêter dev-agent-02** (`qm shutdown <VMID>`), ce qui suffit à
+   libérer sa RAM. Sa destruction n'est pas obligatoire : la VM peut rester arrêtée pour la
+   prochaine phase Ansible.
 4. Seulement après, redémarrer `docker-test-01` (`qm start <VMID>`) et vérifier que le runner
    est de nouveau en ligne.
 
@@ -246,14 +250,18 @@ Tout remplacement, modification ou destruction, ou toute ressource d'un autre no
 rm -f envs/test/pve/dev-agent-02/dev-agent-02.tfplan   # le plan contient des valeurs sensibles
 ```
 
-Fin de la validation (même condition) :
+Fin de la fenêtre : arrêter dev-agent-02 suffit (voir
+[Fenêtre mémoire](#fenêtre-mémoire-pour-lexercice-à-6144-mio)). Conservée arrêtée, elle garde
+son disque sur `local-lvm`. La remettre en marche demande une nouvelle fenêtre et une nouvelle
+mesure de la mémoire.
+
+Destruction, seulement quand la VM n'est plus utile (même condition que l'`apply`) :
 
 ```bash
 ./tf.sh test/pve/dev-agent-02 destroy   # ne touche que les ressources de cette racine
 ```
 
-Le template Ubuntu 24.04 n'est pas détruit par cette commande. Redémarrer ensuite
-`docker-test-01` (voir [Fenêtre mémoire](#fenêtre-mémoire-pour-lexercice-à-6144-mio)).
+Le template Ubuntu 24.04 n'est pas détruit par cette commande.
 
 #### Indépendance des états
 
