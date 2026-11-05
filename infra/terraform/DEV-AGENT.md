@@ -36,12 +36,11 @@ dédié. Statut : **cible, rien n'a encore été exécuté**.
 
 Constats de l'audit du 04/11/2026, à traiter dans une PR séparée (non faits ici) :
 
-- `mask()` journalise les **8 premiers caractères** du secret du jeton Proxmox, de son
-  identifiant et de l'endpoint : à réduire à la longueur seule.
-- `TFWRAP_DEBUG=1` active `set -x` et `TF_LOG=DEBUG`, qui peuvent afficher les secrets en
-  clair : ne jamais l'utiliser tant que ce n'est pas corrigé.
-- `pm_tls_insecure` vaut `true` par défaut dans toutes les racines (certificat Proxmox non
-  vérifié par Terraform) ; limite existante, commune aux autres VM.
+- Valider la confidentialité des journaux du wrapper et de son mode debug avant de
+  réutiliser ce parcours. Ne pas lancer le wrapper actuel pour cette nouvelle racine.
+- Valider la confiance SSH et TLS depuis le Mac. Cette nouvelle racine active la
+  vérification TLS par défaut ; préparer une CA approuvée et un nom présent dans le
+  certificat, sans désactiver TLS pour contourner une erreur.
 
 ### Paramètres à déterminer avant exécution
 
@@ -55,7 +54,8 @@ Constats de l'audit du 04/11/2026, à traiter dans une PR séparée (non faits i
 
 Les valeurs privées (VMID réel, MAC) vont dans `envs/test/pve/dev-agent-02/local.auto.tfvars`,
 ignoré par Git, à créer depuis [`local.auto.tfvars.example`](envs/test/pve/dev-agent-02/local.auto.tfvars.example).
-La validation Terraform refuse un VMID de template laissé à `0` ou égal à `9000`.
+La validation refuse un VMID non entier, hors plage, ou égal à 106, 9000 ou 9100.
+Le template 24.04 doit être vérifié séparément : un numéro valide ne prouve pas son contenu.
 
 ## 1. Préparation du template (une fois)
 
@@ -102,6 +102,11 @@ Un nouveau template prend un nouveau VMID ; l'ancien n'est pas remplacé.
 
 ## 2. Création de la VM
 
+**Parcours futur bloqué jusqu’à validation du wrapper dans une PR séparée.**
+Ne pas exécuter les commandes suivantes avec le wrapper actuel.
+Les commandes de contrôle Terraform autorisées aujourd’hui se limitent à fmt et validate
+sans backend ni credentials.
+
 ```bash
 cd infra/terraform/envs/test/pve/dev-agent-02
 cp local.auto.tfvars.example local.auto.tfvars   # puis compléter (VMID du template, MAC facultative)
@@ -141,6 +146,10 @@ rm -f envs/test/pve/dev-agent-02/dev-agent-02.tfplan   # le plan contient des va
 - Les modifications du module `vm` (options UEFI, disque EFI, MAC) valent `null` par
   défaut : les racines Docker n'ont aucun argument nouveau. Ce n'est pas une preuve de plan
   vide ; lancer un `plan` sur ces racines avant leur prochain `apply`.
+
+Le fragment SSH de la nouvelle instance passe avant celui généré par cloud-init.
+Le chemin par défaut des autres consommateurs est conservé : leur snippet rendu reste
+identique. Vérifier néanmoins les réglages effectifs dans la nouvelle VM.
 
 ### Contrôles après création
 
@@ -198,6 +207,10 @@ Fin de la validation :
 ```
 
 Le template Ubuntu 24.04 n'est pas détruit par cette commande.
+
+Avant création, prévoir aussi la copie privée de l’état après une opération partiellement
+échouée : la copie automatique du wrapper ne couvre pas tous ces cas. Ne jamais publier
+les plans, états ou sorties brutes contenant des métadonnées privées.
 
 ## Portabilité vers un autre hôte Proxmox
 

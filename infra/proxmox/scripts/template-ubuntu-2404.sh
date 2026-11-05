@@ -18,6 +18,8 @@
 # Optional overrides (environment): TEMPLATE_NAME, STORAGE, BRIDGE, WORKDIR.
 set -euo pipefail
 
+# Aucun appel de ce script ne doit partager un VMID avec une autre création en cours.
+
 RELEASE=20261017
 IMG=ubuntu-24.04-server-cloudimg-amd64.img
 IMG_SHA256=04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94
@@ -39,9 +41,17 @@ die() { echo "[template-ubuntu-2404] ERROR: $*" >&2; exit 1; }
 [ -n "${VMID}" ] || die "usage: $0 <VMID>  (VMID is required, choose it after checking Proxmox)"
 [[ "${VMID}" =~ ^[1-9][0-9]{2,8}$ ]] || die "invalid VMID '${VMID}' (expected an integer >= 100)"
 [ "$(id -u)" -eq 0 ] || die "must run as root on the Proxmox host"
-for cmd in qm pct pvesh pvesm sha256sum wget awk; do
+[ "$#" -eq 1 ] || die "usage: $0 <VMID>"
+[[ "$NAME" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]] || die "invalid template name"
+[[ "$STORAGE" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] || die "invalid storage name"
+[[ "$BRIDGE" =~ ^[A-Za-z][A-Za-z0-9_.-]*$ ]] || die "invalid bridge name"
+[[ "$WORKDIR" =~ ^/[A-Za-z0-9_./-]+$ ]] || die "invalid work directory"
+for cmd in qm pct pvesh pvesm sha256sum wget awk grep mktemp flock; do
   command -v "${cmd}" >/dev/null 2>&1 || die "missing command: ${cmd}"
 done
+
+exec 9>"/run/lock/remidom-template-${VMID}.lock"
+flock -n 9 || die "another execution of this script uses this VMID"
 
 # VMID must be free cluster-wide (VM or container). pvesh fails if the ID is in use.
 if qm status "${VMID}" >/dev/null 2>&1 || pct status "${VMID}" >/dev/null 2>&1 \
@@ -57,7 +67,7 @@ if qm list | awk 'NR>1 {print $2}' | grep -qxF "${NAME}"; then
 fi
 
 pvesm status --storage "${STORAGE}" >/dev/null 2>&1 || die "storage '${STORAGE}' not found"
-pvesm status --storage "${STORAGE}" --content images 2>/dev/null | awk 'NR>1' | grep -q . \
+pvesm status --storage "${STORAGE}" --content images 2>/dev/null | awk 'NR>1 && $3 == "active" { found=1 } END { exit !found }' \
   || die "storage '${STORAGE}' does not accept VM disk images"
 [ -d "/sys/class/net/${BRIDGE}/bridge" ] || die "bridge '${BRIDGE}' not found"
 [ -d "${WORKDIR}" ] || die "work directory '${WORKDIR}' not found"
@@ -89,10 +99,13 @@ fi
 # automatically: inspect it with 'qm config ${VMID}' before deciding what to do.
 trap 'echo "[template-ubuntu-2404] ERROR: stopped during creation; VM ${VMID} may be incomplete. It was NOT removed. Inspect: qm config ${VMID}" >&2' ERR
 
+pvesh get /cluster/nextid --vmid "${VMID}" >/dev/null 2>&1 \
+  || die "VMID no longer available after download"
 log "Creating VM ${VMID} (not started)..."
 qm create "${VMID}" \
   --name "${NAME}" \
   --description "Ubuntu 24.04 cloud image release-${RELEASE}, sha256 ${IMG_SHA256}" \
+  --onboot 0 \
   --ostype l26 \
   --machine q35 \
   --bios ovmf \

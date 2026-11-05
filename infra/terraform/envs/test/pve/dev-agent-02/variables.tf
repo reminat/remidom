@@ -4,6 +4,7 @@ variable "pm_endpoint" {
 }
 
 variable "pm_api_token_id" {
+  sensitive   = true
   type        = string
   description = "Ex: terraform@pve!tf"
 }
@@ -15,7 +16,7 @@ variable "pm_api_token_secret" {
 
 variable "pm_tls_insecure" {
   type    = bool
-  default = true
+  default = false
 }
 
 variable "pm_node" { type = string }
@@ -32,8 +33,8 @@ variable "vm_template_id" {
   description = "VMID of the Ubuntu 24.04 UEFI template (not 9000)."
 
   validation {
-    condition     = var.vm_template_id >= 100 && var.vm_template_id != 9000
-    error_message = "Set the VMID of the Ubuntu 24.04 template (>= 100). 9000 is the Ubuntu 22.04 template of the Docker hosts."
+    condition     = var.vm_template_id >= 100 && var.vm_template_id <= 999999999 && floor(var.vm_template_id) == var.vm_template_id && !contains([106, 9000, 9100], var.vm_template_id)
+    error_message = "Set the VMID of the Ubuntu 24.04 template (>= 100). 106, 9000 and 9100 are reserved existing resources."
   }
 }
 
@@ -65,8 +66,9 @@ variable "vm_bridge" {
 # MAC fixe pour la réservation DHCP : uniquement dans local.auto.tfvars (ignoré par Git).
 # Jamais celle de dev-agent-01. null = MAC générée par Proxmox.
 variable "vm_mac_address" {
-  type    = string
-  default = null
+  sensitive = true
+  type      = string
+  default   = null
 }
 
 variable "ssh_authorized_keys" {

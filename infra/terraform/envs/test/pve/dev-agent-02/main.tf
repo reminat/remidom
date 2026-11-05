@@ -30,6 +30,9 @@ module "dev_agent" {
   ssh_authorized_keys     = var.ssh_authorized_keys
   user_data_template_path = "${path.root}/../../../../../proxmox/snippets/docker-host.user-data.yaml.tftpl"
 
+  # OpenSSH retient la première valeur : passer avant 50-cloud-init.conf.
+  ssh_config_path = "/etc/ssh/sshd_config.d/00-homelab.conf"
+
   vm_bios    = "ovmf"
   vm_machine = "q35"
 

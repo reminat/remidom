@@ -71,6 +71,7 @@ resource "proxmox_virtual_environment_file" "user_data" {
   source_raw {
     data = templatefile(var.user_data_template_path, {
       hostname            = var.vm_name
+      ssh_config_path     = var.ssh_config_path
       ssh_authorized_keys = var.ssh_authorized_keys
     })
     file_name = "${var.vm_name}.user-data.yaml"
