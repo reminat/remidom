@@ -15,11 +15,16 @@ dédié. Statut : **cible, rien n'a encore été exécuté**.
 | Module VM (options UEFI, disque EFI, MAC) | [`modules/vm/`](modules/vm/) |
 | cloud-init (même base que les hôtes Docker) | [`docker-host.user-data.yaml.tftpl`](../proxmox/snippets/docker-host.user-data.yaml.tftpl) |
 
-## Statut : création dépendante d'une future PR
+## Statut : création soumise à des prérequis encore ouverts
 
-La **création de la VM n'est pas utilisable aujourd'hui** : elle passe par `tf.sh`, dont la
-confidentialité des journaux et du mode debug doit d'abord être garantie par une PR
-séparée (voir [Confidentialité des journaux](#confidentialité-des-journaux-prérequis)).
+- **Traité** : la confidentialité des journaux de `tf.sh` (PR #27, fusionnée le
+  05/11/2026 ; voir [Confidentialité des journaux](#confidentialité-des-journaux-traité)).
+- **Ouverts** : les prérequis TLS et SSH du Mac (voir
+  [Confiance TLS et SSH](#confiance-tls-et-ssh-prérequis-non-vérifiés)) et les vérifications
+  Proxmox (VMID du template, mémoire, espace disque ; voir
+  [Paramètres](#paramètres-à-déterminer-avant-exécution)).
+
+La **création de la VM n'est pas utilisable** tant que ces prérequis ne sont pas vérifiés.
 D'ici là, seuls les contrôles hors ligne de la racine sont utilisables (voir
 [section 2](#2-création-de-la-vm)). La préparation du template ne dépend pas du wrapper.
 
@@ -74,11 +79,14 @@ Ces prérequis concernent le Mac, Bitwarden et le certificat Proxmox, qui ne son
 modifiés par cette PR. Alternative à plus long terme : un certificat du nœud couvrant
 `pve.reminat.com` (changement Proxmox, hors périmètre).
 
-### Confidentialité des journaux (prérequis)
+### Confidentialité des journaux (traité)
 
-Avant toute utilisation de `tf.sh` pour cette racine, une PR séparée doit garantir que ses
-journaux et son mode debug n'exposent aucune valeur secrète. D'ici là : ne pas lancer
-`tf.sh` pour cette racine et ne pas activer son mode debug.
+Traité par la PR #27 : `tf.sh` n'affiche plus aucune valeur issue de Bitwarden, n'a plus de
+mode debug et refuse les journaux de diagnostic de Terraform (voir
+[`HOW-TO.md`, « Journaux du wrapper »](HOW-TO.md#journaux-du-wrapper)). Ces règles sont
+couvertes par le harnais [`tests/tf-wrapper-test.sh`](tests/tf-wrapper-test.sh). Le
+wrapper ne filtre pas ce qu'affichent Terraform et le provider : ne pas publier leurs
+sorties brutes.
 
 ### Paramètres à déterminer avant exécution
 
@@ -162,8 +170,9 @@ terraform validate
 
 ### Procédure future (non utilisable actuellement)
 
-> **Ne pas exécuter** tant que la PR sur la confidentialité des journaux de `tf.sh` n'est
-> pas fusionnée et que les prérequis TLS et SSH ne sont pas vérifiés.
+> **Ne pas exécuter** tant que les prérequis TLS et SSH du Mac ne sont pas vérifiés et que
+> les vérifications Proxmox (VMID du template, mémoire, espace disque) ne sont pas faites.
+> Le prérequis de confidentialité du wrapper est traité (PR #27).
 
 ```bash
 cd infra/terraform/envs/test/pve/dev-agent-02
