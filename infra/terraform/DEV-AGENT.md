@@ -15,6 +15,14 @@ dédié. Statut : **cible, rien n'a encore été exécuté**.
 | Module VM (options UEFI, disque EFI, MAC) | [`modules/vm/`](modules/vm/) |
 | cloud-init (même base que les hôtes Docker) | [`docker-host.user-data.yaml.tftpl`](../proxmox/snippets/docker-host.user-data.yaml.tftpl) |
 
+## Statut : création dépendante d'une future PR
+
+La **création de la VM n'est pas utilisable aujourd'hui** : elle passe par `tf.sh`, dont la
+confidentialité des journaux et du mode debug doit d'abord être garantie par une PR
+séparée (voir [Confidentialité des journaux](#confidentialité-des-journaux-prérequis)).
+D'ici là, seuls les contrôles hors ligne de la racine sont utilisables (voir
+[section 2](#2-création-de-la-vm)). La préparation du template ne dépend pas du wrapper.
+
 ## Prérequis
 
 ### Poste d'exécution (Mac)
@@ -32,30 +40,66 @@ dédié. Statut : **cible, rien n'a encore été exécuté**.
 - `terraform init` **sans** `-upgrade` : le fichier `.terraform.lock.hcl` fixe
   `bpg/proxmox` 0.111.0, la version des autres racines.
 
-### À corriger avant toute utilisation réelle de `tf.sh`
+### Confiance TLS et SSH (prérequis non vérifiés)
 
-Constats de l'audit du 04/11/2026, à traiter dans une PR séparée (non faits ici) :
+Cette racine vérifie le certificat de l'API (`pm_tls_insecure = false`). Ne jamais passer
+à `true` pour contourner une erreur.
 
-- Valider la confidentialité des journaux du wrapper et de son mode debug avant de
-  réutiliser ce parcours. Ne pas lancer le wrapper actuel pour cette nouvelle racine.
-- Valider la confiance SSH et TLS depuis le Mac. Cette nouvelle racine active la
-  vérification TLS par défaut ; préparer une CA approuvée et un nom présent dans le
-  certificat, sans désactiver TLS pour contourner une erreur.
+**Endpoint.** Le certificat du nœud couvre le nom `pve`, pas `pve.reminat.com` (constat du
+03/11/2026, voir [Proxmox](../../docs/proxmox.md#contraintes-observées)). L'endpoint
+fourni par le secret commun `proxmox_endpoint` serait donc refusé. Surcharger l'endpoint
+pour cette racine seulement, dans `local.auto.tfvars` (ignoré par Git), sans modifier le
+secret commun utilisé par les autres racines :
+
+```hcl
+pm_endpoint = "https://pve:8006"
+```
+
+- **Priorité** : `tf.sh` exporte `TF_VAR_pm_endpoint` depuis le secret commun ; Terraform
+  lit les fichiers `*.auto.tfvars` après les variables d'environnement, donc la valeur du
+  fichier local l'emporte. Vérifier dans le plan l'endpoint effectivement utilisé.
+- **Adresse SSH dérivée** : le provider envoie le snippet cloud-init en SSH root vers
+  l'hôte extrait de l'endpoint (`main.tf`). Avec cette surcharge, il se connecte donc à
+  `pve`, et non plus à `pve.reminat.com`.
+
+**À vérifier sur le Mac avant toute exécution** (rien n'a été vérifié ni modifié) :
+
+| Point | Vérification |
+|---|---|
+| Résolution du nom | `pve` doit résoudre vers le nœud attendu (`dscacheutil -q host -a name pve`) |
+| CA pour le provider (Go) | Sur macOS, un programme Go valide les certificats avec le trousseau du système et ignore `SSL_CERT_FILE` : la CA du cluster doit y être approuvée. Empreinte à comparer avec la copie du dépôt [`pve-root-ca.pem`](../ansible/roles/compose_deploy/files/pve-root-ca.pem) (`openssl x509 -noout -fingerprint -sha256`). Contrôle par le trousseau, sans authentification : `security verify-cert -c <certificat du nœud> -p ssl -s pve` |
+| Confiance SSH | Une entrée `known_hosts` pour `pve` dont l'empreinte a été vérifiée par un autre canal (console Proxmox). Le comportement exact du provider vis-à-vis de `known_hosts` reste à confirmer |
+
+Ces prérequis concernent le Mac, Bitwarden et le certificat Proxmox, qui ne sont pas
+modifiés par cette PR. Alternative à plus long terme : un certificat du nœud couvrant
+`pve.reminat.com` (changement Proxmox, hors périmètre).
+
+### Confidentialité des journaux (prérequis)
+
+Avant toute utilisation de `tf.sh` pour cette racine, une PR séparée doit garantir que ses
+journaux et son mode debug n'exposent aucune valeur secrète. D'ici là : ne pas lancer
+`tf.sh` pour cette racine et ne pas activer son mode debug.
 
 ### Paramètres à déterminer avant exécution
 
 | Paramètre | Où | Vérification |
 |---|---|---|
 | VMID du template Ubuntu 24.04 | argument du script, puis `vm_template_id` dans `local.auto.tfvars` | Libre : `pvesh get /cluster/nextid --vmid <VMID>` doit répondre ce VMID ; le script le revérifie |
+| Endpoint de l'API | `pm_endpoint` dans `local.auto.tfvars` | Nom présent dans le certificat du nœud (voir ci-dessus) |
 | VMID de dev-agent-02 | non fixé | Attribué par Proxmox à la création (premier libre) ; relevé dans le plan puis dans Proxmox |
 | MAC (facultatif) | `vm_mac_address` dans `local.auto.tfvars` | Dédiée à dev-agent-02, jamais celle de dev-agent-01 ; sinon MAC générée |
 | Mémoire disponible sur le nœud | — | 6 Go de plus ; la marge est faible (voir [Proxmox](../../docs/proxmox.md#contraintes-observées)) |
 | Espace sur `local-lvm` | — | 80 Go (provisionnement fin) |
 
-Les valeurs privées (VMID réel, MAC) vont dans `envs/test/pve/dev-agent-02/local.auto.tfvars`,
-ignoré par Git, à créer depuis [`local.auto.tfvars.example`](envs/test/pve/dev-agent-02/local.auto.tfvars.example).
-La validation refuse un VMID non entier, hors plage, ou égal à 106, 9000 ou 9100.
-Le template 24.04 doit être vérifié séparément : un numéro valide ne prouve pas son contenu.
+Les valeurs privées (VMID réel, endpoint, MAC) vont dans
+`envs/test/pve/dev-agent-02/local.auto.tfvars`, ignoré par Git, à créer depuis
+[`local.auto.tfvars.example`](envs/test/pve/dev-agent-02/local.auto.tfvars.example).
+
+La validation Terraform n'accepte qu'un entier de 100 à 999999999 ; elle ne prouve pas que
+ce VMID désigne le bon template. Vérifier dans Proxmox que la source est bien le nouveau
+template Ubuntu 24.04 : `qm config <VMID>` doit montrer `template: 1`, le nom
+`tpl-ubuntu-2404-cloudinit`, la description `release-AAAAMMJJ` avec sa somme, `bios: ovmf`
+et `machine: q35`.
 
 ## 1. Préparation du template (une fois)
 
@@ -72,8 +116,11 @@ Le script :
   importé, lecteur cloud-init, agent QEMU, console série ; ne la démarre pas ; la convertit
   en template.
 
-En cas d'arrêt pendant la création, la VM partielle **n'est pas supprimée** : l'inspecter
-(`qm config <VMID>`) et décider manuellement.
+Les seules écritures avant la création sont locales à l'hôte : un fichier de verrou et le
+cache de l'image vérifiée. Le verrou empêche deux exécutions simultanées du script, mais ne
+protège pas contre d'autres outils ou l'interface Proxmox. En cas d'échec d'une commande
+Proxmox, rien n'est supprimé : inspecter le VMID (`qm config <VMID>`) et décider
+manuellement.
 
 ```bash
 # Depuis le checkout propre ; mutation sur Proxmox
@@ -102,14 +149,25 @@ Un nouveau template prend un nouveau VMID ; l'ancien n'est pas remplacé.
 
 ## 2. Création de la VM
 
-**Parcours futur bloqué jusqu’à validation du wrapper dans une PR séparée.**
-Ne pas exécuter les commandes suivantes avec le wrapper actuel.
-Les commandes de contrôle Terraform autorisées aujourd’hui se limitent à fmt et validate
-sans backend ni credentials.
+### Utilisable aujourd'hui : contrôles hors ligne
+
+Sans secret, sans accès à Proxmox ni état :
 
 ```bash
 cd infra/terraform/envs/test/pve/dev-agent-02
-cp local.auto.tfvars.example local.auto.tfvars   # puis compléter (VMID du template, MAC facultative)
+terraform init -backend=false   # sans -upgrade ; télécharge seulement le provider verrouillé
+terraform fmt -check -recursive ../../../../
+terraform validate
+```
+
+### Procédure future (non utilisable actuellement)
+
+> **Ne pas exécuter** tant que la PR sur la confidentialité des journaux de `tf.sh` n'est
+> pas fusionnée et que les prérequis TLS et SSH ne sont pas vérifiés.
+
+```bash
+cd infra/terraform/envs/test/pve/dev-agent-02
+cp local.auto.tfvars.example local.auto.tfvars   # compléter : VMID du template, endpoint, MAC facultative
 terraform init                                    # sans -upgrade, sans secret
 cd ../../../..                                    # infra/terraform
 
@@ -118,14 +176,14 @@ export BW_SESSION="$(bw unlock --raw)"
 ./tf.sh test/pve/dev-agent-02 plan -out=dev-agent-02.tfplan
 ```
 
-### Contrôles avant apply
+#### Contrôles avant apply
 
 Le plan doit montrer **uniquement** :
 
 - `Plan: 2 to add, 0 to change, 0 to destroy` ;
 - `module.dev_agent.proxmox_virtual_environment_file.user_data` (snippet
   `dev-agent-02.user-data.yaml`) et `module.dev_agent.proxmox_virtual_environment_vm.vm` ;
-- nom `dev-agent-02`, clone du template Ubuntu 24.04 (pas 9000), `bios = "ovmf"`,
+- nom `dev-agent-02`, clone du template Ubuntu 24.04 vérifié ci-dessus, `bios = "ovmf"`,
   `machine = "q35"`, un `efi_disk`, 4 cœurs, 6144 Mo, disque 80 Go sur `local-lvm`, pont
   `vmbr0`, `on_boot = true`.
 
@@ -137,21 +195,30 @@ Tout remplacement, modification ou destruction, ou toute ressource d'un autre no
 rm -f envs/test/pve/dev-agent-02/dev-agent-02.tfplan   # le plan contient des valeurs sensibles
 ```
 
-### Indépendance des états
+Fin de la validation (même condition) :
+
+```bash
+./tf.sh test/pve/dev-agent-02 destroy   # ne touche que les ressources de cette racine
+```
+
+Le template Ubuntu 24.04 n'est pas détruit par cette commande.
+
+#### Indépendance des états
 
 - État local `envs/test/pve/dev-agent-02/terraform.tfstate`, distinct des états Docker et
   HAOS ; aucune copie ni import d'un autre état.
 - Après `apply` ou `destroy`, `tf.sh` en copie une version horodatée sur le NAS dans le
   dossier `test_pve_dev-agent-02` (voir [Sauvegardes](../../docs/sauvegardes.md#état-terraform)).
-- Les modifications du module `vm` (options UEFI, disque EFI, MAC) valent `null` par
-  défaut : les racines Docker n'ont aucun argument nouveau. Ce n'est pas une preuve de plan
-  vide ; lancer un `plan` sur ces racines avant leur prochain `apply`.
+  Cette copie ne couvre pas tous les cas d'échec partiel : prévoir une copie privée de
+  l'état après une opération interrompue. Ne jamais publier plans, états ou sorties brutes.
+- Les modifications du module `vm` (options UEFI, disque EFI, MAC, chemin du fragment SSH)
+  ont des valeurs par défaut qui laissent les racines Docker sans argument nouveau et leur
+  snippet rendu identique. Ce n'est pas une preuve de plan vide ; lancer un `plan` sur ces
+  racines avant leur prochain `apply`.
+- Le fragment SSH de dev-agent-02 (`00-homelab.conf`) est lu avant celui de cloud-init, car
+  sshd retient la première valeur d'un réglage. Vérifier les réglages effectifs dans la VM.
 
-Le fragment SSH de la nouvelle instance passe avant celui généré par cloud-init.
-Le chemin par défaut des autres consommateurs est conservé : leur snippet rendu reste
-identique. Vérifier néanmoins les réglages effectifs dans la nouvelle VM.
-
-### Contrôles après création
+#### Contrôles après création
 
 Sur Proxmox (lecture seule) :
 
@@ -199,18 +266,6 @@ fournies, au provisionnement.
 **Aucune sauvegarde** à ce stade : ni vzdump, ni snapshot, ni Restic. La VM se recrée par
 ce guide ; ses données sont perdues à la destruction. La stratégie de sauvegarde du poste
 reste à décider (voir [Sauvegardes](../../docs/sauvegardes.md)).
-
-Fin de la validation :
-
-```bash
-./tf.sh test/pve/dev-agent-02 destroy   # ne touche que les ressources de cette racine
-```
-
-Le template Ubuntu 24.04 n'est pas détruit par cette commande.
-
-Avant création, prévoir aussi la copie privée de l’état après une opération partiellement
-échouée : la copie automatique du wrapper ne couvre pas tous ces cas. Ne jamais publier
-les plans, états ou sorties brutes contenant des métadonnées privées.
 
 ## Portabilité vers un autre hôte Proxmox
 

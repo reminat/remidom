@@ -28,13 +28,14 @@ variable "vm_name" {
 
 # Template Ubuntu 24.04 créé par infra/proxmox/scripts/template-ubuntu-2404.sh.
 # Pas de valeur par défaut : VMID à vérifier dans Proxmox, puis à placer dans local.auto.tfvars.
+# La validation ne contrôle que le format ; la nature du template se vérifie dans Proxmox.
 variable "vm_template_id" {
   type        = number
-  description = "VMID of the Ubuntu 24.04 UEFI template (not 9000)."
+  description = "VMID of the Ubuntu 24.04 UEFI template created by template-ubuntu-2404.sh."
 
   validation {
-    condition     = var.vm_template_id >= 100 && var.vm_template_id <= 999999999 && floor(var.vm_template_id) == var.vm_template_id && !contains([106, 9000, 9100], var.vm_template_id)
-    error_message = "Set the VMID of the Ubuntu 24.04 template (>= 100). 106, 9000 and 9100 are reserved existing resources."
+    condition     = var.vm_template_id >= 100 && var.vm_template_id <= 999999999 && floor(var.vm_template_id) == var.vm_template_id
+    error_message = "vm_template_id must be an integer between 100 and 999999999 (VMID of the Ubuntu 24.04 template)."
   }
 }
 

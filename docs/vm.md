@@ -54,7 +54,8 @@ exécuter Terraform.
 Racine [`envs/test/pve/dev-agent-02/`](../infra/terraform/envs/test/pve/dev-agent-02/)
 (Git) : 4 vCPU, 6 Go, 80 Go, UEFI/q35, template Ubuntu 24.04 dédié, DHCP. **Non créée** à
 ce jour ; instance temporaire, indépendante de `dev-agent-01`, sans sauvegarde et hors de
-l'inventaire Ansible. Procédure : [`DEV-AGENT.md`](../infra/terraform/DEV-AGENT.md).
+l'inventaire Ansible. Sa création dépend d'une future PR sur le wrapper `tf.sh`.
+Procédure : [`DEV-AGENT.md`](../infra/terraform/DEV-AGENT.md).
 
 ## Machines hors Terraform
 

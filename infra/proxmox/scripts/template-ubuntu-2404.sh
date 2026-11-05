@@ -16,9 +16,10 @@
 # (see infra/terraform/DEV-AGENT.md).
 #
 # Optional overrides (environment): TEMPLATE_NAME, STORAGE, BRIDGE, WORKDIR.
+#
+# Local writes on the host, before any Proxmox change: a lock file (/run/lock) and the
+# verified image cache (WORKDIR). Proxmox resources are only changed in the last section.
 set -euo pipefail
-
-# Aucun appel de ce script ne doit partager un VMID avec une autre création en cours.
 
 RELEASE=20261017
 IMG=ubuntu-24.04-server-cloudimg-amd64.img
@@ -36,7 +37,7 @@ CORES=2
 log() { echo "[template-ubuntu-2404] $*"; }
 die() { echo "[template-ubuntu-2404] ERROR: $*" >&2; exit 1; }
 
-# --- Checks (no mutation before this section is complete) -------------------
+# --- Checks (no Proxmox resource is changed in this section) ----------------
 
 [ -n "${VMID}" ] || die "usage: $0 <VMID>  (VMID is required, choose it after checking Proxmox)"
 [[ "${VMID}" =~ ^[1-9][0-9]{2,8}$ ]] || die "invalid VMID '${VMID}' (expected an integer >= 100)"
@@ -50,20 +51,21 @@ for cmd in qm pct pvesh pvesm sha256sum wget awk grep mktemp flock; do
   command -v "${cmd}" >/dev/null 2>&1 || die "missing command: ${cmd}"
 done
 
-exec 9>"/run/lock/remidom-template-${VMID}.lock"
-flock -n 9 || die "another execution of this script uses this VMID"
+# Global lock: one run of this script at a time on this host, whatever the VMID or name.
+# It does not protect against other tools, the Proxmox web interface or another node.
+exec 9>"/run/lock/remidom-template-ubuntu-2404.lock"
+flock -n 9 || die "another run of this script is in progress on this host"
 
 # VMID must be free cluster-wide (VM or container). pvesh fails if the ID is in use.
 if qm status "${VMID}" >/dev/null 2>&1 || pct status "${VMID}" >/dev/null 2>&1 \
    || ! pvesh get /cluster/nextid --vmid "${VMID}" >/dev/null 2>&1; then
-  die "VMID ${VMID} is already in use (possibly by an incomplete previous run). Nothing was changed.
-Inspect it with 'qm config ${VMID}'; remove it manually only after checking it is not needed,
-or choose another VMID."
+  die "VMID ${VMID} is not available. Nothing was changed in Proxmox.
+Inspect the existing guest ('qm config ${VMID}' or 'pct config ${VMID}') before choosing another VMID."
 fi
 
-# Refuse a duplicate template name (a previous run may have used another VMID).
+# Refuse a duplicate template name.
 if qm list | awk 'NR>1 {print $2}' | grep -qxF "${NAME}"; then
-  die "a VM named '${NAME}' already exists. Nothing was changed. Check 'qm list'."
+  die "a VM named '${NAME}' already exists. Nothing was changed in Proxmox. Inspect it ('qm list')."
 fi
 
 pvesm status --storage "${STORAGE}" >/dev/null 2>&1 || die "storage '${STORAGE}' not found"
@@ -95,12 +97,12 @@ fi
 
 # --- Template creation -------------------------------------------------------
 
-# From here on, a failure leaves VM ${VMID} partially configured. It is not removed
-# automatically: inspect it with 'qm config ${VMID}' before deciding what to do.
-trap 'echo "[template-ubuntu-2404] ERROR: stopped during creation; VM ${VMID} may be incomplete. It was NOT removed. Inspect: qm config ${VMID}" >&2' ERR
-
+# Proxmox resources are changed from here on. Nothing is removed automatically on failure.
 pvesh get /cluster/nextid --vmid "${VMID}" >/dev/null 2>&1 \
-  || die "VMID no longer available after download"
+  || die "VMID ${VMID} is no longer available. Nothing was changed in Proxmox."
+
+trap 'echo "[template-ubuntu-2404] ERROR: a Proxmox command failed. Nothing was removed. Inspect VMID ${VMID} (qm config ${VMID}) before any action." >&2' ERR
+
 log "Creating VM ${VMID} (not started)..."
 qm create "${VMID}" \
   --name "${NAME}" \
