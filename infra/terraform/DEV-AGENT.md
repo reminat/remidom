@@ -7,22 +7,26 @@ dédié. Statut : **cible, rien n'a encore été exécuté**.
 - `dev-agent-01` (poste actuel) reste hors Terraform et n'est pas modifié par cette phase.
 - Les templates et VM existants (Docker, HAOS) ne sont ni modifiés ni recréés.
 - dev-agent-02 n'est pas sauvegardée : n'y stocker aucune donnée à conserver.
+- dev-agent-02 est temporaire et **sans démarrage automatique** (`vm_on_boot = false`) : après
+  un redémarrage du nœud, elle reste arrêtée.
 
 | Élément | Fichier |
 |---|---|
 | Template Ubuntu 24.04 (UEFI/q35, cloud-init) | [`infra/proxmox/scripts/template-ubuntu-2404.sh`](../proxmox/scripts/template-ubuntu-2404.sh) |
 | Racine Terraform, état propre | [`envs/test/pve/dev-agent-02/`](envs/test/pve/dev-agent-02/) |
-| Module VM (options UEFI, disque EFI, MAC) | [`modules/vm/`](modules/vm/) |
+| Module VM (options UEFI, disque EFI, MAC, démarrage automatique) | [`modules/vm/`](modules/vm/) |
 | cloud-init (même base que les hôtes Docker) | [`docker-host.user-data.yaml.tftpl`](../proxmox/snippets/docker-host.user-data.yaml.tftpl) |
 
 ## Statut : création soumise à des prérequis encore ouverts
 
 - **Traité** : la confidentialité des journaux de `tf.sh` (PR #27, fusionnée le
   05/11/2026 ; voir [Confidentialité des journaux](#confidentialité-des-journaux-traité)).
-- **Ouverts** : les prérequis TLS et SSH du Mac (voir
-  [Confiance TLS et SSH](#confiance-tls-et-ssh-prérequis-non-vérifiés)) et les vérifications
-  Proxmox (VMID du template, mémoire, espace disque ; voir
-  [Paramètres](#paramètres-à-déterminer-avant-exécution)).
+- **Vérifié en partie** : la confiance TLS et SSH depuis le Mac (voir
+  [Confiance TLS et SSH](#confiance-tls-et-ssh-vérifications-partielles)). L'authentification
+  et le provider ne sont pas testés.
+- **Ouverts** : les contrôles Proxmox restants (voir
+  [Paramètres](#paramètres-à-déterminer-avant-exécution)) et la
+  [fenêtre mémoire](#fenêtre-mémoire-pour-lexercice-à-6144-mio), à planifier.
 
 La **création de la VM n'est pas utilisable** tant que ces prérequis ne sont pas vérifiés.
 D'ici là, seuls les contrôles hors ligne de la racine sont utilisables (voir
@@ -45,7 +49,7 @@ D'ici là, seuls les contrôles hors ligne de la racine sont utilisables (voir
 - `terraform init` **sans** `-upgrade` : le fichier `.terraform.lock.hcl` fixe
   `bpg/proxmox` 0.111.0, la version des autres racines.
 
-### Confiance TLS et SSH (prérequis non vérifiés)
+### Confiance TLS et SSH (vérifications partielles)
 
 Cette racine vérifie le certificat de l'API (`pm_tls_insecure = false`). Ne jamais passer
 à `true` pour contourner une erreur.
@@ -67,13 +71,17 @@ pm_endpoint = "https://pve:8006"
   l'hôte extrait de l'endpoint (`main.tf`). Avec cette surcharge, il se connecte donc à
   `pve`, et non plus à `pve.reminat.com`.
 
-**À vérifier sur le Mac avant toute exécution** (rien n'a été vérifié ni modifié) :
+**Vérifications sur le Mac.** Constat du 05/11/2026, rapporté par le propriétaire, pour les
+trois contrôles marqués comme réalisés ; aucun résultat brut n'est publié ici.
 
-| Point | Vérification |
-|---|---|
-| Résolution du nom | `pve` doit résoudre vers le nœud attendu (`dscacheutil -q host -a name pve`) |
-| CA pour le provider (Go) | Sur macOS, un programme Go valide les certificats avec le trousseau du système et ignore `SSL_CERT_FILE` : la CA du cluster doit y être approuvée. Empreinte à comparer avec la copie du dépôt [`pve-root-ca.pem`](../ansible/roles/compose_deploy/files/pve-root-ca.pem) (`openssl x509 -noout -fingerprint -sha256`). Contrôle par le trousseau, sans authentification : `security verify-cert -c <certificat du nœud> -p ssl -s pve` |
-| Confiance SSH | Une entrée `known_hosts` pour `pve` dont l'empreinte a été vérifiée par un autre canal (console Proxmox). Le comportement exact du provider vis-à-vis de `known_hosts` reste à confirmer |
+| Point | Statut | Vérification |
+|---|---|---|
+| Résolution du nom | Réalisé | `pve` doit résoudre vers le nœud attendu (`dscacheutil -q host -a name pve`) |
+| CA pour le provider (Go) | `security verify-cert` réalisé ; provider non testé | Sur macOS, un programme Go valide les certificats avec le trousseau du système et ignore `SSL_CERT_FILE` : la CA du cluster doit y être approuvée. Empreinte à comparer avec la copie du dépôt [`pve-root-ca.pem`](../ansible/roles/compose_deploy/files/pve-root-ca.pem) (`openssl x509 -noout -fingerprint -sha256`). Contrôle par le trousseau, sans authentification : `security verify-cert -c <certificat du nœud> -p ssl -s pve` |
+| Confiance SSH | Concordance de la clé ED25519 réalisée ; connexion du provider non testée | Une entrée `known_hosts` pour `pve` dont l'empreinte a été vérifiée par un autre canal (console Proxmox). Le comportement exact du provider vis-à-vis de `known_hosts` reste à confirmer |
+
+Ces contrôles ne prouvent ni l'authentification (jeton API, SSH root), ni le comportement du
+provider : ils n'ont pas été testés. Le premier `plan` reste le premier essai réel.
 
 Ces prérequis concernent le Mac, Bitwarden et le certificat Proxmox, qui ne sont pas
 modifiés par cette PR. Alternative à plus long terme : un certificat du nœud couvrant
@@ -92,12 +100,13 @@ sorties brutes.
 
 | Paramètre | Où | Vérification |
 |---|---|---|
-| VMID du template Ubuntu 24.04 | argument du script, puis `vm_template_id` dans `local.auto.tfvars` | Libre : `pvesh get /cluster/nextid --vmid <VMID>` doit répondre ce VMID ; le script le revérifie |
+| VMID du template Ubuntu 24.04 | argument du script, puis `vm_template_id` dans `local.auto.tfvars` | Libre : `pvesh get /cluster/nextid --vmid <VMID>` doit répondre ce VMID, à revérifier au moment de la création ; le script le revérifie. Aucun volume orphelin `vm-<VMID>-*` sur `local-lvm` (non vérifié) |
 | Endpoint de l'API | `pm_endpoint` dans `local.auto.tfvars` | Nom présent dans le certificat du nœud (voir ci-dessus) |
 | VMID de dev-agent-02 | non fixé | Attribué par Proxmox à la création (premier libre) ; relevé dans le plan puis dans Proxmox |
 | MAC (facultatif) | `vm_mac_address` dans `local.auto.tfvars` | Dédiée à dev-agent-02, jamais celle de dev-agent-01 ; sinon MAC générée |
-| Mémoire disponible sur le nœud | — | 6 Go de plus ; la marge est faible (voir [Proxmox](../../docs/proxmox.md#contraintes-observées)) |
-| Espace sur `local-lvm` | — | 80 Go (provisionnement fin) |
+| Mémoire disponible sur le nœud | — | Insuffisante sans mesure complémentaire : voir [Fenêtre mémoire](#fenêtre-mémoire-pour-lexercice-à-6144-mio) |
+| Espace sur `local-lvm` | — | 80 Go (provisionnement fin). À remesurer avant la création, avec les métadonnées du pool thin (non vérifiées, non exposées par le MCP) |
+| Snippet | stockage `local` | Pas de fichier `dev-agent-02.user-data.yaml` déjà présent (non vérifié) |
 
 Les valeurs privées (VMID réel, endpoint, MAC) vont dans
 `envs/test/pve/dev-agent-02/local.auto.tfvars`, ignoré par Git, à créer depuis
@@ -108,6 +117,37 @@ ce VMID désigne le bon template. Vérifier dans Proxmox que la source est bien 
 template Ubuntu 24.04 : `qm config <VMID>` doit montrer `template: 1`, le nom
 `tpl-ubuntu-2404-cloudinit`, la description `release-AAAAMMJJ` avec sa somme, `bios: ovmf`
 et `machine: q35`.
+
+### Fenêtre mémoire pour l'exercice à 6144 Mio
+
+Constat du 05/11/2026 ([MCP Proxmox](../../docs/poste-de-travail.md#mcp-proxmox), lecture
+seule) : la mémoire disponible du nœud est **inférieure à 6144 Mio**. L'exercice se fait donc
+à 6144 Mio dans une fenêtre planifiée, avec **arrêt temporaire de `docker-test-01`**. Cet arrêt
+et la création sont des actions sur l'infrastructure : chacun demande l'accord explicite du
+propriétaire.
+
+**Conséquences de l'arrêt :**
+
+- l'environnement de test Docker est indisponible ;
+- **le runner de test est indisponible** : il tourne sur `docker-test-01` (voir
+  [CI/CD](../../docs/ci-cd.md#runners)). Les jobs `test` de `Deploy` et de
+  `NAS — Restic maintenance` ne peuvent pas s'exécuter pendant la fenêtre. Secrets Scan et le
+  runner de prod ne sont pas concernés.
+
+**Déroulé :**
+
+1. Vérifier qu'aucun job `test` n'est en cours, puis arrêter proprement `docker-test-01`
+   (`qm shutdown <VMID>`).
+2. **Mesurer de nouveau la mémoire disponible avant de démarrer dev-agent-02** (`free -m` sur
+   le nœud). `started = true` dans le module : **`apply` démarre la VM**, la mesure se fait
+   donc avant `apply`. Sous 7168 Mio disponibles (6144 Mio et 1 Gio de marge, seuil de
+   prudence de cet exercice), ne pas appliquer.
+3. Mener l'exercice, puis détruire dev-agent-02 (voir [section 2](#2-création-de-la-vm)).
+4. Seulement après, redémarrer `docker-test-01` (`qm start <VMID>`) et vérifier que le runner
+   est de nouveau en ligne.
+
+Si le nœud redémarre pendant la fenêtre, `docker-test-01` repart seul (démarrage automatique)
+alors que dev-agent-02 reste arrêtée : refaire la mesure avant de la démarrer.
 
 ## 1. Préparation du template (une fois)
 
@@ -170,8 +210,10 @@ terraform validate
 
 ### Procédure future (non utilisable actuellement)
 
-> **Ne pas exécuter** tant que les prérequis TLS et SSH du Mac ne sont pas vérifiés et que
-> les vérifications Proxmox (VMID du template, mémoire, espace disque) ne sont pas faites.
+> **Ne pas exécuter** tant que les contrôles Proxmox restants (VMID du template, espace
+> disque, snippet) ne sont pas faits et que la
+> [fenêtre mémoire](#fenêtre-mémoire-pour-lexercice-à-6144-mio) n'est pas ouverte, avec sa
+> nouvelle mesure. L'authentification et le provider n'ont pas été testés depuis le Mac.
 > Le prérequis de confidentialité du wrapper est traité (PR #27).
 
 ```bash
@@ -194,7 +236,7 @@ Le plan doit montrer **uniquement** :
   `dev-agent-02.user-data.yaml`) et `module.dev_agent.proxmox_virtual_environment_vm.vm` ;
 - nom `dev-agent-02`, clone du template Ubuntu 24.04 vérifié ci-dessus, `bios = "ovmf"`,
   `machine = "q35"`, un `efi_disk`, 4 cœurs, 6144 Mo, disque 80 Go sur `local-lvm`, pont
-  `vmbr0`, `on_boot = true`.
+  `vmbr0`, `on_boot = false`.
 
 Tout remplacement, modification ou destruction, ou toute ressource d'un autre nom :
 **ne pas appliquer**.
@@ -210,7 +252,8 @@ Fin de la validation (même condition) :
 ./tf.sh test/pve/dev-agent-02 destroy   # ne touche que les ressources de cette racine
 ```
 
-Le template Ubuntu 24.04 n'est pas détruit par cette commande.
+Le template Ubuntu 24.04 n'est pas détruit par cette commande. Redémarrer ensuite
+`docker-test-01` (voir [Fenêtre mémoire](#fenêtre-mémoire-pour-lexercice-à-6144-mio)).
 
 #### Indépendance des états
 
@@ -220,9 +263,9 @@ Le template Ubuntu 24.04 n'est pas détruit par cette commande.
   dossier `test_pve_dev-agent-02` (voir [Sauvegardes](../../docs/sauvegardes.md#état-terraform)).
   Cette copie ne couvre pas tous les cas d'échec partiel : prévoir une copie privée de
   l'état après une opération interrompue. Ne jamais publier plans, états ou sorties brutes.
-- Les modifications du module `vm` (options UEFI, disque EFI, MAC, chemin du fragment SSH)
-  ont des valeurs par défaut qui laissent les racines Docker sans argument nouveau et leur
-  snippet rendu identique. Ce n'est pas une preuve de plan vide ; lancer un `plan` sur ces
+- Les modifications du module `vm` (options UEFI, disque EFI, MAC, chemin du fragment SSH,
+  `vm_on_boot`) ont des valeurs par défaut qui laissent les racines Docker sans argument
+  nouveau et leur snippet rendu identique. Ce n'est pas une preuve de plan vide ; lancer un `plan` sur ces
   racines avant leur prochain `apply`.
 - Le fragment SSH de dev-agent-02 (`00-homelab.conf`) est lu avant celui de cloud-init, car
   sshd retient la première valeur d'un réglage. Vérifier les réglages effectifs dans la VM.
@@ -232,7 +275,7 @@ Le template Ubuntu 24.04 n'est pas détruit par cette commande.
 Sur Proxmox (lecture seule) :
 
 - `qm config <VMID>` : `bios: ovmf`, `machine: q35`, `efidisk0`, `scsi0` de 80 Go,
-  `cores: 4`, `memory: 6144`, `onboot: 1`, `agent` activé, `ide2` cloud-init ;
+  `cores: 4`, `memory: 6144`, `onboot` à 0 ou absent, `agent` activé, `ide2` cloud-init ;
 - la configuration de dev-agent-01 et des autres VM est inchangée (comparer
   `qm config` avant et après, localement).
 

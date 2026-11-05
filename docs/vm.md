@@ -52,11 +52,12 @@ exécuter Terraform.
 ### Poste de travail de validation `dev-agent-02` (cible)
 
 Racine [`envs/test/pve/dev-agent-02/`](../infra/terraform/envs/test/pve/dev-agent-02/)
-(Git) : 4 vCPU, 6 Go, 80 Go, UEFI/q35, template Ubuntu 24.04 dédié, DHCP. **Non créée** à
-ce jour ; instance temporaire, indépendante de `dev-agent-01`, sans sauvegarde et hors de
-l'inventaire Ansible. Sa création attend encore les prérequis TLS et SSH du poste
-d'exécution et des vérifications Proxmox ; la confidentialité des journaux de `tf.sh` est
-traitée (PR #27).
+(Git) : 4 vCPU, 6 Go, 80 Go, UEFI/q35, template Ubuntu 24.04 dédié, DHCP, sans démarrage
+automatique. **Non créée** à ce jour ; instance temporaire, indépendante de `dev-agent-01`,
+sans sauvegarde et hors de l'inventaire Ansible. Sa création attend encore des contrôles
+Proxmox et une fenêtre avec arrêt temporaire de `docker-test-01`, qui rend aussi le runner de
+test indisponible. L'authentification et le provider ne sont pas testés depuis le poste
+d'exécution ; la confidentialité des journaux de `tf.sh` est traitée (PR #27).
 Procédure : [`DEV-AGENT.md`](../infra/terraform/DEV-AGENT.md).
 
 ## Machines hors Terraform

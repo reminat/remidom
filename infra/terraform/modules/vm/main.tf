@@ -53,7 +53,7 @@ resource "proxmox_virtual_environment_vm" "vm" {
   }
 
   started = true
-  on_boot = true
+  on_boot = var.vm_on_boot
 
   lifecycle {
     precondition {

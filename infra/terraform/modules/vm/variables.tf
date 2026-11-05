@@ -96,3 +96,9 @@ variable "ssh_config_path" {
   default     = "/etc/ssh/sshd_config.d/99-homelab.conf"
   description = "Path of the sshd_config.d fragment written by cloud-init. The default is kept for the existing callers."
 }
+
+variable "vm_on_boot" {
+  type        = bool
+  default     = true
+  description = "Start the VM when the Proxmox node boots. The default is kept for the existing callers."
+}

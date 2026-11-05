@@ -40,4 +40,7 @@ module "dev_agent" {
     type              = "4m"
     pre_enrolled_keys = false
   }
+
+  # VM temporaire : ne revient pas seule après un redémarrage du nœud.
+  vm_on_boot = false
 }
