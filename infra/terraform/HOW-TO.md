@@ -320,10 +320,30 @@ cd infra/terraform
 | Appliquer                        | `./tf.sh <env> apply`                                                 |
 | Appliquer sans rebuild template  | `TFWRAP_SKIP_TEMPLATE_BUILD=1 ./tf.sh <env> apply`                   |
 | Détruire                         | `./tf.sh <env> destroy`                                               |
-| Debug verbeux                    | `TFWRAP_DEBUG=1 ./tf.sh <env> plan`                                   |
 | Voir les outputs                 | `cd envs/<env> && terraform output`                                   |
 
 Où `<env>` est un chemin relatif depuis `envs/`, par exemple `test/pve/docker-host` ou `prod/pve/haos`.
+
+### Journaux du wrapper
+
+- `tf.sh` n'affiche aucune valeur lue dans Bitwarden, même partielle : seulement sa présence
+  (`present` / `absent`). Une valeur absente arrête le script.
+- Il n'affiche que la sous-commande Terraform (`plan`, `apply`…), jamais les autres
+  arguments, puis le succès ou le code de retour.
+- Il n'y a plus de mode debug : `TFWRAP_DEBUG` est ignoré et le traçage shell est
+  désactivé au démarrage, y compris s'il est hérité ou réactivé par `tf.conf`.
+- Il refuse de s'exécuter si une variable `TF_LOG*` est active (`TF_LOG`, `TF_LOG_CORE`,
+  `TF_LOG_PROVIDER`, `TF_LOG_PATH`…), avant toute lecture de secret : les journaux de
+  diagnostic de Terraform peuvent contenir des identifiants.
+- Il ne filtre pas ce qu'affichent Terraform, le provider ou les autres programmes
+  (`bw`, `bws`, `ssh`, `rsync`) : ne pas publier leurs sorties brutes.
+
+Tests de ces règles, avec des exécutables factices et des valeurs fictives (sans
+credentials, sans réseau, sans outil d'infrastructure réel) :
+
+```bash
+bash infra/terraform/tests/tf-wrapper-test.sh
+```
 
 ---
 
