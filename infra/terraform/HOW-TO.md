@@ -338,6 +338,13 @@ Où `<env>` est un chemin relatif depuis `envs/`, par exemple `test/pve/docker-h
 - Il ne filtre pas ce qu'affichent Terraform, le provider ou les autres programmes
   (`bw`, `bws`, `ssh`, `rsync`) : ne pas publier leurs sorties brutes.
 
+Tests de ces règles, avec des exécutables factices et des valeurs fictives (sans
+credentials, sans réseau, sans outil d'infrastructure réel) :
+
+```bash
+bash infra/terraform/tests/tf-wrapper-test.sh
+```
+
 ---
 
 ## Résolution de problèmes courants

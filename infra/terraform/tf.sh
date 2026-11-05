@@ -307,13 +307,20 @@ require_present() {
 }
 
 # Logs the Terraform subcommand only: the other arguments may contain values.
+# Only names from this explicit list are printed; anything else is shown as <hidden>.
 describe_terraform_command() {
   local arg
   for arg in "$@"; do
     case "$arg" in
       -*) ;;                                   # global option, may carry a value
+      init|validate|plan|apply|destroy|refresh|output|show|state|import|fmt|graph|\
+      providers|get|console|taint|untaint|force-unlock|workspace|version|test|\
+      login|logout|metadata|modules)
+        echo "$arg"
+        return 0
+        ;;
       *)
-        if [[ "$arg" =~ ^[a-z][a-z-]*$ ]]; then echo "$arg"; else echo "<hidden>"; fi
+        echo "<hidden>"
         return 0
         ;;
     esac
