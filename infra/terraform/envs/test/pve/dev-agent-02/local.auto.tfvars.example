@@ -1,0 +1,8 @@
+# Copier en local.auto.tfvars (ignoré par Git) et compléter. Aucune valeur réelle ici.
+#
+# VMID du template Ubuntu 24.04, vérifié dans Proxmox (qm config <VMID>).
+vm_template_id = 0 # à remplacer : la validation refuse 0 et 9000
+
+# Facultatif : MAC dédiée à dev-agent-02 pour une réservation DHCP.
+# Ne jamais reprendre la MAC de dev-agent-01. Laisser commenté pour une MAC générée.
+# vm_mac_address = "XX:XX:XX:XX:XX:XX"
