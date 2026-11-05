@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Never trace this wrapper: secrets are fetched into variables below. Disables a trace
+# inherited from "bash -x", SHELLOPTS or the caller before anything else runs, and
+# drops any inherited DEBUG/RETURN trap.
+set +x +v
+trap - DEBUG RETURN
 
 # -----------------------------------------------------------------------------
 # tf.sh, Terraform wrapper for this env
@@ -10,6 +15,12 @@
 #   - Exports them as TF_VAR_* so Terraform providers can read them
 #   - Runs `terraform` with the arguments you provide
 #   - After mutating commands (apply/destroy), backs up terraform state to the NAS
+#
+# Logging (confidentiality):
+#   - The wrapper never logs a secret value, even partially: only whether it is present.
+#   - It never logs the Terraform arguments (they may contain values), only the subcommand.
+#   - Shell tracing is always disabled, and Terraform debug logging (TF_LOG*) is refused.
+#   - It cannot filter what Terraform, providers or other programs print themselves.
 #
 # Why it exists:
 #   - Avoid storing secrets in terraform.tfvars / repo files
@@ -49,12 +60,29 @@ log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
 }
 
-# Optional debug mode:
-#   TFWRAP_DEBUG=1 enables shell tracing (set -x) and Terraform debug logs (TF_LOG=DEBUG)
-if [ "${TFWRAP_DEBUG:-}" = "1" ]; then
-  set -x
-  export TF_LOG=${TF_LOG:-DEBUG}
+# Debug mode removed: TFWRAP_DEBUG no longer enables shell tracing or Terraform logs.
+if [ -n "${TFWRAP_DEBUG:-}" ]; then
+  log "TFWRAP_DEBUG is no longer supported and is ignored (no tracing, no Terraform debug logs)"
 fi
+
+# Refuse Terraform debug logging before any secret is read: debug logs may contain
+# provider credentials. Only the variable names are printed, never their values.
+refuse_tf_debug_logs() {
+  local name found=""
+  for name in $(compgen -e); do
+    case "$name" in
+      TF_LOG|TF_LOG_*)
+        if [ -n "${!name:-}" ]; then found="${found} ${name}"; fi
+        ;;
+    esac
+  done
+  if [ -n "$found" ]; then
+    echo "Refusing to run: Terraform debug logging is enabled (${found# })." >&2
+    echo "Debug logs may expose credentials. Unset these variables and rerun." >&2
+    exit 1
+  fi
+}
+refuse_tf_debug_logs
 
 # If any command fails, print the line number to speed up debugging
 trap 'rc=$?; log "ERROR: command failed (exit=$rc) at line $LINENO"; exit $rc' ERR
@@ -78,6 +106,9 @@ require_cmd rsync
 if [ -f tf.conf ]; then
   # shellcheck source=/dev/null
   source tf.conf
+  # tf.conf must not re-enable tracing or Terraform debug logs
+  set +x +v
+  refuse_tf_debug_logs
 fi
 
 # Optional pre-apply step: ensure the Proxmox template exists before Terraform runs.
@@ -185,8 +216,15 @@ fi
 # We load BWS_ACCESS_TOKEN from Bitwarden Password Manager item password: `bws_machine_token`
 if [ -z "${BWS_ACCESS_TOKEN:-}" ]; then
   log "BWS_ACCESS_TOKEN not set, fetching from Bitwarden Password Manager item: bws_machine_token"
-  export BWS_ACCESS_TOKEN="$(bw get password bws_machine_token)"
-  log "BWS_ACCESS_TOKEN loaded"
+  BWS_ACCESS_TOKEN="$(bw get password bws_machine_token)"
+  export BWS_ACCESS_TOKEN
+  if [ -n "$BWS_ACCESS_TOKEN" ]; then
+    log "BWS_ACCESS_TOKEN: present"
+  else
+    log "BWS_ACCESS_TOKEN: absent"
+    echo "Could not load BWS_ACCESS_TOKEN from Bitwarden." >&2
+    exit 1
+  fi
 fi
 
 # Step 3: fetch Proxmox credentials from Bitwarden Secrets Manager
@@ -255,14 +293,32 @@ fetch_secret_value() {
   bws secret get "$sid" | python3 -c 'import sys,json; print(str(json.load(sys.stdin)["value"]).strip())'
 }
 
-# Helper to print a masked version of a secret (never print full secrets in logs)
-mask() {
-  local v="${1:-}"
-  if [ -z "$v" ]; then
-    echo "<empty>"
+# Logs only whether a variable holds a value, never the value, a prefix or a length.
+# Fails when the value is missing.
+require_present() {
+  local name="$1"
+  if [ -n "${!name:-}" ]; then
+    log "${name}: present"
   else
-    printf "%s... (len=%d)" "${v:0:8}" "${#v}"
+    log "${name}: absent"
+    echo "Missing value for ${name}." >&2
+    exit 1
   fi
+}
+
+# Logs the Terraform subcommand only: the other arguments may contain values.
+describe_terraform_command() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -*) ;;                                   # global option, may carry a value
+      *)
+        if [[ "$arg" =~ ^[a-z][a-z-]*$ ]]; then echo "$arg"; else echo "<hidden>"; fi
+        return 0
+        ;;
+    esac
+  done
+  echo "<none>"
 }
 
 # Backup terraform state files to the NAS (timestamped) after apply/destroy
@@ -292,26 +348,34 @@ backup_state() {
   log "State backed up to ${dst} (scope=${scope}, ts=${ts})"
 }
 
-export TF_VAR_pm_api_token_secret="$(fetch_secret_value "$PM_TOKEN_SECRET_REF")"
-export TF_VAR_pm_api_token_id="$(fetch_secret_value "$PM_TOKEN_ID_REF")"
-export TF_VAR_pm_endpoint="$(fetch_secret_value "$PM_ENDPOINT_REF")"
+# Separate assignment and export: a failed fetch stops the script (set -e).
+TF_VAR_pm_api_token_secret="$(fetch_secret_value "$PM_TOKEN_SECRET_REF")"
+TF_VAR_pm_api_token_id="$(fetch_secret_value "$PM_TOKEN_ID_REF")"
+TF_VAR_pm_endpoint="$(fetch_secret_value "$PM_ENDPOINT_REF")"
+export TF_VAR_pm_api_token_secret TF_VAR_pm_api_token_id TF_VAR_pm_endpoint
 
 # Optionally inject SSH keys list when the current module declares ssh_authorized_keys.
 # Expected secret format: JSON array, e.g. ["ssh-ed25519 AAAA... user@host", "..."].
 if [ -f variables.tf ] && grep -q 'variable "ssh_authorized_keys"' variables.tf; then
-  export TF_VAR_ssh_authorized_keys="$(fetch_secret_value "$SSH_AUTHORIZED_KEYS_REF")"
-  log "TF_VAR_ssh_authorized_keys = $(mask "${TF_VAR_ssh_authorized_keys:-}")"
+  TF_VAR_ssh_authorized_keys="$(fetch_secret_value "$SSH_AUTHORIZED_KEYS_REF")"
+  export TF_VAR_ssh_authorized_keys
+  require_present TF_VAR_ssh_authorized_keys
 fi
 
-# Sanity check logs (masked): helps confirm the wrapper injected something without leaking secrets
-log "TF_VAR_pm_endpoint = $(mask "${TF_VAR_pm_endpoint:-}")"
-log "TF_VAR_pm_api_token_id = $(mask "${TF_VAR_pm_api_token_id:-}")"
-log "TF_VAR_pm_api_token_secret = $(mask "${TF_VAR_pm_api_token_secret:-}")"
+# Presence checks only: no value, prefix or length is logged.
+require_present TF_VAR_pm_endpoint
+require_present TF_VAR_pm_api_token_id
+require_present TF_VAR_pm_api_token_secret
 
 # Step 4: run terraform with whatever args were provided to this script
-log "Running: terraform $*"
-terraform "$@"
-rc=$?
+log "Running: terraform $(describe_terraform_command "$@") (arguments not logged)"
+rc=0
+terraform "$@" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  log "terraform exited with code ${rc}"
+  exit "$rc"
+fi
+log "terraform succeeded"
 
 # Only back up state after mutating commands, avoid noise on plan/validate
 case "${1:-}" in
