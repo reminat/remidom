@@ -31,6 +31,7 @@ FAKE_CF=SENTINEL_CF_44b2
 FAKE_REST=SENTINEL_REST_d81f
 FAKE_REPO=SENTINEL_REPO_a0e5
 FAKE_Z2M='[201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216]'
+FAKE_Z2M_RENDERED='[201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216]'
 LEAK_PATTERN='SENTINEL|201, ?202, ?203'
 
 # --- Installation ------------------------------------------------------------
@@ -175,8 +176,9 @@ EXPECT_CALLS='bw get'; EXPECT_ENV="$ENV_OFF"
 run "nominal : jeton lu dans le vault"                  0 bash -- test
 EXPECT_CALLS='bw unlock'; EXPECT_ENV="$ENV_OFF"
 run "nominal : vault verrouillé"                        0 bash FAKE_BW_STATUS=locked -- test
-EXPECT_ENV="$ENV_OFF"
-run "autre référence de secret (MQTT_SECRET_REF)"       0 bash "$TOKEN" MQTT_SECRET_REF=mqtt_password -- test
+EXPECT_ENV=$(printf 'MQTT_PASSWORD=%s\nZ2M_NETWORK_KEY=%s\nCF_DNS_API_TOKEN=%s\nRESTIC_REST_PASSWORD=\nRESTIC_REPO_PASSWORD=' "$FAKE_CF" "$FAKE_Z2M" "$FAKE_CF")
+FORBID_CALLS='id-mqtt_password'
+run "autre référence de secret (MQTT_SECRET_REF)"       0 bash "$TOKEN" MQTT_SECRET_REF=cloudflare_dns_api_token -- test
 EXPECT_ENV="$ENV_ON"
 run "trace héritée : bash -x"                           0 bash-x "$TOKEN" "$ON" -- prod
 EXPECT_ENV="$ENV_ON"
@@ -217,8 +219,8 @@ done
 for k in restic_rest_password_prod restic_password_prod; do
   run "$k : lecture en échec"            nz bash "$TOKEN" "$ON" FAKE_GET_FAIL=$k -- prod
 done
-FORBID_CALLS='bws'
-run "vault : déverrouillage en échec"    nz bash FAKE_BW_STATUS=locked FAKE_BW_UNLOCK_FAIL=1 FAKE_BW_GET_FAIL=1 -- test
+FORBID_CALLS='bw get|bws'
+run "vault : déverrouillage en échec"    nz bash FAKE_BW_STATUS=locked FAKE_BW_UNLOCK_FAIL=1 -- test
 FORBID_CALLS='bws'
 run "vault : lecture du jeton en échec"  nz bash FAKE_BW_GET_FAIL=1 -- test
 FORBID_CALLS='bws'
@@ -319,34 +321,66 @@ compose_projects:
   - { name: core, src: "${REPO_DIR}/services/docker/core", dest: "$T/real/dest/core" }
 EXTRA
 
+  ENV_FILE="$T/real/dest/core/.env"
+  Z2M_FILE="$T/real/dest/core/zigbee2mqtt/data/configuration.yaml"
+
+  # Empreinte, inode, date et droits : une réécriture à l'identique change aussi l'inode.
+  snapshot() {
+    python3 -I -c '
+import hashlib, os, sys
+for p in sys.argv[1:]:
+    st = os.stat(p)
+    print(p, hashlib.sha256(open(p, "rb").read()).hexdigest(), st.st_ino, st.st_mtime_ns, oct(st.st_mode))
+' "$ENV_FILE" "$Z2M_FILE"
+  }
+
   # real <libellé> <0 | nz> [VAR=valeur ...] : --diff -vvv, aucune valeur attendue en sortie.
+  # REAL_KEEP=1 conserve les fichiers du passage précédent ; REAL_ARGS ajoute des options.
   real() {
     local label="$1" exp="$2" rc=0 ok=1 why=""
     shift 2
-    rm -f "$T/real/dest/core/.env" "$T/real/dest/core/zigbee2mqtt/data/configuration.yaml"
+    [ -n "${REAL_KEEP:-}" ] || rm -f "$ENV_FILE" "$Z2M_FILE"
     env -i HOME="$T/home" PATH="$REAL_PATH" ANSIBLE_CONFIG="$T/real/ansible.cfg" \
         ANSIBLE_ROLES_PATH="${ANSIBLE_DIR}/roles" ANSIBLE_LOCAL_TEMP="$T/real/tmp" \
         ANSIBLE_REMOTE_TEMP="$T/real/tmp" ANSIBLE_LOCALHOST_WARNING=False \
         ANSIBLE_INVENTORY_UNPARSED_WARNING=False \
         MQTT_PASSWORD="$FAKE_MQTT" CF_DNS_API_TOKEN="$FAKE_CF" Z2M_NETWORK_KEY="$FAKE_Z2M" "$@" \
-        "$REAL_AP" "$T/real/check.yml" -e "@$T/real/extra.yml" --diff -vvv > "$T/out.txt" 2>&1 || rc=$?
+        "$REAL_AP" "$T/real/check.yml" -e "@$T/real/extra.yml" --diff -vvv ${REAL_ARGS:+"$REAL_ARGS"} > "$T/out.txt" 2>&1 || rc=$?
     case "$exp" in
       0)  [ "$rc" -eq 0 ] || { ok=0; why+=" rc=$rc (0 attendu)"; }
-          grep -q 'network_key: \[201, 202, 203' "$T/real/dest/core/zigbee2mqtt/data/configuration.yaml" 2>/dev/null \
-            || { ok=0; why+=" clé Zigbee non rendue"; } ;;
+          grep -Fxq "  network_key: ${FAKE_Z2M_RENDERED}" "$Z2M_FILE" 2>/dev/null \
+            || { ok=0; why+=" clé Zigbee non rendue à l'identique"; }
+          grep -q "^CF_DNS_API_TOKEN=${FAKE_CF}" "$ENV_FILE" 2>/dev/null \
+            || { ok=0; why+=" jeton non rendu"; } ;;
       # Le refus doit venir du contrôle, pas d'une erreur d'exécution d'Ansible.
       nz) [ "$rc" -eq 2 ] || { ok=0; why+=" rc=$rc (2 attendu)"; }
           grep -q 'TASK \[compose_deploy : Check compose secrets presence\]' "$T/out.txt" \
             || { ok=0; why+=" contrôle non exécuté"; }
-          [ ! -e "$T/real/dest/core/zigbee2mqtt/data/configuration.yaml" ] || { ok=0; why+=" rendu malgré l'échec"; }
-          [ ! -e "$T/real/dest/core/.env" ] || { ok=0; why+=" .env rendu malgré l'échec"; } ;;
+          [ ! -e "$Z2M_FILE" ] || { ok=0; why+=" rendu malgré l'échec"; }
+          [ ! -e "$ENV_FILE" ] || { ok=0; why+=" .env rendu malgré l'échec"; } ;;
     esac
     if grep -Eq "$LEAK_PATTERN|GENERATE" "$T/out.txt"; then ok=0; why+=" valeur dans la sortie"; fi
+    if [ -n "${REAL_SAME:-}" ]; then
+      [ "$(snapshot)" = "$REAL_SAME" ] || { ok=0; why+=" fichiers modifiés"; }
+    fi
+    if [ -n "${REAL_NOCHANGE:-}" ] && ! grep -Eq 'localhost +: ok=[0-9]+ +changed=0 ' "$T/out.txt"; then
+      ok=0; why+=" tâche signalée comme modifiée"
+    fi
+    REAL_KEEP="" REAL_ARGS="" REAL_SAME="" REAL_NOCHANGE=""
     record "$ok" "rôle : $label (rc=$rc)" "$why"
   }
 
-  real "nominal, --diff -vvv"       0
-  real "second passage sans fuite"  0
+  real "premier rendu, --diff -vvv" 0
+  REAL_KEEP=1; REAL_SAME="$(snapshot)"; REAL_NOCHANGE=1
+  real "second passage : fichiers conservés, aucune modification ni fuite" 0
+
+  # Le fichier sur l'hôte diffère du rendu attendu : c'est le cas où un diff afficherait les
+  # deux contenus. En --check, rien n'est écrit et rien ne doit s'afficher.
+  printf 'ANCIEN=SENTINEL_OLD\n' >> "$ENV_FILE"
+  printf '# SENTINEL_OLD\n' >> "$Z2M_FILE"
+  REAL_KEEP=1; REAL_SAME="$(snapshot)"; REAL_ARGS=--check
+  real "écart sur l'hôte, --check --diff : aucune écriture ni fuite" 0
+
   real "MQTT vide"                  nz MQTT_PASSWORD=
   real "MQTT texte null"            nz MQTT_PASSWORD=null
   real "MQTT sur plusieurs lignes"  nz "MQTT_PASSWORD=SENTINEL_a
