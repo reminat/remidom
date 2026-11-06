@@ -69,7 +69,7 @@ ansible/
 
 ### Ce que fait deploy.sh
 
-1. Vérifie que `bws`, `jq` et `ansible-playbook` sont disponibles
+1. Vérifie que `bws`, `jq`, `ansible-inventory` et `ansible-playbook` sont disponibles, puis lit dans l'inventaire si `restic_backup_enabled` est actif sur un hôte (avant toute lecture de secret ; une valeur non interprétable compte comme active)
 2. Si `BWS_ACCESS_TOKEN` n'est pas déjà défini (cas du poste local ; en CI, il vient des secrets GitHub) :
    vérifie `bw`, s'authentifie à Bitwarden CLI (API key ou session existante), déverrouille le vault si
    nécessaire et récupère le token machine `bws` depuis le vault (`bws_machine_token`)
@@ -77,8 +77,17 @@ ansible/
    - `MQTT_PASSWORD` (depuis le secret `mqtt_password`)
    - `Z2M_NETWORK_KEY` (depuis le secret `zigbee_network_key_<env>`)
    - `CF_DNS_API_TOKEN` (depuis le secret `cloudflare_dns_api_token`)
-   - `RESTIC_REST_PASSWORD` et `RESTIC_REPO_PASSWORD` (secrets facultatifs `restic_rest_password_<env>` et `restic_password_<env>`)
-4. Lance `ansible-playbook` avec l'inventaire de l'environnement : `docker-host.yml`, puis `haos.yml`
+   - `RESTIC_REST_PASSWORD` et `RESTIC_REPO_PASSWORD` (secrets `restic_rest_password_<env>` et `restic_password_<env>`), seulement si la sauvegarde est active
+4. Contrôle chaque secret lu : une erreur de lecture, un secret absent, une valeur vide ou `null`, un texte sur plusieurs lignes ou une clé Zigbee mal formée **arrêtent le script avant tout appel à `ansible-playbook`**. Les messages citent la référence du secret, jamais sa valeur ; la trace du shell est coupée
+5. Lance `ansible-playbook` avec l'inventaire de l'environnement : `docker-host.yml`, puis `haos.yml`
+
+Le contrôle porte sur l'ensemble du déploiement, même avec `--limit haos`. Le rôle `compose_deploy` refait ces contrôles avant tout rendu, y compris pour un `ansible-playbook` lancé sans `deploy.sh`. `-e restic_backup_enabled=true` n'est pas vu par `deploy.sh` : les secrets Restic ne sont alors pas chargés et le rôle `restic_backup` s'arrête.
+
+Tests isolés (faux exécutables, valeurs fictives, sans identifiant ni réseau ; les contrôles des rôles sont aussi exécutés sur localhost si `ansible-playbook` est disponible) :
+
+```bash
+bash infra/ansible/tests/deploy-wrapper-test.sh
+```
 
 ---
 
@@ -91,10 +100,12 @@ Les secrets ne sont jamais stockés dans le repo. Ils sont injectés au moment d
 | `mqtt_password`       | `lookup('env', 'MQTT_PASSWORD')`    | `mqtt_password`         |
 | `z2m_network_key`     | `lookup('env', 'Z2M_NETWORK_KEY')`  | `zigbee_network_key_<env>` (JSON) |
 | `cf_api_token`        | `lookup('env', 'CF_DNS_API_TOKEN')` | `cloudflare_dns_api_token` |
-| `restic_backup_rest_password` | `lookup('env', 'RESTIC_REST_PASSWORD')` | `restic_rest_password_<env>` (facultatif) |
-| `restic_backup_password`   | `lookup('env', 'RESTIC_REPO_PASSWORD')`  | `restic_password_<env>` (facultatif)   |
+| `restic_backup_rest_password` | `lookup('env', 'RESTIC_REST_PASSWORD')` | `restic_rest_password_<env>` (requis si `restic_backup_enabled`) |
+| `restic_backup_password`   | `lookup('env', 'RESTIC_REPO_PASSWORD')`  | `restic_password_<env>` (requis si `restic_backup_enabled`)   |
 
 Le token machine `bws` est lui-même stocké dans le vault Bitwarden sous le nom `bws_machine_token`.
+
+`zigbee_network_key_<env>` doit exister avant le déploiement, sous la forme d'un tableau JSON de 16 entiers de 0 à 255. Il n'y a **aucune génération implicite** : `GENERATE` et toute autre forme sont refusés, car une nouvelle clé réseau couperait les appareils déjà appairés.
 
 `mqtt_password` et `cloudflare_dns_api_token` sont partagés entre test et prod (même secret Bitwarden, deux machines distinctes), ce qui est acceptable pour un homelab ; la clé Zigbee et les secrets Restic sont propres à chaque environnement. Pour désigner un autre secret (clé, nom ou UUID), définir avant d'appeler `deploy.sh` : `MQTT_SECRET_REF`, `Z2M_NETWORK_KEY_SECRET_REF`, `CF_DNS_API_TOKEN_SECRET_REF`, `RESTIC_REST_PASSWORD_SECRET_REF` ou `RESTIC_PASSWORD_SECRET_REF`.
 
@@ -453,8 +464,10 @@ Préparation du NAS, tâches DSM et contrôles :
 ```mermaid
 flowchart TD
     A([./deploy.sh test|prod]) --> B[Authentification Bitwarden\nsauf si BWS_ACCESS_TOKEN défini]
-    B --> C[Récupération des secrets\nMQTT_PASSWORD\nZ2M_NETWORK_KEY\nCF_DNS_API_TOKEN\nsecrets Restic facultatifs]
-    C --> D[ansible-playbook\ndocker-host.yml\npuis haos.yml]
+    B --> C[Récupération des secrets\nMQTT_PASSWORD\nZ2M_NETWORK_KEY\nCF_DNS_API_TOKEN\nsecrets Restic si sauvegarde active]
+    C --> C1{Tous présents\net valides ?}
+    C1 -->|non| X([Arrêt, aucun appel Ansible])
+    C1 -->|oui| D[ansible-playbook\ndocker-host.yml\npuis haos.yml]
 
     D --> E[Rôle: common]
     D --> F[Rôle: docker]
