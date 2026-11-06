@@ -74,6 +74,7 @@
         group: root
         mode: "0600"
       no_log: true
+      diff: false
 
     - name: Write repository password file
       ansible.builtin.copy:
@@ -83,6 +84,7 @@
         group: root
         mode: "0600"
       no_log: true
+      diff: false
 
     - name: Install restic wrapper
       ansible.builtin.template:

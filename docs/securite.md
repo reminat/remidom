@@ -38,10 +38,10 @@ désigner un autre secret.
 | `proxmox_api_token_secret` | `tf.sh` | — |
 | `ssh_authorized_keys` (tableau JSON de clés publiques) | `tf.sh` (hôtes Docker), `bootstrap-haos.sh` | `SSH_KEYS_SECRET_REF` (bootstrap seulement) |
 | `mqtt_password` | [`deploy.sh`](../infra/ansible/deploy.sh) | `MQTT_SECRET_REF` |
-| `zigbee_network_key_<env>` (JSON) | `deploy.sh` | `Z2M_NETWORK_KEY_SECRET_REF` |
+| `zigbee_network_key_<env>` (tableau JSON de 16 octets, sans génération implicite) | `deploy.sh` | `Z2M_NETWORK_KEY_SECRET_REF` |
 | `cloudflare_dns_api_token` | `deploy.sh` | `CF_DNS_API_TOKEN_SECRET_REF` |
-| `restic_rest_password_<env>` (facultatif) | `deploy.sh` | `RESTIC_REST_PASSWORD_SECRET_REF` |
-| `restic_password_<env>` (facultatif) | `deploy.sh` | `RESTIC_PASSWORD_SECRET_REF` |
+| `restic_rest_password_<env>` (requis si `restic_backup_enabled`) | `deploy.sh` | `RESTIC_REST_PASSWORD_SECRET_REF` |
+| `restic_password_<env>` (requis si `restic_backup_enabled`) | `deploy.sh` | `RESTIC_PASSWORD_SECRET_REF` |
 
 | Autre secret | Emplacement | Utilisé par |
 |---|---|---|
