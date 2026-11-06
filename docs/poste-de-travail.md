@@ -15,7 +15,10 @@ Le poste exécute aussi **code-server** (service `code-server@remi`, port 8080),
 Traefik sous `code.reminat.com` (cible `code_url` dans Git). Constat du 02/11/2026 ; ce
 service est installé hors dépôt.
 
-La façon dont `dev-agent-01` est créé et sauvegardé n'est pas documentée.
+La façon dont `dev-agent-01` est créé et sauvegardé n'est pas documentée. Sa
+reconstruction est préparée en commençant par une VM de validation, `dev-agent-02`, créée
+par Terraform à partir d'un template Ubuntu 24.04 (cible, non créée) :
+[`DEV-AGENT.md`](../infra/terraform/DEV-AGENT.md).
 
 ## Procédures macOS (historique)
 

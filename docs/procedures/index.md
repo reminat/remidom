@@ -13,6 +13,7 @@ n'en duplique pas le contenu.
 | Trouver les adresses IP des VM | [`HOW-TO.md`, « Trouver les IPs »](../../infra/terraform/HOW-TO.md#trouver-les-ips-des-vms-après-provisioning) |
 | Bootstrap SSH des VM HAOS | [`HOW-TO.md`, « Bootstrap SSH »](../../infra/terraform/HOW-TO.md#bootstrap-ssh-sur-les-vms-haos) |
 | Détruire et recréer un environnement | [`HOW-TO.md`, « Détruire un env »](../../infra/terraform/HOW-TO.md#détruire-un-env-ex-reconstruire-test-from-scratch) |
+| Template Ubuntu 24.04 et VM de validation `dev-agent-02` (cible) | [`DEV-AGENT.md`](../../infra/terraform/DEV-AGENT.md) |
 | Modifier cloud-init (VM recréée) | [`infra/proxmox/README.md`](../../infra/proxmox/README.md#workflow-standard-à-mémoriser) |
 
 ## Configuration et déploiement
@@ -45,5 +46,6 @@ n'en duplique pas le contenu.
 - sauvegarde et restauration de Home Assistant ;
 - reprise complète après perte de l'hôte Proxmox (exercice à mener, voir
   [Sauvegardes](../sauvegardes.md#reprise-après-sinistre-cible)) ;
-- installation du poste de travail Ubuntu ;
+- configuration du poste de travail Ubuntu (outils, MCP) et sa sauvegarde ; le
+  provisionnement de la VM est préparé dans [`DEV-AGENT.md`](../../infra/terraform/DEV-AGENT.md) ;
 - relais Wake-on-LAN (procédure legacy à revalider avant reprise).

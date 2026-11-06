@@ -1,0 +1,14 @@
+# Copier en local.auto.tfvars (ignoré par Git) et compléter. Aucune valeur réelle ici.
+#
+# VMID du template Ubuntu 24.04 créé par template-ubuntu-2404.sh, vérifié dans Proxmox
+# (qm config <VMID> : nom tpl-ubuntu-2404-cloudinit, description release-AAAAMMJJ).
+# 0 est refusé par la validation (entier de 100 à 999999999 attendu).
+vm_template_id = 0
+
+# Endpoint de l'API sous un nom présent dans le certificat du nœud (voir DEV-AGENT.md,
+# « Confiance TLS et SSH »). Prioritaire sur la valeur injectée par tf.sh.
+# pm_endpoint = "https://pve:8006"
+
+# Facultatif : MAC dédiée à dev-agent-02 pour une réservation DHCP.
+# Ne jamais reprendre la MAC de dev-agent-01. Laisser commenté pour une MAC générée.
+# vm_mac_address = "XX:XX:XX:XX:XX:XX"

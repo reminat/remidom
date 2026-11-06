@@ -31,7 +31,7 @@ packages:
   - chrony
 
 write_files:
-  - path: /etc/ssh/sshd_config.d/99-homelab.conf
+  - path: ${ssh_config_path}
     permissions: "0644"
     content: |
       PasswordAuthentication no

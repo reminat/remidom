@@ -70,6 +70,7 @@ un `apply` s'il est absent (paramètres dans `tf.conf` de chaque environnement).
 |---|---|---|---|
 | 9000 | `tpl-ubuntu-2204-cloudinit` | Ubuntu 22.04 cloud image, agent QEMU | [`template-docker.sh`](../infra/proxmox/scripts/template-docker.sh) |
 | 9100 | `tpl-haos` | Dernière version publiée de Home Assistant OS au moment de la création, UEFI | [`template-haos.sh`](../infra/proxmox/scripts/template-haos.sh) |
+| À choisir | `tpl-ubuntu-2404-cloudinit` | **Cible, non créé** : Ubuntu 24.04 cloud image datée et vérifiée, UEFI/q35, pour dev-agent-02 ; lancé à la main, jamais par `tf.sh` | [`template-ubuntu-2404.sh`](../infra/proxmox/scripts/template-ubuntu-2404.sh), voir [`DEV-AGENT.md`](../infra/terraform/DEV-AGENT.md#1-préparation-du-template-une-fois) |
 
 Le template HAOS n'est pas épinglé sur une version : le recréer change la version de HAOS
 des futures VM.
