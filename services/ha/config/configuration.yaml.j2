@@ -3,8 +3,5 @@ default_config:
 
 homeassistant:
 
-http:
-  use_x_forwarded_for: true
-  trusted_proxies:
-    - {{ docker_host_ip }}
-    - 172.16.0.0/12
+# Pas de bloc http: — depuis Core 2026.8, le proxy de confiance (Traefik) se règle dans
+# Paramètres → Système → Réseau → Serveur HTTP. Voir docs/home-assistant.md.
