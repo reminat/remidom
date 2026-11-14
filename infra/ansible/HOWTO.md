@@ -255,7 +255,8 @@ Le playbook `playbooks/haos.yml` applique le rôle `haos_config` sur le groupe `
 
 Il déploie uniquement `configuration.yaml` (rendu depuis un template Jinja2) et recharge Home Assistant.
 Il vérifie d'abord que Core est en 2026.8 ou plus, que le modèle ne contient pas de bloc
-`http:` et que `docker_host_ip` figure parmi les proxies de confiance réglés dans l'interface
+`http:`, et que la configuration HTTP confirmée de l'interface (`.storage/http`, lue en JSON)
+active X-Forwarded-For et contient `docker_host_ip` parmi les proxies de confiance
 ([`docs/home-assistant.md`](../../docs/home-assistant.md#serveur-http-et-proxy-de-confiance)).
 
 `docker_host_ip` n'est plus utilisé par le modèle ; il sert de valeur de référence pour ce

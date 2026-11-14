@@ -27,9 +27,13 @@ Seul `configuration.yaml` est versionné :
   2026.8, le proxy de confiance se règle dans l'interface (voir
   [ci-dessous](#serveur-http-et-proxy-de-confiance)).
 - Avant de déployer, le rôle s'arrête si la version de Core (`ha core info`) est antérieure
-  à 2026.8, si le modèle contient de nouveau `http:`, ou si l'adresse de l'hôte Docker
-  (`docker_host_ip`) est absente des réglages du serveur HTTP (`.storage/http`, contenu
-  jamais affiché dans les journaux).
+  à 2026.8, si le modèle contient de nouveau `http:`, ou si la configuration HTTP
+  **confirmée** n'est pas conforme : lue en JSON dans `.storage/http` (`data.stable`),
+  elle doit avoir `use_x_forwarded_for: true` et l'adresse de l'hôte Docker
+  (`docker_host_ip`, seule ou en `/32`) dans `trusted_proxies`. Un essai non confirmé
+  (`data.pending`) n'est pas pris en compte. Le contenu n'est jamais affiché dans les
+  journaux (`no_log`) : seuls quatre indicateurs (lisible, schéma, X-Forwarded-For, proxy)
+  apparaissent en cas de refus.
 
 Tout le reste (intégrations, appareils, automatisations, tableaux de bord, modules
 complémentaires) est configuré dans l'interface de Home Assistant et **n'est pas
@@ -68,20 +72,28 @@ constaté jusqu'en 2026.10.4) : la liste *Trusted proxies* peut ne pas être enr
 après la migration ou une saisie. Toujours relire la valeur après enregistrement et tester
 l'accès via Traefik.
 
-### Sur un HAOS vierge (reconstruction, tour de spare)
+### Sur un HAOS vierge ou restauré (reconstruction, tour de spare)
 
 Le réglage n'est plus déployé par Ansible : il fait partie de la reconstruction.
 
-1. Créer la VM, faire le bootstrap SSH et l'accueil de Home Assistant. En cas de
-   restauration d'une sauvegarde Home Assistant, le réglage revient avec elle : passer à
-   l'étape 4.
+1. Créer la VM, faire le bootstrap SSH et l'accueil de Home Assistant, ou restaurer la VM
+   (vzdump) ou une sauvegarde Home Assistant.
 2. Se connecter en **accès direct** (`http://haos-vm.<domaine>:8123`), pas via Traefik.
-3. *Paramètres → Système → Réseau → Serveur HTTP* : saisir les valeurs ci-dessus et
-   enregistrer. Home Assistant redémarre son serveur HTTP et annule le changement s'il
-   n'est pas confirmé dans les 5 minutes : confirmer depuis l'accès direct.
-4. `./deploy.sh <env> --limit haos` : le rôle refuse de déployer si le proxy de confiance
-   manque.
-5. Contrôler : la page relue affiche les deux valeurs ; `https://haos.<domaine>` répond
+3. *Paramètres → Système → Réseau → Serveur HTTP* :
+   - **HAOS vierge** : saisir les valeurs ci-dessus ;
+   - **après restauration** : le réglage revient avec la sauvegarde, mais c'est celui de
+     l'ancienne installation. **Vérifier le proxy actif avant Ansible** : *Trust
+     X-Forwarded-For* activé, et *Trusted proxies* contenant l'adresse **actuelle** de
+     l'hôte Docker qui porte Traefik. Si cette adresse a changé (Traefik reconstruit sur
+     la tour de spare ou ailleurs), remplacer l'ancienne valeur, et mettre à jour
+     `docker_host_ip` dans l'inventaire de l'environnement.
+
+   Enregistrer, puis **confirmer** depuis l'accès direct : tant qu'il n'est pas confirmé,
+   le changement reste un essai (`pending`), annulé au bout de 5 minutes, que le rôle
+   Ansible ne prend pas en compte.
+4. `./deploy.sh <env> --limit haos` : le rôle refuse de déployer si la configuration
+   confirmée n'a pas X-Forwarded-For activé et l'hôte Docker parmi les proxies.
+5. Contrôler : la page relue affiche les valeurs ; `https://haos.<domaine>` répond
    (200, certificat valide) ; *Paramètres → Système → Réparations* ne signale rien sur HTTP.
 
 ## Liens avec les autres services
