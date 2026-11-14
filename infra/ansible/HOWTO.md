@@ -245,7 +245,7 @@ Les VMs HAOS sont déclarées dans un groupe séparé `haos` dans chaque inventa
 | `ansible_host`   | `haos-vm.test.reminat.com`     | `haos-vm.reminat.com`     |
 | `ansible_port`   | `22222`                        | `22222`                   |
 | `ansible_user`   | `root`                         | `root`                    |
-| `docker_host_ip` | adresse de `docker-test-01`    | adresse de `docker-prod-01` (proxy de confiance) |
+| `docker_host_ip` | adresse de `docker-test-01`    | adresse de `docker-prod-01` (proxy de confiance, à saisir dans l'interface) |
 
 `haos.<domaine>` (sans `-vm`) est le nom publié par Traefik pour l'interface web.
 
@@ -254,6 +254,12 @@ Les VMs HAOS sont déclarées dans un groupe séparé `haos` dans chaque inventa
 Le playbook `playbooks/haos.yml` applique le rôle `haos_config` sur le groupe `haos`.
 
 Il déploie uniquement `configuration.yaml` (rendu depuis un template Jinja2) et recharge Home Assistant.
+Il vérifie d'abord que Core est en 2026.8 ou plus, et que le modèle ne contient pas de bloc
+`http:` : le proxy de confiance se règle dans l'interface
+([`docs/home-assistant.md`](../../docs/home-assistant.md#serveur-http-et-proxy-de-confiance)).
+
+`docker_host_ip` n'est plus utilisé par le modèle ; il reste la référence de la valeur à
+saisir comme proxy de confiance.
 
 ```bash
 # Déployer la config HAOS sur test
