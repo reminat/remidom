@@ -22,6 +22,31 @@
       (proxy de confiance réglé dans l'interface, voir docs/home-assistant.md).
     success_msg: "Core {{ ha_core_version }}, modèle sans bloc http:"
 
+# Le proxy de confiance doit déjà figurer dans les réglages de l'interface (migrés ou saisis) :
+# sans lui, Traefik reçoit des 400. Contenu jamais affiché (journaux de CI publics).
+- name: List HTTP settings files
+  ansible.builtin.raw: ls /mnt/data/supervisor/homeassistant/.storage | grep -i http || true
+  register: ha_http_files
+  changed_when: false
+
+- name: Read HTTP settings
+  ansible.builtin.raw: cat /mnt/data/supervisor/homeassistant/.storage/http
+  register: ha_http_settings
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Check that the Docker host is a trusted proxy
+  ansible.builtin.assert:
+    that:
+      - ha_http_settings.rc == 0
+      - ha_http_settings.stdout is regex('[^0-9.]' ~ (docker_host_ip | regex_escape) ~ '[^0-9.]')
+    quiet: true
+    fail_msg: >-
+      L'hôte Docker (docker_host_ip) n'est pas trouvé dans .storage/http (fichiers trouvés :
+      {{ ha_http_files.stdout_lines | join(', ') | default('aucun', true) }}). Le régler dans
+      Paramètres → Système → Réseau → Serveur HTTP avant de déployer (docs/home-assistant.md).
+
 - name: Render configuration to temp file
   ansible.builtin.raw: >-
     printf '%s' '{{ lookup("template", playbook_dir + "/../../../services/ha/config/configuration.yaml.j2") | b64encode }}'

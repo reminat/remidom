@@ -254,12 +254,12 @@ Les VMs HAOS sont déclarées dans un groupe séparé `haos` dans chaque inventa
 Le playbook `playbooks/haos.yml` applique le rôle `haos_config` sur le groupe `haos`.
 
 Il déploie uniquement `configuration.yaml` (rendu depuis un template Jinja2) et recharge Home Assistant.
-Il vérifie d'abord que Core est en 2026.8 ou plus, et que le modèle ne contient pas de bloc
-`http:` : le proxy de confiance se règle dans l'interface
+Il vérifie d'abord que Core est en 2026.8 ou plus, que le modèle ne contient pas de bloc
+`http:` et que `docker_host_ip` figure parmi les proxies de confiance réglés dans l'interface
 ([`docs/home-assistant.md`](../../docs/home-assistant.md#serveur-http-et-proxy-de-confiance)).
 
-`docker_host_ip` n'est plus utilisé par le modèle ; il reste la référence de la valeur à
-saisir comme proxy de confiance.
+`docker_host_ip` n'est plus utilisé par le modèle ; il sert de valeur de référence pour ce
+contrôle et pour la saisie dans l'interface.
 
 ```bash
 # Déployer la config HAOS sur test

@@ -26,8 +26,10 @@ Seul `configuration.yaml` est versionné :
 - Le modèle active `default_config`. Il ne contient plus de bloc `http:` : depuis Core
   2026.8, le proxy de confiance se règle dans l'interface (voir
   [ci-dessous](#serveur-http-et-proxy-de-confiance)).
-- Avant de déployer, le rôle lit la version de Core (`ha core info`) et s'arrête si elle
-  est antérieure à 2026.8 ou si le modèle contient de nouveau `http:`.
+- Avant de déployer, le rôle s'arrête si la version de Core (`ha core info`) est antérieure
+  à 2026.8, si le modèle contient de nouveau `http:`, ou si l'adresse de l'hôte Docker
+  (`docker_host_ip`) est absente des réglages du serveur HTTP (`.storage/http`, contenu
+  jamais affiché dans les journaux).
 
 Tout le reste (intégrations, appareils, automatisations, tableaux de bord, modules
 complémentaires) est configuré dans l'interface de Home Assistant et **n'est pas
@@ -70,15 +72,16 @@ l'accès via Traefik.
 
 Le réglage n'est plus déployé par Ansible : il fait partie de la reconstruction.
 
-1. Créer la VM, faire le bootstrap SSH et l'accueil de Home Assistant, puis
-   `./deploy.sh <env> --limit haos` (le rôle vérifie la version de Core).
-   En cas de restauration d'une sauvegarde Home Assistant, le réglage est restauré avec
-   elle : passer directement au contrôle (étape 4).
+1. Créer la VM, faire le bootstrap SSH et l'accueil de Home Assistant. En cas de
+   restauration d'une sauvegarde Home Assistant, le réglage revient avec elle : passer à
+   l'étape 4.
 2. Se connecter en **accès direct** (`http://haos-vm.<domaine>:8123`), pas via Traefik.
 3. *Paramètres → Système → Réseau → Serveur HTTP* : saisir les valeurs ci-dessus et
    enregistrer. Home Assistant redémarre son serveur HTTP et annule le changement s'il
    n'est pas confirmé dans les 5 minutes : confirmer depuis l'accès direct.
-4. Contrôler : la page relue affiche les deux valeurs ; `https://haos.<domaine>` répond
+4. `./deploy.sh <env> --limit haos` : le rôle refuse de déployer si le proxy de confiance
+   manque.
+5. Contrôler : la page relue affiche les deux valeurs ; `https://haos.<domaine>` répond
    (200, certificat valide) ; *Paramètres → Système → Réparations* ne signale rien sur HTTP.
 
 ## Liens avec les autres services
