@@ -83,7 +83,7 @@ FAKE
 cat > "$T/bin/ansible-inventory" <<'FAKE'
 #!/usr/bin/env bash
 # Note si un secret est déjà présent dans l'environnement à ce moment-là.
-echo "ansible-inventory secrets=${BWS_ACCESS_TOKEN:+token}${MQTT_PASSWORD:+mqtt}" >> "$CALLS"
+echo "ansible-inventory $* secrets=${BWS_ACCESS_TOKEN:+token}${MQTT_PASSWORD:+mqtt}" >> "$CALLS"
 if [ -n "${FAKE_INV_FAIL:-}" ]; then exit 1; fi
 if [ -n "${FAKE_INV_GARBAGE:-}" ]; then echo "pas du JSON"; exit 0; fi
 printf '{"_meta":{"hostvars":{"nas":{},"hote":{%s}}}}\n' "${FAKE_INV_VARS:-}"
@@ -120,6 +120,7 @@ record() { # record <ok: 1|0> <libellé> <raison>
 # run <libellé> <rc attendu : 0 | nz | N> <bash | bash-x> [VAR=valeur ...] -- <arguments de deploy.sh>
 # Contrôles facultatifs : EXPECT_CALLS / FORBID_CALLS (regex sur le journal des appels),
 # EXPECT_ENV (lignes exactes vues par le faux ansible-playbook).
+# RUN_DIR / RUN_BIN : autre copie de deploy.sh et autres outils en tête du PATH.
 # Par défaut, un échec interdit tout appel à ansible-playbook.
 run() {
   local label="$1" exp="$2" launcher="$3" rc=0 ok=1 why=""
@@ -131,7 +132,7 @@ run() {
   : > "$T/env.txt"
   local cmd=(bash)
   [ "$launcher" = "bash-x" ] && cmd=(bash -x)
-  ( cd "$T/ansible" && env -i HOME="$T/home" PATH="$T/bin:${REAL_JQ_DIR}:/usr/bin:/bin" \
+  ( cd "${RUN_DIR:-$T/ansible}" && env -i HOME="$T/home" PATH="${RUN_BIN:-$T/bin}:${REAL_JQ_DIR}:/usr/bin:/bin" \
       CALLS="$T/calls.log" ENVSEEN="$T/env.txt" \
       V_mqtt_password="$FAKE_MQTT" V_cloudflare_dns_api_token="$FAKE_CF" \
       V_zigbee_network_key_test="$FAKE_Z2M" V_zigbee_network_key_prod="$FAKE_Z2M" \
@@ -155,7 +156,7 @@ run() {
   if [ -n "${EXPECT_ENV:-}" ] && [ "$(cat "$T/env.txt")" != "$EXPECT_ENV" ]; then
     ok=0; why+=" valeurs transmises à Ansible différentes"
   fi
-  EXPECT_CALLS="" FORBID_CALLS="" EXPECT_ENV=""
+  EXPECT_CALLS="" FORBID_CALLS="" EXPECT_ENV="" RUN_DIR="" RUN_BIN=""
   record "$ok" "$label (rc=$rc)" "$why"
 }
 
@@ -205,6 +206,8 @@ FORBID_CALLS='bws|^bw '
 run "inventaire illisible : arrêt avant tout secret"  nz bash "$TOKEN" FAKE_INV_GARBAGE=1 -- test
 FORBID_CALLS='secrets=[a-z]'
 run "inventaire lu sans secret dans l'environnement"  0 bash -- test
+EXPECT_CALLS='^ansible-inventory -i [^ ]*/inventories/test/hosts.ini --playbook-dir playbooks --list '
+run "inventaire lu avec playbooks/group_vars"         0 bash "$TOKEN" -- test
 FORBID_CALLS='restic'
 run "secrets Restic absents, sauvegarde désactivée"   0 bash "$TOKEN" FAKE_ABSENT=restic_password_test -- test
 
@@ -250,13 +253,19 @@ K=zigbee_network_key_test
 for bad in '"GENERATE"' 'GENERATE' 'SENTINEL_pas_du_json' '[1,2,3]' \
            '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,300]' '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,-1]' \
            '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,1.5]' '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,"15"]' \
-           '{"SENTINEL_cle":1}' '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15] [0]'; do
+           '{"SENTINEL_cle":1}' '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15] [0]' \
+           '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15.0]' '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,1.5e1]' \
+           '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,1e1]' '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,015]' \
+           '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,-0]' '[ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15.0 ]'; do
   run "clé Zigbee invalide : ${bad:0:24}" nz bash "$TOKEN" "V_$K=$bad" -- test
 done
 run "MQTT sur plusieurs lignes"          nz bash "$TOKEN" "V_mqtt_password=SENTINEL_a
 SENTINEL_b" -- test
 run "Cloudflare sur plusieurs lignes"    nz bash "$TOKEN" "V_cloudflare_dns_api_token=SENTINEL_a
 SENTINEL_b" -- test
+EXPECT_CALLS='haos.yml'
+EXPECT_ENV=$(printf 'MQTT_PASSWORD=%s\nZ2M_NETWORK_KEY=%s\nCF_DNS_API_TOKEN=%s\nRESTIC_REST_PASSWORD=\nRESTIC_REPO_PASSWORD=' "$FAKE_MQTT" '[ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 255 ]' "$FAKE_CF")
+run "clé Zigbee valide avec espaces, 0 et 255 : acceptée" 0 bash "$TOKEN" "V_$K=[ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 255 ]" -- test
 EXPECT_CALLS='haos.yml'
 run "clé Zigbee sur plusieurs lignes : acceptée" 0 bash "$TOKEN" "V_$K=[0,1,2,3,4,5,6,7,
 8,9,10,11,12,13,14,15]" -- test
@@ -392,6 +401,81 @@ SENTINEL_b"
   real "clé Zigbee trop courte"     nz 'Z2M_NETWORK_KEY=[1,2,3]'
   real "clé Zigbee hors plage"      nz 'Z2M_NETWORK_KEY=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,300]'
   real "clé Zigbee objet"           nz 'Z2M_NETWORK_KEY={"a":1}'
+  real "clé Zigbee flottant 15.0"   nz 'Z2M_NETWORK_KEY=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15.0]'
+
+  # Contrôle des secrets du rôle restic_backup, extrait de son bloc, valeurs du rôle.
+  python3 -I - "${ANSIBLE_DIR}/roles/restic_backup/tasks/main.yml" "$T/real/restic-check.yml" <<'PY'
+import sys, yaml
+tasks = [t for b in yaml.safe_load(open(sys.argv[1])) for t in b.get("block", [])
+         if t.get("name") == "Check Restic secrets presence"]
+assert len(tasks) == 1
+yaml.safe_dump(tasks, open(sys.argv[2], "w"))
+PY
+  cat > "$T/real/restic.yml" <<PLAY
+- hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars_files:
+    - ${ANSIBLE_DIR}/roles/restic_backup/defaults/main.yml
+  tasks:
+    - ansible.builtin.import_tasks: $T/real/restic-check.yml
+PLAY
+  # restic <libellé> <0 | nz> [VAR=valeur ...]
+  restic() {
+    local label="$1" exp="$2" rc=0 ok=1 why=""
+    shift 2
+    env -i HOME="$T/home" PATH="$REAL_PATH" ANSIBLE_CONFIG="$T/real/ansible.cfg" \
+        ANSIBLE_LOCAL_TEMP="$T/real/tmp" ANSIBLE_LOCALHOST_WARNING=False \
+        ANSIBLE_INVENTORY_UNPARSED_WARNING=False \
+        RESTIC_REST_PASSWORD="$FAKE_REST" RESTIC_REPO_PASSWORD="$FAKE_REPO" "$@" \
+        "$REAL_AP" "$T/real/restic.yml" --diff -vvv > "$T/out.txt" 2>&1 || rc=$?
+    case "$exp" in
+      0)  [ "$rc" -eq 0 ] || { ok=0; why+=" rc=$rc (0 attendu)"; } ;;
+      nz) [ "$rc" -eq 2 ] || { ok=0; why+=" rc=$rc (2 attendu)"; } ;;
+    esac
+    grep -q 'TASK \[Check Restic secrets presence\]' "$T/out.txt" || { ok=0; why+=" contrôle non exécuté"; }
+    if grep -Eq "$LEAK_PATTERN" "$T/out.txt"; then ok=0; why+=" valeur dans la sortie"; fi
+    record "$ok" "rôle Restic : $label (rc=$rc)" "$why"
+  }
+  restic "valeurs valides"                0
+  for var in RESTIC_REST_PASSWORD RESTIC_REPO_PASSWORD; do
+    restic "$var vide"                    nz "$var="
+    restic "$var espaces seuls"           nz "$var=   "
+    restic "$var texte null"              nz "$var=null"
+    restic "$var null entouré d'espaces"  nz "$var= null "
+    restic "$var sur plusieurs lignes"    nz "$var=SENTINEL_a
+SENTINEL_b"
+  done
+fi
+
+# --- Inventaire réel : restic_backup_enabled dans playbooks/group_vars ---------
+
+REAL_AI="$(PATH="$REAL_PATH" command -v ansible-inventory || true)"
+if [ -z "$REAL_AI" ]; then
+  SKIP=$((SKIP + 1)); echo "SKIP  inventaire réel : ansible-inventory absent"
+else
+  P="$T/pbv"
+  mkdir -p "$P/bin" "$P/ansible/inventories/test" "$P/ansible/playbooks"
+  cp "${ANSIBLE_DIR}/deploy.sh" "$P/ansible/deploy.sh"
+  printf '[docker_hosts]\ndocker-test-01 ansible_host=127.0.0.1\n' > "$P/ansible/inventories/test/hosts.ini"
+  # Faux bw, bws et ansible-playbook ; vrai ansible-inventory.
+  ln -s "$T/bin/bw" "$T/bin/bws" "$T/bin/ansible-playbook" "$REAL_AI" "$P/bin/"
+
+  rm -rf "$P/ansible/playbooks/group_vars"
+  RUN_DIR="$P/ansible" RUN_BIN="$P/bin" FORBID_CALLS='restic'
+  run "inventaire réel, aucune valeur : Restic non requis" 0 bash "$TOKEN" -- test
+
+  mkdir -p "$P/ansible/playbooks/group_vars"
+  printf 'restic_backup_enabled: true\n' > "$P/ansible/playbooks/group_vars/docker_hosts.yml"
+  RUN_DIR="$P/ansible" RUN_BIN="$P/bin" EXPECT_CALLS='id-restic_password_test' EXPECT_ENV="$(printf 'MQTT_PASSWORD=%s\nZ2M_NETWORK_KEY=%s\nCF_DNS_API_TOKEN=%s\nRESTIC_REST_PASSWORD=%s\nRESTIC_REPO_PASSWORD=%s' "$FAKE_MQTT" "$FAKE_Z2M" "$FAKE_CF" "$FAKE_REST" "$FAKE_REPO")"
+  run "playbooks/group_vars active la sauvegarde : Restic requis" 0 bash "$TOKEN" -- test
+  RUN_DIR="$P/ansible" RUN_BIN="$P/bin"
+  run "playbooks/group_vars active la sauvegarde : secret Restic absent" nz bash "$TOKEN" FAKE_ABSENT=restic_password_test -- test
+
+  printf 'restic_backup_enabled: false\n' > "$P/ansible/playbooks/group_vars/docker_hosts.yml"
+  RUN_DIR="$P/ansible" RUN_BIN="$P/bin" FORBID_CALLS='restic'
+  run "playbooks/group_vars désactive la sauvegarde : Restic non requis" 0 bash "$TOKEN" -- test
 fi
 
 echo

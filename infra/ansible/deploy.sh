@@ -45,12 +45,13 @@ require_cmd ansible-playbook
 # ansible.cfg est lu dans le répertoire courant.
 cd "$SCRIPT_DIR"
 
-# Sauvegarde activée sur un hôte de l'inventaire ? Lu avant tout secret. Les variables ne
-# sont pas évaluées ici : toute valeur autre qu'un faux explicite compte comme activée.
+# Sauvegarde activée sur un hôte de l'inventaire ? Lu avant tout secret. --playbook-dir
+# ajoute playbooks/group_vars/, lu aussi par ansible-playbook. Les variables ne sont pas
+# évaluées ici : toute valeur autre qu'un faux explicite compte comme activée.
 # Un « -e restic_backup_enabled=true » n'est pas vu ici : le rôle s'arrête alors sur ses
 # propres contrôles, faute de secrets.
 restic_backup_required() {
-  ansible-inventory -i "${INVENTORY}" --list | jq -r '
+  ansible-inventory -i "${INVENTORY}" --playbook-dir playbooks --list | jq -r '
     [._meta.hostvars | to_entries[].value.restic_backup_enabled // false | tostring | ascii_downcase]
     | any(. as $v | ["false", "no", "off", "0", "n", "f"] | index($v) | not)
   '
@@ -124,7 +125,12 @@ is_single_line() {
 }
 
 # Tableau JSON de 16 octets : seul format accepté, GENERATE compris est refusé.
+# Le texte ne doit contenir que des entiers sans zéro initial : jq accepte 15.0 ou 1.5e1
+# comme entiers, alors que le rôle (from_json) y voit des flottants et les refuse.
 is_zigbee_key() {
+  local compact="${1//[$' \t\r\n']/}"
+  local re='^\[(0|[1-9][0-9]*)(,(0|[1-9][0-9]*)){15}\]$'
+  [[ "$compact" =~ $re ]] || return 1
   printf '%s' "$1" | jq -se '
     length == 1 and (.[0] | type == "array" and length == 16
       and all(.[]; type == "number" and . == floor and . >= 0 and . <= 255))

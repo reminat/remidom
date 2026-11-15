@@ -22,8 +22,11 @@
     - name: Check Restic secrets presence
       ansible.builtin.assert:
         that:
-          - restic_backup_rest_password | length > 0
-          - restic_backup_password | length > 0
+          # Mêmes refus que deploy.sh : vide, espaces seuls, null, plusieurs lignes.
+          - restic_backup_rest_password | trim | length > 0
+          - restic_backup_rest_password | trim != 'null'
+          - restic_backup_password | trim | length > 0
+          - restic_backup_password | trim != 'null'
           - "'\n' not in restic_backup_rest_password"
           - "'\n' not in restic_backup_password"
         quiet: true
