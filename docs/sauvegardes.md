@@ -44,11 +44,15 @@ Configuration de référence : rôles `restic_backup` et `restic_maintenance`, i
 | 13/11/2026 | `docker-test` | `forget` (ID 27) | `forget_done` : 6 snapshots supprimés, 38 conservés |
 | 14/11/2026 | `docker-prod` | `forget` (ID 24) | `nothing_to_remove` : 18 snapshots conservés |
 
-- Les six exécutions se terminent en code 0 ; aucun échec de contrôle signalé. Les
-  premières opérations réelles sont donc **validées pour ces dates**, sans préjuger des
-  suivantes (prochain `prune` : 04/12 en test, 05/12 en prod).
-- Résultats conformes à la configuration : en prod, aucun snapshot n'a plus de 30 jours
-  (`keep-within 30d`) ; en test, volume sous les seuils (10 suppressions, 20 %).
+- Les six exécutions se terminent en code 0, et le contrôle préalable intégré à chacune de
+  ces six opérations n'a signalé aucune erreur. Les premières opérations réelles sont donc
+  **validées pour ces dates**, sans préjuger des suivantes (prochain `prune` : 04/12 en
+  test, 05/12 en prod). Cela ne valide pas les contrôles quotidiens du NAS (voir
+  « Restant à vérifier »).
+- Analyse des résultats observés (calcul, non extrait des e-mails) : en prod, aucun
+  snapshot n'avait plus de 30 jours (`keep-within 30d`) ; en test, les suppressions sont
+  restées sous les seuils configurés de 10 snapshots et de 20 % (6 sur 43, puis 6 sur 44,
+  soit environ 14 %).
 - Les effectifs prod (4 au 31/10, 11 au 07/11, 18 au 14/11) correspondent à **une
   sauvegarde par jour**, sans le prouver jour par jour : la continuité prod n'est pas
   vérifiée directement.
@@ -66,8 +70,9 @@ Fichier contrôlé : index de `docker-test` réécrit par `prune` le 06/11/2026 
 `cce79f763f801fed10a152d41a0a9c112ed0633bd6c6d44d1241386e68a36f44` (167 730 octets,
 `root:root 0400`, `synoacltool` : « It's Linux mode », toujours présent dans le
 repository). Téléchargé depuis la version Hyper Backup du 06/11 vers 06:00 : SHA-256
-identique à l'original (restic nomme ses fichiers par l'empreinte de leur contenu ; le nom
-et l'empreinte coïncident donc aussi).
+identique à celui de l'original calculé sur le NAS ; c'est cette comparaison qui constitue
+la vérification. Que le nom du fichier soit égal à son empreinte est attendu : le format
+restic nomme ses fichiers d'après l'empreinte de leur contenu.
 
 **Limites** : il s'agit d'un téléchargement vers un poste macOS, pas d'une restauration
 sur le NAS ; la restitution des droits Unix et des ACL n'est pas démontrée, ni la
