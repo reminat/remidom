@@ -84,9 +84,14 @@ infra/ansible/
 - Restic, déclaré dans Git : sauvegarde quotidienne de `docker-prod-01` (rôle
   `restic_backup`) et maintenance des repositories sur le NAS (rôle `restic_maintenance`).
 - Restic, constats datés : exécutions réussies relevées le 31/10/2026 (voir
-  `services/synology/restic-maintenance/README.md`). Ces constats ne garantissent pas les
-  exécutions suivantes, et la restaurabilité n'est pas vérifiée en continu : seul un test
-  de restauration récent le prouve.
+  `services/synology/restic-maintenance/README.md`) ; premières opérations `forget` et
+  `prune` automatiques (06 au 14/11/2026), Hyper Backup après `prune` et restauration
+  isolée d'un snapshot de `docker-test-01` relevés lors de
+  [l'audit du 15/11/2026](docs/sauvegardes.md#audit-du-15112026), qui liste aussi les
+  points non vérifiés. Ces constats ne garantissent pas les exécutions suivantes, et la
+  restaurabilité n'est pas vérifiée en continu : seul un test de restauration récent le
+  prouve (pour `docker-prod`, restauration sur disque validée le 28/10/2026 ; aucun test
+  plus récent documenté).
 - Réseau UniFi configuré hors IaC ; segmentation inter-VLAN non encore en place.
 - Poste de travail : `dev-agent-01` (Ubuntu) ; MCP UniFi disponible en lecture seule.
 
