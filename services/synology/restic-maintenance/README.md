@@ -509,13 +509,15 @@ réapparaissent.
 
 ### Notifications et rapport
 
-- Tâches `forget` et `prune` (prod : ID 24 et 25 ; test : ID 27 et 28) : réglage
-  « Envoyer les détails d'exécution par e-mail » → **toujours**. Chaque exécution envoie
+- Tâches `forget` et `prune` (prod : ID 24 et 25 ; test : ID 27 et 28) : réglage prévu
+  « Envoyer les détails d'exécution par e-mail » → **toujours**. Chaque exécution enverrait
   alors sa sortie : `SUPPRIMÉ : …` pour chaque snapshot, `forget : N snapshot(s)
   supprimé(s)…`, ou la sortie de `prune`, ou le motif du refus. Les échecs ont un code non
-  nul. **Constat (06 au 14/11/2026)** : un e-mail reçu pour chaque exécution réussie de ces
-  quatre tâches, ce qui confirme ce réglage (voir
-  [l'audit du 15/11/2026](../../../docs/sauvegardes.md#audit-du-15112026)). Tâches du
+  nul. **Constat** : un e-mail reçu pour chacune des six exécutions réussies de ces quatre
+  tâches du 06 au 14/11/2026 (voir
+  [l'audit du 15/11/2026](../../../docs/sauvegardes.md#audit-du-15112026)). **Déduction** :
+  un envoi pour des exécutions réussies indique que le réglage « toujours » est actif ; ce
+  réglage n'a pas été vérifié directement dans DSM. Tâches du
   contrôle (ID 21 et 26) : réglage prévu « uniquement si le script se termine
   anormalement » (voir « Tâche planifiée DSM du contrôle »), **non vérifié** ;
   `synoschedtask --get` ne montre pas ce réglage, le contrôler dans DSM (Modifier →
@@ -765,7 +767,7 @@ droits et passent par le même mécanisme. La durée observée (17 s pour un rep
 quelques centaines de Mio) laisse une large marge sous la fin provisoire de la plage
 protégée (08:00). Supprimer la copie restaurée de `/volume1/download` après examen.
 
-**Constat du 06/11/2026** (voir [l'audit du 15/11/2026](../../../docs/sauvegardes.md#audit-du-15112026)) :
+**Constats des 06 et 07/11/2026** (voir [l'audit du 15/11/2026](../../../docs/sauvegardes.md#audit-du-15112026)) :
 après le premier `prune` planifié de `docker-test`, Hyper Backup a réussi (06:00:03 à
 06:00:31, de même le 07/11 après le `prune` de prod) ; un index réécrit ce jour-là
 (`root:root 0400`), téléchargé depuis cette version, a le même SHA-256 que l'original sur
@@ -847,9 +849,10 @@ Preuves :
 | 07/11/2026 | 25 (`prune`) | `prune_done`, 11 snapshots inchangés, code 0 |
 | 14/11/2026 | 24 (`forget`) | `nothing_to_remove`, 18 snapshots conservés, code 0 |
 
-Conforme à l'attendu (aucun candidat avant fin novembre). Toute opération réelle refuse
-un verrou présent avant même de chercher des candidats : ces codes 0 impliquent qu'aucun
-verrou n'existait à ces moments (déduction du déroulé ci-dessus). Non vérifiés : les
+Conforme à l'attendu (aucun candidat avant fin novembre). Une opération réelle calcule
+d'abord les candidats en dry-run, puis refuse tout verrou présent avant de conclure ou
+d'écrire : ces codes 0 impliquent qu'aucun verrou n'existait lors de ces contrôles
+(déduction du déroulé ci-dessus). Non vérifiés : les
 rapports JSON de `/root/restic-maintenance/docker-prod/logs/`, les contrôles quotidiens
 (ID 21) et la continuité jour par jour des sauvegardes.
 
@@ -885,8 +888,9 @@ Preuves du 31/10/2026 :
 | 06/11/2026 | 28 (`prune`) | `prune_done`, 37 snapshots inchangés, code 0 |
 | 13/11/2026 | 27 (`forget`) | `forget_done`, 6 snapshots supprimés, 38 conservés, code 0 |
 
-La première suppression automatique (6) est dans l'estimation du 31/10 (6 à 7) et sous les
-seuils de 10 snapshots et de 20 %. Le 15/11/2026, une restauration isolée du snapshot
+La première suppression automatique (6) est dans l'estimation du 31/10 (6 à 7). Calcul à
+partir des résultats observés : les suppressions sont restées sous les seuils de
+10 snapshots et de 20 % (6 sur 43, puis 6 sur 44, soit environ 14 %). Le 15/11/2026, une restauration isolée du snapshot
 `180fa597` avec `--verify` a réussi sur `docker-test-01` (redémarrage des services non
 testé). Non vérifiés : les rapports JSON, notamment le premier contrôle planifié (ID 26,
 01/11) et les `check --read-data` du dimanche.

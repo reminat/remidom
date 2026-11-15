@@ -90,7 +90,8 @@ infra/ansible/
   [l'audit du 15/11/2026](docs/sauvegardes.md#audit-du-15112026), qui liste aussi les
   points non vérifiés. Ces constats ne garantissent pas les exécutions suivantes, et la
   restaurabilité n'est pas vérifiée en continu : seul un test de restauration récent le
-  prouve (aucun pour `docker-prod` à cette date).
+  prouve (pour `docker-prod`, restauration sur disque validée le 28/10/2026 ; aucun test
+  plus récent documenté).
 - Réseau UniFi configuré hors IaC ; segmentation inter-VLAN non encore en place.
 - Poste de travail : `dev-agent-01` (Ubuntu) ; MCP UniFi disponible en lecture seule.
 
