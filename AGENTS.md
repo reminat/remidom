@@ -42,6 +42,17 @@ Avant chaque commit : relire le diff et lancer Gitleaks si disponible (`pre-comm
 - Ne pas modifier un script pour qu'il corresponde à la documentation : corriger la
   documentation, ou proposer le changement de code séparément.
 - Ne pas supprimer de runs ou de branches de diagnostic (`diag/*`) avant revue.
+- **Identité des commits faits par un agent** (Claude Code notamment) : adresse GitHub
+  `noreply` du compte authentifié avec `gh`, sans demander l'identité à l'utilisateur.
+  - La résoudre juste avant le commit avec `gh api user --jq '"\(.login) \(.id)"'` et
+    vérifier qu'il s'agit du compte attendu (`reminat`) : nom `<login>`, adresse
+    `<id>+<login>@users.noreply.github.com`.
+  - La passer à la seule commande de commit
+    (`git -c user.name=… -c user.email=… commit`) ; ne jamais modifier la configuration
+    Git (globale, système ou locale du dépôt).
+  - Ne jamais l'inventer ni la reprendre de l'historique des commits. Si elle ne peut pas
+    être résolue de façon fiable (`gh` non authentifié, autre compte, réponse incomplète) :
+    ne pas committer et signaler le blocage.
 
 ## Infrastructure réelle
 
