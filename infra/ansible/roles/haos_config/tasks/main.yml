@@ -1,5 +1,68 @@
 # HAOS n'a pas Python — on utilise uniquement raw (SSH pur).
 
+# Depuis Core 2026.8, le serveur HTTP (proxy de confiance compris) se règle dans l'interface :
+# un bloc http: dans configuration.yaml est ignoré et signalé par une réparation. Le modèle
+# n'en contient plus ; il ne doit pas être déployé sur une version plus ancienne, qui
+# perdrait alors la confiance accordée à Traefik. Voir docs/home-assistant.md.
+- name: Read Home Assistant Core version
+  ansible.builtin.raw: ha core info --raw-json
+  register: ha_core_info
+  changed_when: false
+
+- name: Check Core version and rendered configuration
+  vars:
+    ha_core_version: "{{ (ha_core_info.stdout | from_json).data.version }}"
+    ha_rendered_config: "{{ lookup('template', playbook_dir + '/../../../services/ha/config/configuration.yaml.j2') }}"
+  ansible.builtin.assert:
+    that:
+      - ha_core_version is version('2026.8.0', '>=')
+      - ha_rendered_config is not regex('(?m)^http:')
+    fail_msg: >-
+      Core {{ ha_core_version }} : 2026.8 minimum requis, et aucun bloc http: dans le modèle
+      (proxy de confiance réglé dans l'interface, voir docs/home-assistant.md).
+    success_msg: "Core {{ ha_core_version }}, modèle sans bloc http:"
+
+# Le proxy de confiance doit déjà figurer dans les réglages confirmés de l'interface : sans
+# lui, Traefik reçoit des 400. Schéma de .storage/http (Core 2026.11, store version 3,
+# components/http/config.py) : data.stable = configuration confirmée ; data.pending = essai
+# non confirmé, annulé au bout de 5 minutes, donc jamais pris en compte ici.
+# no_log sur tout ce qui manipule le contenu (journaux de CI publics) : seuls des booléens
+# sortent de ces tâches.
+- name: Read HTTP settings
+  ansible.builtin.raw: cat /mnt/data/supervisor/homeassistant/.storage/http
+  register: ha_http_settings
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Evaluate confirmed HTTP settings
+  vars:
+    ha_http_store: "{{ ha_http_settings.stdout | from_json if ha_http_settings.rc == 0 else {} }}"
+    ha_http_stable: "{{ ha_http_store.data.stable | default({}, true) }}"
+    ha_http_proxies: "{{ ha_http_stable.trusted_proxies | default([], true) }}"
+  ansible.builtin.set_fact:
+    ha_http_check:
+      readable: "{{ ha_http_settings.rc == 0 }}"
+      schema: "{{ ha_http_store.key | default('') == 'http' and ha_http_store.version | default(0) == 3 }}"
+      x_forwarded_for: "{{ ha_http_stable.use_x_forwarded_for | default(false) is sameas true }}"
+      trusted_proxy: "{{ docker_host_ip in ha_http_proxies or (docker_host_ip ~ '/32') in ha_http_proxies }}"
+  no_log: true
+
+- name: Check that the Docker host is a trusted proxy
+  ansible.builtin.assert:
+    that:
+      - ha_http_check.readable
+      - ha_http_check.schema
+      - ha_http_check.x_forwarded_for
+      - ha_http_check.trusted_proxy
+    quiet: true
+    fail_msg: >-
+      Réglages HTTP confirmés (.storage/http, data.stable) non conformes : lisible
+      {{ ha_http_check.readable }}, schéma attendu (http, version 3) {{ ha_http_check.schema }},
+      X-Forwarded-For activé {{ ha_http_check.x_forwarded_for }}, docker_host_ip dans
+      trusted_proxies {{ ha_http_check.trusted_proxy }}. Régler et confirmer dans Paramètres →
+      Système → Réseau → Serveur HTTP avant de déployer (docs/home-assistant.md).
+
 - name: Render configuration to temp file
   ansible.builtin.raw: >-
     printf '%s' '{{ lookup("template", playbook_dir + "/../../../services/ha/config/configuration.yaml.j2") | b64encode }}'
