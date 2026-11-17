@@ -360,29 +360,66 @@ disques, réseau) et son installation Proxmox ne sont pas documentés dans le d�
 2. *Datacenter → Stockage → Ajouter → NFS* : même export que `Reminas`, contenu `backup`
    (lecture seule pour un test).
 3. **Test** : restaurer sous un VMID libre, `VMID_TEST`, jamais 104 (réservé à la reprise
-   réelle), puis isoler la VM **avant son premier démarrage** :
+   réelle), puis isoler la VM **avant son premier démarrage**. Renseigner d'abord les deux
+   variables ; les valeurs ci-dessous sont des **exemples à remplacer** :
 
    ```sh
-   VMID_TEST=<VMID libre, différent de 104>
-   pvesh get /cluster/nextid --vmid "$VMID_TEST"   # renvoie le VMID s'il est libre, une erreur sinon
-   # Nouvelle MAC ; la VM n'est pas démarrée par qmrestore
-   qmrestore /mnt/pve/Reminas/dump/vzdump-qemu-104-<date>.vma.zst "$VMID_TEST" --storage local-lvm --unique 1
-   # Carte déconnectée, pas de démarrage automatique
-   qm set "$VMID_TEST" --net0 virtio,bridge=vmbr0,link_down=1 --onboot 0
-   # Toutes les interfaces netN doivent porter link_down=1 avant qm start
-   qm config "$VMID_TEST" | grep '^net'
+   VMID_TEST=9104   # EXEMPLE : VMID libre sur la tour de spare, différent de 104
+   ARCHIVE=/mnt/pve/Reminas/dump/vzdump-qemu-104-2026_11_22-01_00_02.vma.zst   # EXEMPLE : chemin complet
    ```
 
-4. **Test** : démarrer et ouvrir la console, toujours sous `VMID_TEST`, puis vérifier que
-   HAOS démarre et que le cœur de Home Assistant répond (`ha core info`) :
+   Restauration et isolation. Le sous-shell s'arrête à la première erreur : un VMID
+   invalide, égal à 104 ou déjà occupé, une archive absente ou un échec de `qmrestore`
+   empêchent `qm set`.
 
    ```sh
-   qm start "$VMID_TEST"
-   qm terminal "$VMID_TEST"   # ou noVNC, sur la VM VMID_TEST
+   (
+     set -eu
+     case "$VMID_TEST" in
+       ''|0*|*[!0-9]*) echo "VMID_TEST invalide : '$VMID_TEST'" >&2; exit 1 ;;
+     esac
+     if [ "$VMID_TEST" -lt 100 ] || [ "$VMID_TEST" -eq 104 ]; then
+       echo "VMID_TEST refusé : $VMID_TEST (< 100, ou 104 réservé à la reprise réelle)" >&2; exit 1
+     fi
+     # Erreur si le VMID est déjà occupé
+     pvesh get /cluster/nextid --vmid "$VMID_TEST" >/dev/null
+     [ -f "$ARCHIVE" ] || { echo "Archive introuvable : $ARCHIVE" >&2; exit 1; }
+     # Nouvelle MAC ; qmrestore ne démarre pas la VM
+     qmrestore "$ARCHIVE" "$VMID_TEST" --storage local-lvm --unique 1
+     # Carte déconnectée, pas de démarrage automatique
+     qm set "$VMID_TEST" --net0 virtio,bridge=vmbr0,link_down=1 --onboot 0
+   )
+   ```
+
+   Contrôle : chaque ligne `netN` affichée doit contenir `link_down=1`. Une interface
+   supplémentaire restaurée sans cette option se déconnecte de la même façon
+   (`qm set "$VMID_TEST" --netN …,link_down=1`).
+
+   ```sh
+   qm config "$VMID_TEST" | grep -E '^net[0-9]+:'
+   ```
+
+4. **Test**, seulement après ce contrôle : démarrer et ouvrir la console sous `VMID_TEST`,
+   puis vérifier que HAOS démarre et que le cœur de Home Assistant répond
+   (`ha core info`). Le bloc refuse de démarrer si `VMID_TEST` vaut 104 ou si une
+   interface `netN` n'a pas `link_down=1`.
+
+   ```sh
+   (
+     set -eu
+     [ "$VMID_TEST" != 104 ] || { echo "VMID 104 réservé à la reprise réelle" >&2; exit 1; }
+     conf=$(qm config "$VMID_TEST")
+     if printf '%s\n' "$conf" | grep -E '^net[0-9]+:' | grep -vq 'link_down=1'; then
+       echo "Interface netN connectée : démarrage refusé" >&2; exit 1
+     fi
+     qm start "$VMID_TEST"
+     qm terminal "$VMID_TEST"   # ou noVNC, sur la VM VMID_TEST
+   )
    ```
 
    Le lien réseau reste coupé pendant tout le test ; la VM est supprimée à la fin (voir
-   [Contrôles de réussite d'un test](#contrôles-de-réussite-dun-test)).
+   [Contrôles de réussite d'un test](#contrôles-de-réussite-dun-test)). Ces commandes
+   n'ont pas encore été exécutées sur Proxmox : à valider lors du premier test.
 5. **Reprise réelle** seulement, sous le VMID 104 : arrêter définitivement `haos-prod-01`
    sur `pve` s'il existe encore, puis restaurer sans `--unique` (MAC conservée) ni
    déconnexion, démarrer et vérifier MQTT, l'accès via Traefik et les intégrations :
