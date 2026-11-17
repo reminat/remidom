@@ -69,7 +69,7 @@ ansible/
 
 ### Ce que fait deploy.sh
 
-1. Vérifie que `bws`, `jq` et `ansible-playbook` sont disponibles
+1. Vérifie que `bws`, `jq`, `ansible-inventory` et `ansible-playbook` sont disponibles, puis lit dans l'inventaire et dans `playbooks/group_vars/` si `restic_backup_enabled` est actif sur un hôte (avant toute lecture de secret ; une valeur non interprétable compte comme active)
 2. Si `BWS_ACCESS_TOKEN` n'est pas déjà défini (cas du poste local ; en CI, il vient des secrets GitHub) :
    vérifie `bw`, s'authentifie à Bitwarden CLI (API key ou session existante), déverrouille le vault si
    nécessaire et récupère le token machine `bws` depuis le vault (`bws_machine_token`)
@@ -77,8 +77,17 @@ ansible/
    - `MQTT_PASSWORD` (depuis le secret `mqtt_password`)
    - `Z2M_NETWORK_KEY` (depuis le secret `zigbee_network_key_<env>`)
    - `CF_DNS_API_TOKEN` (depuis le secret `cloudflare_dns_api_token`)
-   - `RESTIC_REST_PASSWORD` et `RESTIC_REPO_PASSWORD` (secrets facultatifs `restic_rest_password_<env>` et `restic_password_<env>`)
-4. Lance `ansible-playbook` avec l'inventaire de l'environnement : `docker-host.yml`, puis `haos.yml`
+   - `RESTIC_REST_PASSWORD` et `RESTIC_REPO_PASSWORD` (secrets `restic_rest_password_<env>` et `restic_password_<env>`), seulement si la sauvegarde est active
+4. Contrôle chaque secret lu : une erreur de lecture, un secret absent, une valeur vide ou `null`, un texte sur plusieurs lignes ou une clé Zigbee mal formée (autre chose qu'un tableau JSON de 16 entiers de 0 à 255, écrits sans décimale, exposant ni zéro initial) **arrêtent le script avant tout appel à `ansible-playbook`**. Les messages citent la référence du secret, jamais sa valeur ; la trace du shell est coupée
+5. Lance `ansible-playbook` avec l'inventaire de l'environnement : `docker-host.yml`, puis `haos.yml`
+
+Le contrôle porte sur l'ensemble du déploiement, même avec `--limit haos`. Le rôle `compose_deploy` refait ces contrôles avant tout rendu, et le rôle `restic_backup` refuse de même une valeur vide, faite d'espaces, `null` ou sur plusieurs lignes, y compris pour un `ansible-playbook` lancé sans `deploy.sh`. `-e restic_backup_enabled=true` n'est pas vu par `deploy.sh` : les secrets Restic ne sont alors pas chargés et le rôle `restic_backup` s'arrête.
+
+Tests isolés (faux exécutables, valeurs fictives, sans identifiant ni réseau ; les contrôles des rôles sont aussi exécutés sur localhost si `ansible-playbook` est disponible) :
+
+```bash
+bash infra/ansible/tests/deploy-wrapper-test.sh
+```
 
 ---
 
@@ -91,10 +100,12 @@ Les secrets ne sont jamais stockés dans le repo. Ils sont injectés au moment d
 | `mqtt_password`       | `lookup('env', 'MQTT_PASSWORD')`    | `mqtt_password`         |
 | `z2m_network_key`     | `lookup('env', 'Z2M_NETWORK_KEY')`  | `zigbee_network_key_<env>` (JSON) |
 | `cf_api_token`        | `lookup('env', 'CF_DNS_API_TOKEN')` | `cloudflare_dns_api_token` |
-| `restic_backup_rest_password` | `lookup('env', 'RESTIC_REST_PASSWORD')` | `restic_rest_password_<env>` (facultatif) |
-| `restic_backup_password`   | `lookup('env', 'RESTIC_REPO_PASSWORD')`  | `restic_password_<env>` (facultatif)   |
+| `restic_backup_rest_password` | `lookup('env', 'RESTIC_REST_PASSWORD')` | `restic_rest_password_<env>` (requis si `restic_backup_enabled`) |
+| `restic_backup_password`   | `lookup('env', 'RESTIC_REPO_PASSWORD')`  | `restic_password_<env>` (requis si `restic_backup_enabled`)   |
 
 Le token machine `bws` est lui-même stocké dans le vault Bitwarden sous le nom `bws_machine_token`.
+
+`zigbee_network_key_<env>` doit exister avant le déploiement, sous la forme d'un tableau JSON de 16 entiers de 0 à 255. Il n'y a **aucune génération implicite** : `GENERATE` et toute autre forme sont refusés, car une nouvelle clé réseau couperait les appareils déjà appairés.
 
 `mqtt_password` et `cloudflare_dns_api_token` sont partagés entre test et prod (même secret Bitwarden, deux machines distinctes), ce qui est acceptable pour un homelab ; la clé Zigbee et les secrets Restic sont propres à chaque environnement. Pour désigner un autre secret (clé, nom ou UUID), définir avant d'appeler `deploy.sh` : `MQTT_SECRET_REF`, `Z2M_NETWORK_KEY_SECRET_REF`, `CF_DNS_API_TOKEN_SECRET_REF`, `RESTIC_REST_PASSWORD_SECRET_REF` ou `RESTIC_PASSWORD_SECRET_REF`.
 
@@ -110,7 +121,7 @@ Toute la logique est partagée. Seules les variables diffèrent :
 | `smlight_serial_url`  | `tcp://smlight.test.reminat.com:6638` | `tcp://smlight.reminat.com:6638`  |
 | `smlight_adapter`     | `ezsp`                                | `ember`                           |
 | `domain_base`         | `test.reminat.com`                    | `reminat.com`                     |
-| `unifi_url`, `code_url`, `proxmox_url` | non définis (routes absentes) | définis (routes Traefik `unifi`, `code`, `proxmox`) |
+| `unifi_url`, `code_url`, `proxmox_url`, `nas_url` | non définis (routes absentes) | définis (routes Traefik `unifi`, `code`, `proxmox`, `nas`) |
 | `restic_backup_enabled` | non défini (`false`)                | `true`                            |
 
 Les volumes Docker sont isolés par VM : `/srv/docker/core` existe indépendamment sur chaque machine.
@@ -245,7 +256,7 @@ Les VMs HAOS sont déclarées dans un groupe séparé `haos` dans chaque inventa
 | `ansible_host`   | `haos-vm.test.reminat.com`     | `haos-vm.reminat.com`     |
 | `ansible_port`   | `22222`                        | `22222`                   |
 | `ansible_user`   | `root`                         | `root`                    |
-| `docker_host_ip` | adresse de `docker-test-01`    | adresse de `docker-prod-01` (proxy de confiance) |
+| `docker_host_ip` | adresse de `docker-test-01`    | adresse de `docker-prod-01` (proxy de confiance, à saisir dans l'interface) |
 
 `haos.<domaine>` (sans `-vm`) est le nom publié par Traefik pour l'interface web.
 
@@ -254,6 +265,13 @@ Les VMs HAOS sont déclarées dans un groupe séparé `haos` dans chaque inventa
 Le playbook `playbooks/haos.yml` applique le rôle `haos_config` sur le groupe `haos`.
 
 Il déploie uniquement `configuration.yaml` (rendu depuis un template Jinja2) et recharge Home Assistant.
+Il vérifie d'abord que Core est en 2026.8 ou plus, que le modèle ne contient pas de bloc
+`http:`, et que la configuration HTTP confirmée de l'interface (`.storage/http`, lue en JSON)
+active X-Forwarded-For et contient `docker_host_ip` parmi les proxies de confiance
+([`docs/home-assistant.md`](../../docs/home-assistant.md#serveur-http-et-proxy-de-confiance)).
+
+`docker_host_ip` n'est plus utilisé par le modèle ; il sert de valeur de référence pour ce
+contrôle et pour la saisie dans l'interface.
 
 ```bash
 # Déployer la config HAOS sur test
@@ -292,6 +310,49 @@ Traefik est le reverse proxy de la stack. Il gère :
 | Proxmox (LAN/VPN uniquement) | — | `proxmox.reminat.com` |
 | UniFi           | —                               | `unifi.reminat.com`       |
 | Service `code`  | —                               | `code.reminat.com`        |
+| DSM (NAS, LAN/VPN uniquement) | — | `nas.reminat.com` |
+
+### DSM (`nas`) : certificat vérifiable par Traefik
+
+La route `nas` ([`nas.yml.j2`](../../services/docker/core/traefik/dynamic/nas.yml.j2)),
+rendue en prod seulement (`nas_url`), joint DSM par l'adresse LAN du NAS et vérifie son
+certificat comme pour Proxmox : `serverName: nas.reminat.com` et CA publique versionnée dans
+[`roles/compose_deploy/files/nas-root-ca.pem`](roles/compose_deploy/files/nas-root-ca.pem).
+Sans `insecureSkipVerify`. Le navigateur ne voit que le certificat Let's Encrypt de Traefik.
+
+DSM n'obtient un certificat Let's Encrypt que par challenge HTTP, qui suppose le NAS publié
+sur Internet. Il présente donc un certificat signé par une petite CA interne, créée une fois
+sur le poste :
+
+```bash
+umask 077; d=$(mktemp -d)
+# CA interne (10 ans). Sa clé privée ne va jamais dans le dépôt.
+openssl req -x509 -newkey rsa:3072 -nodes -days 3650 -subj "/CN=Remidom NAS CA" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -keyout "$d/ca.key" -out "$d/ca.pem"
+# Certificat DSM (825 jours) : le SAN porte le nom vérifié par Traefik.
+openssl req -newkey rsa:2048 -nodes -subj "/CN=nas.reminat.com" \
+  -keyout "$d/nas.key" -out "$d/nas.csr"
+openssl x509 -req -in "$d/nas.csr" -CA "$d/ca.pem" -CAkey "$d/ca.key" -CAcreateserial \
+  -days 825 -out "$d/nas.pem" -extfile <(printf '%s\n' \
+  "subjectAltName=DNS:nas.reminat.com" "basicConstraints=critical,CA:FALSE" \
+  "keyUsage=critical,digitalSignature,keyEncipherment" "extendedKeyUsage=serverAuth")
+```
+
+1. DSM : **Panneau de configuration > Sécurité > Certificat > Ajouter > Importer** :
+   clé privée `nas.key`, certificat `nas.pem`, certificat intermédiaire `ca.pem`. Puis
+   **Paramètres** : l'affecter au service système de DSM (celui du port 443).
+2. Vérifier depuis le LAN, sur l'adresse du NAS, avant tout déploiement :
+   ```bash
+   openssl s_client -connect <adresse LAN du NAS>:443 -servername nas.reminat.com \
+     -CAfile "$d/ca.pem" -verify_hostname nas.reminat.com -verify_return_error </dev/null \
+     | grep 'Verify return code'   # attendu : 0 (ok)
+   ```
+3. Copier `ca.pem` (partie publique) dans `roles/compose_deploy/files/nas-root-ca.pem`.
+   Garder `ca.key` hors dépôt (Bitwarden), ou la détruire et refaire une CA au
+   renouvellement. Supprimer `$d` ensuite.
+4. Renouvellement avant l'échéance du certificat DSM (`openssl x509 -enddate`) : refaire
+   les deux dernières commandes et l'étape 1. La CA versionnée ne change pas.
 
 ### Labels Docker Compose
 
@@ -453,8 +514,10 @@ Préparation du NAS, tâches DSM et contrôles :
 ```mermaid
 flowchart TD
     A([./deploy.sh test|prod]) --> B[Authentification Bitwarden\nsauf si BWS_ACCESS_TOKEN défini]
-    B --> C[Récupération des secrets\nMQTT_PASSWORD\nZ2M_NETWORK_KEY\nCF_DNS_API_TOKEN\nsecrets Restic facultatifs]
-    C --> D[ansible-playbook\ndocker-host.yml\npuis haos.yml]
+    B --> C[Récupération des secrets\nMQTT_PASSWORD\nZ2M_NETWORK_KEY\nCF_DNS_API_TOKEN\nsecrets Restic si sauvegarde active]
+    C --> C1{Tous présents\net valides ?}
+    C1 -->|non| X([Arrêt, aucun appel Ansible])
+    C1 -->|oui| D[ansible-playbook\ndocker-host.yml\npuis haos.yml]
 
     D --> E[Rôle: common]
     D --> F[Rôle: docker]

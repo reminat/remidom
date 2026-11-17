@@ -1,3 +1,6 @@
+- name: Check secrets before any rendering
+  ansible.builtin.import_tasks: check_secrets.yml
+
 - name: Ensure project directories exist
   ansible.builtin.file:
     path: "{{ item.dest }}"
@@ -27,6 +30,7 @@
     dest: "{{ item.dest }}/.env"
     mode: "0640"
   no_log: true
+  diff: false
   loop: "{{ compose_projects }}"
   when: item.name == 'core'
 
@@ -86,6 +90,14 @@
   loop: "{{ compose_projects }}"
   when: item.name == 'core' and proxmox_url | length > 0
 
+- name: Render Traefik dynamic configuration (nas)
+  ansible.builtin.template:
+    src: "{{ item.src }}/traefik/dynamic/nas.yml.j2"
+    dest: "{{ item.dest }}/traefik/dynamic/nas.yml"
+    mode: "0644"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core' and nas_url | length > 0
+
 - name: Ensure Traefik acme directory exists
   ansible.builtin.file:
     path: "{{ item.dest }}/traefik/acme"
@@ -111,6 +123,8 @@
     mode: "0640"
     owner: "1883"
     group: "1883"
+  no_log: true
+  diff: false
   loop: "{{ compose_projects }}"
   when: item.name == 'core'
 
@@ -164,14 +178,6 @@
   loop: "{{ compose_projects }}"
   when: item.name == 'core'
 
-- name: Fail if mqtt_password is empty
-  ansible.builtin.fail:
-    msg: "mqtt_password est vide — MQTT_PASSWORD non défini ou secret introuvable dans BWS"
-  when:
-    - item.name == 'core'
-    - mqtt_password | length == 0
-  loop: "{{ compose_projects }}"
-
 - name: Docker compose pull
   ansible.builtin.command:
     cmd: docker compose pull
@@ -204,6 +210,7 @@
       mosquitto_passwd -b /mosquitto/config/passwords
       {{ mqtt_user }} {{ mqtt_password }}
   no_log: true
+  diff: false
   loop: "{{ compose_projects }}"
   when: item.name == 'core'
 

@@ -16,13 +16,15 @@ mqtt_password: "{{ lookup('env', 'MQTT_PASSWORD') }}"
 
 smlight_serial_url: "tcp://smlight.reminat.com:6638"
 smlight_adapter: ember
-z2m_network_key: "{{ (lookup('env', 'Z2M_NETWORK_KEY') | default('\"GENERATE\"', true)) | from_json }}"
+z2m_network_key: "{{ lookup('env', 'Z2M_NETWORK_KEY') | from_json }}"
 
 domain_base: reminat.com
 haos_url: "http://haos-vm.reminat.com:8123"
 unifi_url: "https://10.10.1.1"
 code_url: "http://10.10.20.10:8080"
 proxmox_url: "https://10.10.20.2:8006"
+# Adresse LAN du NAS (DSM, HTTPS 443) et non nas.reminat.com, qui pointe vers Traefik.
+nas_url: "https://10.10.20.60"
 cf_api_token: "{{ lookup('env', 'CF_DNS_API_TOKEN') }}"
 
 # Sauvegarde Restic de /srv/docker/core vers le REST Server du NAS (repository docker-prod).

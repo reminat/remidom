@@ -10,6 +10,10 @@ qu'en lecture (tableau ci-dessous). Les **opérations réelles** (`--apply forge
 distinctes : voir « Opérations réelles ». **État au 31/10/2026** : activées par l'inventaire
 pour `docker-prod` (tâches DSM ID 24 et 25) et pour `docker-test` (tâches DSM ID 27 et 28) ;
 voir « État de la production au 31/10/2026 » et « État de `docker-test` au 31/10/2026 ».
+Premières exécutions automatiques constatées du 06 au 14/11/2026 : voir
+[l'audit du 15/11/2026](../../../docs/sauvegardes.md#audit-du-15112026) ; contrôles
+`--read-data` des dimanches 01, 08 et 15/11/2026 constatés réussis : voir les
+[compléments du 17/11/2026](../../../docs/sauvegardes.md#compléments-du-17112026).
 
 | Protection | Mécanisme |
 |---|---|
@@ -180,6 +184,10 @@ plus les données** :
 - **Validé** le 28/10/2026 sur une VM jetable (restic 0.19.1, 74 Mio) : lecture intégrale en
   3 s ; après altération de 4 Kio d'un pack, le contrôle de structure répond OK mais la
   lecture des données échoue (code 4) en nommant le pack.
+- **Constaté sur le NAS** (rapports JSON consultés le 17/11/2026) : `status=ok`,
+  `read_data=--read-data`, `check.ok=True`, `findings=[]` pour `docker-test` et
+  `docker-prod` les dimanches 01, 08 et 15/11/2026 (voir les
+  [compléments du 17/11/2026](../../../docs/sauvegardes.md#compléments-du-17112026)).
 
 ## Mise à jour des empreintes dans les tâches DSM
 
@@ -511,10 +519,15 @@ réapparaissent.
   « Envoyer les détails d'exécution par e-mail » → **toujours**. Chaque exécution enverrait
   alors sa sortie : `SUPPRIMÉ : …` pour chaque snapshot, `forget : N snapshot(s)
   supprimé(s)…`, ou la sortie de `prune`, ou le motif du refus. Les échecs ont un code non
-  nul. **Non vérifié au 31/10/2026**, pour ces tâches comme pour celles du contrôle (ID 21
-  et 26) : la sortie de `synoschedtask --get` ne montre pas ce réglage ; le contrôler dans
-  DSM (Modifier → Paramètres de tâche) et à la réception des e-mails des 06/11 (test) et
-  07/11 (prod).
+  nul. **Constat** : un e-mail reçu pour chacune des six exécutions réussies de ces quatre
+  tâches du 06 au 14/11/2026 (voir
+  [l'audit du 15/11/2026](../../../docs/sauvegardes.md#audit-du-15112026)). **Déduction** :
+  un envoi pour des exécutions réussies indique que le réglage « toujours » est actif ; ce
+  réglage n'a pas été vérifié directement dans DSM. Tâches du
+  contrôle (ID 21 et 26) : réglage prévu « uniquement si le script se termine
+  anormalement » (voir « Tâche planifiée DSM du contrôle »), **non vérifié** ;
+  `synoschedtask --get` ne montre pas ce réglage, le contrôler dans DSM (Modifier →
+  Paramètres de tâche).
 - Rapport JSON : `operation` (`forget`, `prune`, `control`, `resolve-interrupted`),
   `apply.requested`, `apply.removed`, `apply.ok`, `apply.dry_run` / `apply.restic_output`
   (fin des sorties de restic), `check_after`.
@@ -760,6 +773,13 @@ droits et passent par le même mécanisme. La durée observée (17 s pour un rep
 quelques centaines de Mio) laisse une large marge sous la fin provisoire de la plage
 protégée (08:00). Supprimer la copie restaurée de `/volume1/download` après examen.
 
+**Constats des 06 et 07/11/2026** (voir [l'audit du 15/11/2026](../../../docs/sauvegardes.md#audit-du-15112026)) :
+après le premier `prune` planifié de `docker-test`, Hyper Backup a réussi (06:00:03 à
+06:00:31, de même le 07/11 après le `prune` de prod) ; un index réécrit ce jour-là
+(`root:root 0400`), téléchargé depuis cette version, a le même SHA-256 que l'original sur
+le NAS. Téléchargement hors du NAS : la restitution des droits par une restauration sur le
+NAS n'a pas été refaite.
+
 Si une condition échoue, la correction minimale serait de réappliquer l'ACL héritée
 **fichier par fichier** sur les seuls fichiers écrits par une opération réelle (liste des
 fichiers postérieurs à son début, `synoacltool`), jamais récursivement ; elle n'est pas
@@ -826,11 +846,23 @@ Preuves :
 | 31/10 | `check` depuis `docker-prod-01` (via REST) | 4 snapshots, aucune erreur |
 | 31/10 | contrôle DSM (ID 21, alors nommée « Restic maintenance docker-prod ») | `report-20261031-034502.json` : `started=2026-10-31T02:45:02.284681+00:00`, `status=ok`, `check.ok=true`, `read_data=aucune`, `findings=[]`, `summary.per_group={"core":4}` |
 
-**Reste à vérifier le 07/11/2026** : premières exécutions planifiées des tâches 24
-(`forget`, 04:00) et 25 (`prune`, 04:15) : rapports dans
-`/root/restic-maintenance/docker-prod/logs/` (attendu : `nothing_to_remove`, aucun
-candidat avant fin novembre, puis `prune_done`), absence de verrou, contrôle suivant `ok`,
-et e-mails reçus selon le réglage des tâches (non vérifié à ce jour).
+**Premières exécutions planifiées** (constat, e-mails DSM ; détail dans
+[l'audit du 15/11/2026](../../../docs/sauvegardes.md#audit-du-15112026)) :
+
+| Date | Tâche | Résultat |
+|---|---|---|
+| 07/11/2026 | 24 (`forget`) | `nothing_to_remove`, 11 snapshots conservés, code 0 |
+| 07/11/2026 | 25 (`prune`) | `prune_done`, 11 snapshots inchangés, code 0 |
+| 14/11/2026 | 24 (`forget`) | `nothing_to_remove`, 18 snapshots conservés, code 0 |
+
+Conforme à l'attendu (aucun candidat avant fin novembre). Une opération réelle calcule
+d'abord les candidats en dry-run, puis refuse tout verrou présent avant de conclure ou
+d'écrire : ces codes 0 impliquent qu'aucun verrou n'existait lors de ces contrôles
+(déduction du déroulé ci-dessus). Constaté le 17/11/2026 (voir les
+[compléments du 17/11/2026](../../../docs/sauvegardes.md#compléments-du-17112026)) : rapports
+`check --read-data` des dimanches 01, 08 et 15/11 réussis, et exactement un snapshot
+`core,prod` par jour du 31/10 au 17/11/2026. Non vérifiés : les rapports JSON des
+opérations `forget` et `prune`, et les contrôles quotidiens (ID 21) des autres jours.
 
 ### État de `docker-test` au 31/10/2026
 
@@ -855,16 +887,23 @@ Preuves du 31/10/2026 :
 | Timer | `RandomizedDelayUSec=5min`, `Persistent=yes` |
 | Contrôle manuel (09:57) | empreintes OK, montages en lecture seule vérifiés, `check` de structure OK ; 37 snapshots, 36 conservés, 1 candidat (2,7 %) ; statut `ok`, code 0 ; aucune suppression |
 
-**Aucune exécution planifiée des tâches de test n'est encore constatée.** À vérifier :
-- 01/11 à 03:30 : premier contrôle planifié (ID 26) : rapport `ok` dans
-  `/root/restic-maintenance/docker-test/logs/` ;
-- 06/11 à 04:00 : premier `forget` planifié (ID 27), **première suppression automatique**
-  attendue sur test (6 à 7 candidats estimés : la simulation en prévoit 6, le contrôle du
-  31/10 en a trouvé 1 de plus qu'elle ; sous les seuils de 10 et 20 %) ; examiner la veille
-  les candidats réels (« Protocole de validation », étape 1) ;
-- 06/11 à 04:15 : premier `prune` planifié (ID 28) ; aucun verrou restant, contrôle
-  suivant `ok` ;
-- e-mails reçus selon le réglage des tâches (non vérifié à ce jour).
+**Premières exécutions planifiées** (constat, e-mails DSM ; détail dans
+[l'audit du 15/11/2026](../../../docs/sauvegardes.md#audit-du-15112026)) :
+
+| Date | Tâche | Résultat |
+|---|---|---|
+| 06/11/2026 | 27 (`forget`) | `forget_done`, 6 snapshots supprimés, 37 conservés, code 0 |
+| 06/11/2026 | 28 (`prune`) | `prune_done`, 37 snapshots inchangés, code 0 |
+| 13/11/2026 | 27 (`forget`) | `forget_done`, 6 snapshots supprimés, 38 conservés, code 0 |
+
+La première suppression automatique (6) est dans l'estimation du 31/10 (6 à 7). Calcul à
+partir des résultats observés : les suppressions sont restées sous les seuils de
+10 snapshots et de 20 % (6 sur 43, puis 6 sur 44, soit environ 14 %). Le 15/11/2026, une restauration isolée du snapshot
+`180fa597` avec `--verify` a réussi sur `docker-test-01` (redémarrage des services non
+testé). Constaté le 17/11/2026 (voir les
+[compléments du 17/11/2026](../../../docs/sauvegardes.md#compléments-du-17112026)) : rapport du
+premier contrôle planifié (ID 26, 01/11, avec `--read-data`) et ceux des
+`check --read-data` des 08 et 15/11, tous réussis. Non vérifiés : les rapports JSON des autres jours.
 
 Réserves :
 - **Rattrapage `Persistent=yes`** : si `docker-test-01` est arrêtée à 03:00, la sauvegarde
@@ -1394,20 +1433,23 @@ D'où l'heure choisie, loin de la sauvegarde de 02:30 (quelques secondes pour 81
    **désactivée**, puis activée après un lancement manuel concluant : c'est l'ID 21,
    aujourd'hui `restic-docker-prod-control` (activée, root, 03:45).
 
-### Planification (état au 31/10/2026)
+### Planification (configurée le 31/10/2026)
+
+Exécutions constatées : voir [l'audit du 15/11/2026](../../../docs/sauvegardes.md#audit-du-15112026)
+et ses [compléments du 17/11/2026](../../../docs/sauvegardes.md#compléments-du-17112026).
 
 | Heure | Tâche | Repository |
 |---|---|---|
 | 02:30 | sauvegarde `restic-backup-core.timer` (docker-prod-01) | `docker-prod` |
 | 03:00 (+ 0 à 5 min) | sauvegarde de `docker-test-01` (`restic-backup.timer`, hors dépôt) | `docker-test` |
-| 03:30 | contrôle dry-run (DSM ID 26, activée ; premier passage le 01/11, à vérifier) | `docker-test` |
-| **03:45** | **contrôle dry-run (DSM ID 21, activée)** | `docker-prod` |
-| 04:00 le vendredi | `forget` réel (DSM ID 27, activée ; première exécution le 06/11, à vérifier) | `docker-test` |
-| 04:15 le premier vendredi du mois | `prune` réel (DSM ID 28, activée ; première exécution le 06/11, à vérifier) | `docker-test` |
-| 04:00 le samedi | `forget` réel (DSM ID 24, activée ; première exécution le 07/11, à vérifier) | `docker-prod` |
-| 04:15 le premier samedi du mois | `prune` réel (DSM ID 25, activée ; première exécution le 07/11, à vérifier) | `docker-prod` |
+| 03:30 | contrôle dry-run (DSM ID 26, activée ; `--read-data` réussi les dimanches 01, 08 et 15/11/2026, autres jours non vérifiés) | `docker-test` |
+| **03:45** | **contrôle dry-run (DSM ID 21, activée ; `--read-data` réussi les dimanches 01, 08 et 15/11/2026, autres jours non vérifiés)** | `docker-prod` |
+| 04:00 le vendredi | `forget` réel (DSM ID 27, activée ; constaté les 06 et 13/11/2026) | `docker-test` |
+| 04:15 le premier vendredi du mois | `prune` réel (DSM ID 28, activée ; constaté le 06/11/2026) | `docker-test` |
+| 04:00 le samedi | `forget` réel (DSM ID 24, activée ; constaté les 07 et 14/11/2026) | `docker-prod` |
+| 04:15 le premier samedi du mois | `prune` réel (DSM ID 25, activée ; constaté le 07/11/2026) | `docker-prod` |
 | 04:55–08:00 | plage protégée des opérations réelles | — |
-| 05:00 | snapshots Btrfs | — |
+| 05:00 | snapshots Btrfs (dossier `Restic`, configuration DSM hors dépôt ; quotidiens constatés au 17/11/2026) | — |
 | 06:00 | Hyper Backup | — |
 
 03:45 laisse plus d'une heure après la sauvegarde de prod, 03:30 environ 25 min après celle
