@@ -87,10 +87,13 @@ infra/ansible/
   `services/synology/restic-maintenance/README.md`) ; premières opérations `forget` et
   `prune` automatiques (06 au 14/11/2026), Hyper Backup après `prune` et restauration
   isolée d'un snapshot de `docker-test-01` relevés lors de
-  [l'audit du 15/11/2026](docs/sauvegardes.md#audit-du-15112026), qui liste aussi les
-  points non vérifiés. Ces constats ne garantissent pas les exécutions suivantes, et la
-  restaurabilité n'est pas vérifiée en continu : seul un test de restauration récent le
-  prouve (pour `docker-prod`, restauration sur disque validée le 28/10/2026 ; aucun test
+  [l'audit du 15/11/2026](docs/sauvegardes.md#audit-du-15112026) ; `check --read-data`
+  des dimanches 01, 08 et 15/11/2026, snapshots Btrfs quotidiens du dossier `Restic` et
+  un snapshot `docker-prod` par jour du 31/10 au 17/11/2026 relevés dans ses
+  [compléments du 17/11/2026](docs/sauvegardes.md#compléments-du-17112026), qui listent
+  aussi les points non vérifiés. Ces constats ne garantissent pas les exécutions
+  suivantes, et la restaurabilité n'est pas vérifiée en continu : seul un test de
+  restauration récent le prouve (pour `docker-prod`, restauration sur disque validée le 28/10/2026 ; aucun test
   plus récent documenté).
 - Réseau UniFi configuré hors IaC ; segmentation inter-VLAN non encore en place.
 - Poste de travail : `dev-agent-01` (Ubuntu) ; MCP UniFi disponible en lecture seule.

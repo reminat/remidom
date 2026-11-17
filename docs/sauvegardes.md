@@ -4,13 +4,13 @@ Vue d'ensemble. Les procédures détaillées restent dans les guides liés.
 
 | Données | Mécanisme | Destination | Statut |
 |---|---|---|---|
-| Données Docker de `docker-prod-01` (`/srv/docker/core`) | Restic, rôle `restic_backup`, quotidien à 02:30 | REST Server du NAS, repository `docker-prod` (append-only) | Git ; constat du 31/10/2026 dans le README Restic ; continuité quotidienne non vérifiée directement (voir [audit du 15/11/2026](#audit-du-15112026)) |
+| Données Docker de `docker-prod-01` (`/srv/docker/core`) | Restic, rôle `restic_backup`, quotidien à 02:30 | REST Server du NAS, repository `docker-prod` (append-only) | Git ; un snapshot par jour constaté du 31/10 au 17/11/2026 ([compléments du 17/11/2026](#compléments-du-17112026)) |
 | Données Docker de `docker-test-01` | Restic, timer installé à la main (03:00) | REST Server du NAS, repository `docker-test` | **hors dépôt** ; continuité et restauration constatées le 15/11/2026 ([audit](#audit-du-15112026)) |
-| Repositories Restic | Contrôle quotidien, `forget` et `prune` planifiés sur le NAS | NAS (exécution locale) | Git (rôle `restic_maintenance`) ; premiers `forget` et `prune` automatiques constatés du 06 au 14/11/2026 ([audit](#audit-du-15112026)) |
+| Repositories Restic | Contrôle quotidien, `forget` et `prune` planifiés sur le NAS | NAS (exécution locale) | Git (rôle `restic_maintenance`) ; premiers `forget` et `prune` automatiques constatés du 06 au 14/11/2026 ([audit](#audit-du-15112026)) ; `check --read-data` réussis les 01, 08 et 15/11/2026 ([compléments](#compléments-du-17112026)) |
 | État Terraform | Copie horodatée par `tf.sh` après `apply` ou `destroy` | NAS (SSH, `rsync`) | Git |
 | Home Assistant | Sauvegardes propres à Home Assistant | Non documenté | Non vérifié |
 | VM Proxmox (vzdump) | — | — | Aucune sauvegarde décrite dans le dépôt ; aucune visible au constat du 03/11/2026 (voir [ci-dessous](#vm-proxmox-vzdump)) |
-| NAS | Snapshots Btrfs (05:00) et Hyper Backup (06:00) | Destination Hyper Backup non documentée | Hyper Backup du dossier `Restic` constaté les 06 et 07/11/2026 ([audit](#audit-du-15112026)) ; snapshots Btrfs non vérifiés |
+| NAS | Snapshots Btrfs (05:00) et Hyper Backup (06:00) | Destination Hyper Backup non documentée | Hors dépôt (DSM) ; Hyper Backup du dossier `Restic` constaté les 06 et 07/11/2026 ([audit](#audit-du-15112026)) ; snapshots Btrfs quotidiens constatés au 17/11/2026, rétention à long terme et restauration non vérifiées ([compléments](#compléments-du-17112026)) |
 | Poste de travail `dev-agent-01` | — | — | Non documenté ; aucune sauvegarde vzdump au constat du 03/11/2026 |
 
 ## Restic
@@ -54,8 +54,9 @@ Configuration de référence : rôles `restic_backup` et `restic_maintenance`, i
   restées sous les seuils configurés de 10 snapshots et de 20 % (6 sur 43, puis 6 sur 44,
   soit environ 14 %).
 - Les effectifs prod (4 au 31/10, 11 au 07/11, 18 au 14/11) correspondent à **une
-  sauvegarde par jour**, sans le prouver jour par jour : la continuité prod n'est pas
-  vérifiée directement.
+  sauvegarde par jour**, sans le prouver jour par jour : la continuité prod n'était pas
+  vérifiée directement au 15/11 (elle l'a été le 17/11/2026, voir
+  [compléments](#compléments-du-17112026)).
 - Ces e-mails ont été reçus pour des exécutions réussies : l'envoi fonctionne pour les
   tâches 24, 25, 27 et 28.
 
@@ -99,12 +100,75 @@ restauration complète d'un repository depuis Hyper Backup.
   partir de ces données. Ce test passe par le client de test, installé hors dépôt ; la
   procédure versionnée (`restic-core restore-to`) concerne `docker-prod-01`.
 
-### Restant à vérifier
+### Compléments du 17/11/2026
 
-- Exécution des contrôles quotidiens du NAS (tâches 21 et 26) sur toute la période.
-- Résultat des `check --read-data` des dimanches 01, 08 et 15/11/2026.
-- Existence et rétention des snapshots Btrfs du dossier `Restic`.
-- Continuité quotidienne de `docker-prod`, par ses journaux ou ses snapshots datés.
+**Source** : vérifications faites par le propriétaire le 17/11/2026, en lecture seule
+(rapports JSON du NAS, interface DSM, commande sur `docker-prod-01`), rapportées ici sans
+avoir été rejouées. Comme ci-dessus, ce sont des constats datés sur la période indiquée,
+pas une garantie sur l'état actuel ni sur les exécutions suivantes.
+
+#### Contrôles hebdomadaires `check --read-data` (constat, rapports JSON)
+
+**Configuration Git** : `restic_maintenance_read_data` (défauts du rôle :
+`weekdays: [7]`, `parts: 1`), donc lecture intégrale des données le dimanche, dans les
+tâches de contrôle quotidiennes (ID 21 en prod, ID 26 en test ; voir
+[« Vérification des données »](../services/synology/restic-maintenance/README.md#vérification-des-données)).
+
+| Dimanche | `docker-test` (ID 26) | `docker-prod` (ID 21) |
+|---|---|---|
+| 01/11/2026 | ok | ok |
+| 08/11/2026 | ok | ok |
+| 15/11/2026 | ok | ok |
+
+Chacun des six rapports indique `operation=control`, `status=ok`,
+`read_data=--read-data`, `check.ok=True` et `findings=[]` : six contrôles complets réussis
+aux dates observées. Le rapport de test du 01/11 est aussi le premier contrôle planifié de
+la tâche 26.
+
+**Limites** : ces contrôles prouvent que les packs référencés par l'index étaient
+lisibles et intègres sur le disque du NAS à ces dates, pas qu'une restauration complète
+fonctionne. Seuls les rapports du dimanche ont été consultés : les contrôles des autres
+jours ne sont pas couverts.
+
+#### Snapshots Btrfs du dossier `Restic` (constat, DSM Snapshot Replication)
+
+**Configuration** : hors dépôt (DSM) ; le dépôt ne fait que supposer l'horaire de 05:00
+pour placer la plage protégée des opérations réelles (`apply.protected`).
+
+- Instantané local quotidien, vers 05:00.
+- Politique de rétention affichée : 14 quotidiens, 8 hebdomadaires, 3 mensuels et les
+  5 derniers instantanés.
+- 17 points de restauration présents au 17/11/2026 ; des instantanés quotidiens sont
+  visibles sur les autres dates de novembre.
+- Instantanés postérieurs aux `prune` (voir [tableau Hyper Backup](#hyper-backup-après-prune-constat-journaux-dsm)) :
+  06/11/2026 à 05:00:02 (après le `prune` de test, terminé vers 04:15) et 07/11/2026 à
+  05:00:01 (après celui de prod, vers 04:16).
+
+**Limites** : la planification et la présence de ces instantanés sont confirmées ;
+l'application de la rétention à long terme (hebdomadaire, mensuelle) et la restauration
+depuis un instantané Btrfs ne sont pas validées.
+
+#### Continuité de `docker-prod` (constat, `docker-prod-01`)
+
+**Configuration Git** : timer quotidien du rôle `restic_backup`, tags `core` et `prod`
+(`inventories/prod/group_vars/docker_hosts.yml`), commande via le wrapper versionné
+`/usr/local/sbin/restic-core`.
+
+Lecture de `restic snapshots --json --no-lock --no-cache` par ce wrapper, filtrée sur les
+tags `core` et `prod` : du 31/10 au 17/11/2026 inclus (18 jours), exactement un snapshot
+par jour, aucun jour manquant, aucun doublon. La continuité quotidienne des snapshots de
+production est confirmée sur cette période.
+
+**Limite** : cela prouve l'existence des snapshots, pas leur restaurabilité (seul test
+de restauration de `docker-prod` documenté : 28/10/2026, voir [`CLAUDE.md`](../CLAUDE.md)).
+
+### Restant à vérifier (au 17/11/2026)
+
+- Exécution des contrôles quotidiens du NAS (tâches 21 et 26) en dehors des dimanches
+  01, 08 et 15/11/2026, et réglage des notifications de ces tâches dans DSM.
+- Application de la rétention à long terme des snapshots Btrfs, et restauration depuis
+  l'un d'eux.
+- Test de restauration récent de `docker-prod` (aucun documenté depuis le 28/10/2026).
 - Redémarrage fonctionnel des services Docker à partir d'un snapshot restauré.
 - Restauration complète d'un repository Restic depuis Hyper Backup, sur le NAS.
 - Home Assistant et Proxmox : hors du périmètre de cet audit (voir ci-dessous).
