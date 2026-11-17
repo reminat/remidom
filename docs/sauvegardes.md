@@ -422,11 +422,20 @@ disques, réseau) et son installation Proxmox ne sont pas documentés dans le d�
    n'ont pas encore été exécutées sur Proxmox : à valider lors du premier test.
 5. **Reprise réelle** seulement, sous le VMID 104 : arrêter définitivement `haos-prod-01`
    sur `pve` s'il existe encore, puis restaurer sans `--unique` (MAC conservée) ni
-   déconnexion, démarrer et vérifier MQTT, l'accès via Traefik et les intégrations :
+   déconnexion, démarrer et vérifier MQTT, l'accès via Traefik et les intégrations.
+   `ARCHIVE` est renseignée comme à l'étape 3. Le sous-shell s'arrête à la première
+   erreur : si le VMID 104 est déjà occupé sur l'hôte de secours, si l'archive est absente
+   ou si `qmrestore` échoue, `qm start 104` n'est pas exécuté.
 
    ```sh
-   qmrestore /mnt/pve/Reminas/dump/vzdump-qemu-104-<date>.vma.zst 104 --storage local-lvm
-   qm start 104
+   (
+     set -eu
+     [ -f "$ARCHIVE" ] || { echo "Archive introuvable : $ARCHIVE" >&2; exit 1; }
+     # Erreur si le VMID 104 est déjà occupé sur l'hôte de secours
+     pvesh get /cluster/nextid --vmid 104 >/dev/null
+     qmrestore "$ARCHIVE" 104 --storage local-lvm
+     qm start 104
+   )
    ```
 
 ### B. HAOS neuve et sauvegarde Home Assistant (indépendant de vzdump)
