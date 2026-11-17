@@ -121,7 +121,7 @@ Toute la logique est partagée. Seules les variables diffèrent :
 | `smlight_serial_url`  | `tcp://smlight.test.reminat.com:6638` | `tcp://smlight.reminat.com:6638`  |
 | `smlight_adapter`     | `ezsp`                                | `ember`                           |
 | `domain_base`         | `test.reminat.com`                    | `reminat.com`                     |
-| `unifi_url`, `code_url`, `proxmox_url` | non définis (routes absentes) | définis (routes Traefik `unifi`, `code`, `proxmox`) |
+| `unifi_url`, `code_url`, `proxmox_url`, `nas_url` | non définis (routes absentes) | définis (routes Traefik `unifi`, `code`, `proxmox`, `nas`) |
 | `restic_backup_enabled` | non défini (`false`)                | `true`                            |
 
 Les volumes Docker sont isolés par VM : `/srv/docker/core` existe indépendamment sur chaque machine.
@@ -310,6 +310,49 @@ Traefik est le reverse proxy de la stack. Il gère :
 | Proxmox (LAN/VPN uniquement) | — | `proxmox.reminat.com` |
 | UniFi           | —                               | `unifi.reminat.com`       |
 | Service `code`  | —                               | `code.reminat.com`        |
+| DSM (NAS, LAN/VPN uniquement) | — | `nas.reminat.com` |
+
+### DSM (`nas`) : certificat vérifiable par Traefik
+
+La route `nas` ([`nas.yml.j2`](../../services/docker/core/traefik/dynamic/nas.yml.j2)),
+rendue en prod seulement (`nas_url`), joint DSM par l'adresse LAN du NAS et vérifie son
+certificat comme pour Proxmox : `serverName: nas.reminat.com` et CA publique versionnée dans
+[`roles/compose_deploy/files/nas-root-ca.pem`](roles/compose_deploy/files/nas-root-ca.pem).
+Sans `insecureSkipVerify`. Le navigateur ne voit que le certificat Let's Encrypt de Traefik.
+
+DSM n'obtient un certificat Let's Encrypt que par challenge HTTP, qui suppose le NAS publié
+sur Internet. Il présente donc un certificat signé par une petite CA interne, créée une fois
+sur le poste :
+
+```bash
+umask 077; d=$(mktemp -d)
+# CA interne (10 ans). Sa clé privée ne va jamais dans le dépôt.
+openssl req -x509 -newkey rsa:3072 -nodes -days 3650 -subj "/CN=Remidom NAS CA" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -keyout "$d/ca.key" -out "$d/ca.pem"
+# Certificat DSM (825 jours) : le SAN porte le nom vérifié par Traefik.
+openssl req -newkey rsa:2048 -nodes -subj "/CN=nas.reminat.com" \
+  -keyout "$d/nas.key" -out "$d/nas.csr"
+openssl x509 -req -in "$d/nas.csr" -CA "$d/ca.pem" -CAkey "$d/ca.key" -CAcreateserial \
+  -days 825 -out "$d/nas.pem" -extfile <(printf '%s\n' \
+  "subjectAltName=DNS:nas.reminat.com" "basicConstraints=critical,CA:FALSE" \
+  "keyUsage=critical,digitalSignature,keyEncipherment" "extendedKeyUsage=serverAuth")
+```
+
+1. DSM : **Panneau de configuration > Sécurité > Certificat > Ajouter > Importer** :
+   clé privée `nas.key`, certificat `nas.pem`, certificat intermédiaire `ca.pem`. Puis
+   **Paramètres** : l'affecter au service système de DSM (celui du port 443).
+2. Vérifier depuis le LAN, sur l'adresse du NAS, avant tout déploiement :
+   ```bash
+   openssl s_client -connect <adresse LAN du NAS>:443 -servername nas.reminat.com \
+     -CAfile "$d/ca.pem" -verify_hostname nas.reminat.com -verify_return_error </dev/null \
+     | grep 'Verify return code'   # attendu : 0 (ok)
+   ```
+3. Copier `ca.pem` (partie publique) dans `roles/compose_deploy/files/nas-root-ca.pem`.
+   Garder `ca.key` hors dépôt (Bitwarden), ou la détruire et refaire une CA au
+   renouvellement. Supprimer `$d` ensuite.
+4. Renouvellement avant l'échéance du certificat DSM (`openssl x509 -enddate`) : refaire
+   les deux dernières commandes et l'étape 1. La CA versionnée ne change pas.
 
 ### Labels Docker Compose
 
