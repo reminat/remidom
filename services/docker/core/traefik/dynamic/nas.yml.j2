@@ -1,0 +1,27 @@
+http:
+  routers:
+    nas:
+      rule: "Host(`nas.{{ domain_base }}`)"
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: cloudflare
+      middlewares:
+        - lan-vpn-only
+      service: nas
+
+  services:
+    nas:
+      loadBalancer:
+        servers:
+          - url: "{{ nas_url }}"
+        serversTransport: nas
+
+  serversTransports:
+    # DSM présente un certificat signé par la CA interne du NAS, avec "nas.<domaine>" dans
+    # le SAN. L'upstream est l'adresse LAN du NAS : le nom public pointe vers Traefik.
+    nas:
+      serverName: "nas.{{ domain_base }}"
+      rootCAs:
+        - |
+          {{ lookup('ansible.builtin.file', 'nas-root-ca.pem') | trim | indent(10) }}

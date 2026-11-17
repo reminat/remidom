@@ -90,6 +90,14 @@
   loop: "{{ compose_projects }}"
   when: item.name == 'core' and proxmox_url | length > 0
 
+- name: Render Traefik dynamic configuration (nas)
+  ansible.builtin.template:
+    src: "{{ item.src }}/traefik/dynamic/nas.yml.j2"
+    dest: "{{ item.dest }}/traefik/dynamic/nas.yml"
+    mode: "0644"
+  loop: "{{ compose_projects }}"
+  when: item.name == 'core' and nas_url | length > 0
+
 - name: Ensure Traefik acme directory exists
   ansible.builtin.file:
     path: "{{ item.dest }}/traefik/acme"
