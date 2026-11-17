@@ -104,6 +104,6 @@ Le réglage n'est plus déployé par Ansible : il fait partie de la reconstructi
 
 ## Sauvegarde
 
-Home Assistant n'est pas couvert par la sauvegarde Restic des hôtes Docker. Il doit
-utiliser ses propres sauvegardes ; leur configuration (fréquence, destination, rétention)
-n'est pas documentée ni vérifiée. Voir [Sauvegardes](sauvegardes.md#home-assistant).
+Home Assistant n'est pas couvert par la sauvegarde Restic des hôtes Docker. Il utilise ses
+propres sauvegardes : fréquence, destinations, rétention et état constaté dans
+[Sauvegardes, « Home Assistant »](sauvegardes.md#home-assistant).

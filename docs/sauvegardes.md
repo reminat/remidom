@@ -228,8 +228,8 @@ que la destination de Hyper Backup n'est pas documentée.
 Assistant et sur le NAS, rapportée ici sans avoir été rejouée. Configuration hors IaC.
 
 - Sauvegardes automatiques natives **quotidiennes**, vers trois emplacements : *Ce
-  système*, Synology (partage SMB `haos-backup-prod` sur `10.10.20.60`) et Home Assistant
-  Cloud.
+  système*, Synology (partage SMB `haos-backup-prod`, monté par l'adresse IP LAN du
+  Synology) et Home Assistant Cloud.
 - Rétention portée à **14** sauvegardes.
 - Sauvegarde automatique **avant mise à jour** activée.
 - Une sauvegarde manuelle de 40,5 Mo a été vue sur le Synology.
@@ -254,8 +254,9 @@ concerne que la prod ; aucune sauvegarde de `haos-test-01` n'est prévue.
 **Côté Home Assistant** (`haos-prod-01`, *Paramètres → Système*) :
 
 1. *Stockage → Ajouter un stockage réseau* : nom `synology`, usage **Sauvegarde**,
-   protocole SMB (ou NFS), serveur = adresse IP du NAS (pas `nas.reminat.com`, destiné à
-   pointer vers Traefik), partage et identifiants ci-dessus.
+   protocole SMB (ou NFS), serveur = adresse IP LAN du Synology, et non `nas.reminat.com`,
+   qui pointe déjà vers Traefik (route `nas`, constat DNS du 17/11/2026) ; partage
+   `haos-backup-prod` et identifiants ci-dessus.
 2. *Sauvegardes → Paramètres* :
    - sauvegardes automatiques **quotidiennes**, contenu : paramètres et historique,
      dossiers, modules complémentaires ;
@@ -358,19 +359,38 @@ disques, réseau) et son installation Proxmox ne sont pas documentés dans le d�
 1. Proxmox VE installé sur la tour de spare, à une version au moins égale à celle de `pve`.
 2. *Datacenter → Stockage → Ajouter → NFS* : même export que `Reminas`, contenu `backup`
    (lecture seule pour un test).
-3. Restaurer (VMID libre pour un test, 104 pour une reprise) :
+3. **Test** : restaurer sous un VMID libre, `VMID_TEST`, jamais 104 (réservé à la reprise
+   réelle), puis isoler la VM **avant son premier démarrage** :
 
    ```sh
-   # Test : nouvelle MAC, carte déconnectée, pas de démarrage automatique
-   qmrestore /mnt/pve/Reminas/dump/vzdump-qemu-104-<date>.vma.zst 104 --storage local-lvm --unique 1
-   qm set 104 --net0 virtio,bridge=vmbr0,link_down=1 --onboot 0
-   # Reprise réelle : même commande sans --unique ni qm set
+   VMID_TEST=<VMID libre, différent de 104>
+   pvesh get /cluster/nextid --vmid "$VMID_TEST"   # renvoie le VMID s'il est libre, une erreur sinon
+   # Nouvelle MAC ; la VM n'est pas démarrée par qmrestore
+   qmrestore /mnt/pve/Reminas/dump/vzdump-qemu-104-<date>.vma.zst "$VMID_TEST" --storage local-lvm --unique 1
+   # Carte déconnectée, pas de démarrage automatique
+   qm set "$VMID_TEST" --net0 virtio,bridge=vmbr0,link_down=1 --onboot 0
+   # Toutes les interfaces netN doivent porter link_down=1 avant qm start
+   qm config "$VMID_TEST" | grep '^net'
    ```
 
-4. Démarrer, ouvrir la console (`qm terminal 104` ou noVNC), vérifier que HAOS démarre et
-   que le cœur de Home Assistant répond (`ha core info`).
-5. Reprise réelle seulement : arrêter définitivement `haos-prod-01` sur `pve` s'il existe
-   encore, réactiver le lien réseau, vérifier MQTT, l'accès via Traefik et les intégrations.
+4. **Test** : démarrer et ouvrir la console, toujours sous `VMID_TEST`, puis vérifier que
+   HAOS démarre et que le cœur de Home Assistant répond (`ha core info`) :
+
+   ```sh
+   qm start "$VMID_TEST"
+   qm terminal "$VMID_TEST"   # ou noVNC, sur la VM VMID_TEST
+   ```
+
+   Le lien réseau reste coupé pendant tout le test ; la VM est supprimée à la fin (voir
+   [Contrôles de réussite d'un test](#contrôles-de-réussite-dun-test)).
+5. **Reprise réelle** seulement, sous le VMID 104 : arrêter définitivement `haos-prod-01`
+   sur `pve` s'il existe encore, puis restaurer sans `--unique` (MAC conservée) ni
+   déconnexion, démarrer et vérifier MQTT, l'accès via Traefik et les intégrations :
+
+   ```sh
+   qmrestore /mnt/pve/Reminas/dump/vzdump-qemu-104-<date>.vma.zst 104 --storage local-lvm
+   qm start 104
+   ```
 
 ### B. HAOS neuve et sauvegarde Home Assistant (indépendant de vzdump)
 
