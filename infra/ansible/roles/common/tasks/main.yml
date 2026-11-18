@@ -11,5 +11,6 @@
       - git
       - unzip
       - jq
+      - python3-yaml   # module z2m_config (compose_deploy)
     update_cache: true
     state: present

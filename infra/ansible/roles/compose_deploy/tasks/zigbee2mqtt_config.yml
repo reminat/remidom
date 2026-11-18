@@ -1,0 +1,81 @@
+# configuration.yaml de Zigbee2MQTT : fusion ciblée (module library/z2m_config.py).
+#
+# Zigbee2MQTT écrit lui-même dans ce fichier (noms des appareils, groupes, réglages de
+# l'interface, version du schéma) : Ansible n'y impose que les clés du modèle
+# zigbee2mqtt/data/configuration.yaml.j2, sans toucher au reste ; la clé réseau n'est jamais
+# écrite sur un fichier existant (arrêt si elle diffère de Bitwarden).
+#
+# 1. Analyse en lecture seule : chemins des clés à modifier, empreinte du fichier lu.
+# 2. Si le contenu change et que Zigbee2MQTT tourne : redémarrage autorisé seulement avec
+#    -e z2m_restart_allowed=true ; sinon arrêt avant toute modification.
+# 3. Arrêt de Zigbee2MQTT, puis écriture, refusée si le fichier a changé depuis l'analyse
+#    (écriture concurrente) ; copie de retour arrière 0600 avant écriture.
+# 4. Redémarrage de Zigbee2MQTT, même si l'écriture échoue.
+#
+# Un changement de noms ou de formatage n'entraîne ni écriture ni redémarrage.
+# Les valeurs (secrets, noms) ne sont jamais affichées : seulement des chemins de clés.
+
+- name: Zigbee2MQTT – analyser configuration.yaml (lecture seule)
+  z2m_config: &z2m_config_args
+    path: "{{ z2m_project.dest }}/zigbee2mqtt/data/configuration.yaml"
+    managed: "{{ lookup('ansible.builtin.template', z2m_project.src ~ '/zigbee2mqtt/data/configuration.yaml.j2') }}"
+    backup_dir: "{{ z2m_project.dest }}/zigbee2mqtt/config-backups"
+    backups_keep: "{{ z2m_config_backups_keep }}"
+    owner: "{{ z2m_config_owner }}"
+    group: "{{ z2m_config_group }}"
+    mode: "{{ z2m_config_mode }}"
+  check_mode: true
+  diff: false
+  register: z2m_plan
+
+- name: Zigbee2MQTT – clés gérées à modifier (chemins seulement)
+  ansible.builtin.debug:
+    msg: "{{ 'création du fichier' if z2m_plan.created else z2m_plan.changed_paths }}"
+  when: z2m_plan.content_changed
+
+- name: Zigbee2MQTT – appliquer les attributs seuls (contenu déjà conforme)
+  z2m_config:
+    <<: *z2m_config_args
+    expected_sha256: "{{ z2m_plan.sha256 }}"
+    attributes_only: true
+  diff: false
+  when: not z2m_plan.content_changed
+
+- name: Zigbee2MQTT – écrire configuration.yaml
+  when: z2m_plan.content_changed
+  block:
+    - name: Zigbee2MQTT – conteneur en cours d'exécution ?
+      ansible.builtin.command:
+        cmd: docker ps --quiet --filter "name=^{{ z2m_container_name }}$"
+      register: z2m_running
+      check_mode: false
+      changed_when: false
+
+    - name: Zigbee2MQTT – redémarrage non autorisé
+      ansible.builtin.fail:
+        msg: >-
+          configuration.yaml doit changer ({{ z2m_plan.changed_paths | join(', ') }}) et
+          Zigbee2MQTT tourne : son redémarrage n'est pas autorisé. Rien n'a été modifié.
+          Relancer avec -e z2m_restart_allowed=true pour l'accepter.
+      when:
+        - z2m_running.stdout | length > 0
+        - not z2m_restart_allowed | bool
+        - not ansible_check_mode
+
+    - name: Zigbee2MQTT – arrêter le conteneur avant écriture
+      ansible.builtin.command:
+        cmd: docker stop {{ z2m_container_name }}
+      register: z2m_stopped
+      when: z2m_running.stdout | length > 0
+
+    - name: Zigbee2MQTT – écrire configuration.yaml (refus si modifié depuis l'analyse)
+      z2m_config:
+        <<: *z2m_config_args
+        expected_sha256: "{{ z2m_plan.sha256 }}"
+      diff: false
+
+  always:
+    - name: Zigbee2MQTT – redémarrer le conteneur
+      ansible.builtin.command:
+        cmd: docker start {{ z2m_container_name }}
+      when: z2m_stopped is changed

@@ -54,9 +54,28 @@ sur la passerelle) n'est pas décrite dans le dépôt : non vérifié.
 ## Données
 
 Données persistantes dans `/srv/docker/core/<service>/` : base Mosquitto, base et
-configuration Zigbee2MQTT, flux Node-RED, base Portainer, `traefik/acme/acme.json`.
+configuration Zigbee2MQTT (noms des appareils compris, écrits par Zigbee2MQTT et conservés
+par Ansible), flux Node-RED, base Portainer, `traefik/acme/acme.json`.
 Sauvegarde et cohérence à chaud service par service :
 [`HOWTO.md`, « Sauvegarde Restic des hôtes Docker »](../infra/ansible/HOWTO.md#sauvegarde-restic-des-hôtes-docker).
+
+### Incident du 18/11/2026 : noms Zigbee2MQTT effacés
+
+Constat réel daté, sources : journaux des runs `Deploy` prod et propriétaire du homelab.
+
+- Le rôle `compose_deploy` remplaçait `zigbee2mqtt/data/configuration.yaml` par son modèle,
+  qui n'a pas de section `devices:` : les noms donnés aux appareils étaient effacés.
+- Déploiements prod qui ont réécrit le fichier : 14/11/2026 (≈ 19:50 UTC) et 17/11/2026
+  (≈ 20:13 UTC) ; celui du 15/11/2026 n'a rien changé (fichier déjà identique au modèle).
+- Le snapshot Restic `4a5cd195` (14/11/2026) contenait 38 noms, restaurés sélectivement le
+  18/11/2026 sur `docker-prod-01`, sans toucher à la clé réseau ni à `database.db` ; le
+  dernier appareil a été renommé à la main. Noms revenus dans Zigbee2MQTT et Home Assistant
+  (constat du propriétaire, 18/11/2026).
+- Correction : fusion ciblée des seules clés gérées, voir
+  [`HOWTO.md`](../infra/ansible/HOWTO.md#zigbee2mqtt--configurationyaml).
+
+Non vérifié : autres clés écrites par Zigbee2MQTT (réglages de l'interface, `pan_id`,
+`ext_pan_id`) éventuellement effacées le 14/11 ou le 17/11.
 
 ## Mises à jour d'images
 

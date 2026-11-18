@@ -9,3 +9,14 @@ traefik_allowed_ranges:
   - 10.10.1.0/24    # Default
   - 10.10.20.0/24   # VLAN-20-SERVERS
   - 10.10.60.0/24   # WG-Remidom (VPN WireGuard)
+
+# Zigbee2MQTT : configuration.yaml fusionné (tasks/zigbee2mqtt_config.yml).
+z2m_container_name: zigbee2mqtt
+z2m_config_owner: "1883"
+z2m_config_group: "1883"
+z2m_config_mode: "0640"
+# Redémarrage de Zigbee2MQTT quand une clé gérée change : refusé sauf accord explicite
+# (-e z2m_restart_allowed=true, ou case du workflow Deploy).
+z2m_restart_allowed: false
+# Copies de retour arrière (0600, dossier 0700 hors du volume du conteneur).
+z2m_config_backups_keep: 5

@@ -278,13 +278,18 @@ if [ -z "$REAL_AP" ]; then
 elif ! python3 -I -c 'import yaml' 2>/dev/null; then
   SKIP=$((SKIP + 1)); echo "SKIP  rôles : module Python yaml absent"
 else
-  mkdir -p "$T/real/tmp" "$T/real/dest/core/zigbee2mqtt/data"
+  mkdir -p "$T/real/tmp" "$T/real/dest/core/zigbee2mqtt/data" "$T/real/bin"
+  # Faux docker : Zigbee2MQTT jamais en cours d'exécution, aucun appel réel.
+  printf '#!/bin/sh\nexit 0\n' > "$T/real/bin/docker"
+  chmod 755 "$T/real/bin/docker"
   # Tâches réelles du rôle, sans propriétaire imposé ; rendues uniquement dans le dossier temporaire.
+  # configuration.yaml de Zigbee2MQTT : fichier de tâches réel (fusion ciblée), testé en détail
+  # par zigbee2mqtt-config-test.sh.
   python3 -I - "${ANSIBLE_DIR}/roles/compose_deploy/tasks/main.yml" "$T/real/render.yml" <<'PY'
 import sys, yaml
-names = {"Render .env", "Render Zigbee2MQTT configuration"}
+names = {"Render .env"}
 tasks = [t for t in yaml.safe_load(open(sys.argv[1])) if t.get("name") in names]
-assert len(tasks) == 2
+assert len(tasks) == 1
 for t in tasks:
     assert t.get("no_log") is True and t.get("diff") is False, t["name"]
     t["ansible.builtin.template"].pop("owner", None)
@@ -321,6 +326,13 @@ PY
         name: compose_deploy
         tasks_from: check_secrets
     - ansible.builtin.import_tasks: $T/real/render.yml
+    - ansible.builtin.include_role:
+        name: compose_deploy
+        tasks_from: zigbee2mqtt_config
+      vars:
+        z2m_project: "{{ compose_projects | first }}"
+        z2m_config_owner: "$(id -u)"
+        z2m_config_group: "$(id -g)"
 PLAY
 
   : > "$T/real/ansible.cfg"
@@ -349,7 +361,7 @@ for p in sys.argv[1:]:
     local label="$1" exp="$2" rc=0 ok=1 why=""
     shift 2
     [ -n "${REAL_KEEP:-}" ] || rm -f "$ENV_FILE" "$Z2M_FILE"
-    env -i HOME="$T/home" PATH="$REAL_PATH" ANSIBLE_CONFIG="$T/real/ansible.cfg" \
+    env -i HOME="$T/home" PATH="$T/real/bin:$REAL_PATH" ANSIBLE_CONFIG="$T/real/ansible.cfg" \
         ANSIBLE_ROLES_PATH="${ANSIBLE_DIR}/roles" ANSIBLE_LOCAL_TEMP="$T/real/tmp" \
         ANSIBLE_REMOTE_TEMP="$T/real/tmp" ANSIBLE_LOCALHOST_WARNING=False \
         ANSIBLE_INVENTORY_UNPARSED_WARNING=False \
