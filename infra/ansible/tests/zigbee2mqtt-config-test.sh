@@ -38,16 +38,19 @@ mkdir -p "$T/bin" "$T/tmp" "$T/home"
 
 # Faux docker. Conteneur « en cours » si $T/running existe ; si $T/concurrent existe, l'arrêt
 # simule une écriture de Zigbee2MQTT (nouveau nom) entre l'analyse et l'écriture.
+# $T/fail_stop, $T/fail_start : échec simulé de la commande (conteneur inchangé).
 cat > "$T/bin/docker" <<FAKE
 #!/bin/sh
 echo "\$*" >> "$T/docker.log"
 case "\$1" in
   ps)    [ -e "$T/running" ] && echo 0123456789ab ; exit 0 ;;
-  stop)  rm -f "$T/running"
+  stop)  [ -e "$T/fail_stop" ] && { echo "erreur simulée" >&2; exit 1; }
+         rm -f "$T/running"
          if [ -e "$T/concurrent" ]; then
            printf 'renamed_by_z2m: true\n' >> "$CONF"
          fi ;;
-  start) touch "$T/running" ;;
+  start) [ -e "$T/fail_start" ] && { echo "erreur simulée" >&2; exit 1; }
+         touch "$T/running" ;;
 esac
 exit 0
 FAKE
@@ -128,6 +131,10 @@ check() {
   shift 2
   [ "$RC" -eq "$exp" ] || { ok=0; why+=" rc=$RC ($exp attendu)"; }
   if grep -Eq "$LEAK_PATTERN" "$T/out.txt"; then ok=0; why+=" valeur dans la sortie"; fi
+  # Aucune erreur d'évaluation (variable indéfinie dans « always », etc.).
+  if grep -Eq "expects a dictionary|is undefined|conditional check .* failed" "$T/out.txt"; then
+    ok=0; why+=" erreur d'évaluation dans la sortie"
+  fi
   local c
   for c in "$@"; do
     case "$c" in
@@ -152,7 +159,14 @@ PYC
   record "$ok" "$label (rc=$RC)" "$why"
 }
 
-reset() { rm -rf "$T/dest" "$T/running" "$T/concurrent"; mkdir -p "$(dirname -- "$CONF")"; }
+reset() {
+  [ ! -d "$T/dest" ] || chmod -R u+w "$T/dest"
+  rm -rf "$T/dest" "$T/running" "$T/concurrent" "$T/fail_stop" "$T/fail_start"
+  mkdir -p "$(dirname -- "$CONF")"
+}
+PS='ps --quiet --filter name=^zigbee2mqtt$;'
+RESTART="${PS}stop zigbee2mqtt;start zigbee2mqtt;ps --quiet --filter name=^zigbee2mqtt$ --filter status=running;"
+
 
 # --- Création ------------------------------------------------------------------
 
@@ -160,7 +174,7 @@ reset; rm -rf "$DEST"
 deploy
 check "premier déploiement, fichier et dossier absents : création" 0 \
   "py=doc['advanced']['network_key'] == t.KEY and doc['version'] == 5 and mode == 0o640" \
-  "py=doc['mqtt']['password'] == 'SENTINEL_MQTT_9c1e'" "docker=ps --quiet --filter name=^zigbee2mqtt$;" \
+  "py=doc['mqtt']['password'] == 'SENTINEL_MQTT_9c1e'" "docker=$PS" \
   "says=création du fichier"
 [ ! -e "$BACKUPS" ] && record 1 "création : aucune copie de retour arrière" "" \
   || record 0 "création : aucune copie de retour arrière" " dossier présent"
@@ -208,18 +222,18 @@ reset; fixture "$CONF" "transmit_power=10"; chmod 0640 "$CONF"; touch "$T/runnin
 S0="$(snapshot)"
 deploy
 check "clé gérée modifiée, conteneur actif, redémarrage non autorisé : refus" 2 "same=$S0" \
-  "docker=ps --quiet --filter name=^zigbee2mqtt$;" "says=advanced\\.transmit_power" \
+  "docker=$PS" "says=advanced\\.transmit_power" \
   "says=z2m_restart_allowed=true"
 [ ! -e "$BACKUPS" ] && record 1 "refus : aucune copie créée" "" || record 0 "refus : aucune copie créée" " dossier présent"
 
 deploy --check
 check "même cas en --check : aucune écriture, aucun arrêt" 0 "same=$S0" \
-  "docker=ps --quiet --filter name=^zigbee2mqtt$;" "says=advanced\\.transmit_power"
+  "docker=$PS" "says=advanced\\.transmit_power"
 
 cp -p "$CONF" "$T/before.yaml"
 deploy -e z2m_restart_allowed=true
 BEFORE="$T/before.yaml" check "redémarrage autorisé : écriture entre arrêt et redémarrage" 0 \
-  "docker=ps --quiet --filter name=^zigbee2mqtt$;stop zigbee2mqtt;start zigbee2mqtt;" \
+  "docker=$RESTART" \
   "py=doc['advanced']['transmit_power'] == 20 and mode == 0o640" \
   "py=z2m.same(t.without(doc, t.MANAGED_LEAVES), t.without(before, t.MANAGED_LEAVES))" \
   "py=z2m.same(t.without(doc, ['advanced.transmit_power']), t.without(before, ['advanced.transmit_power']))" \
@@ -252,18 +266,55 @@ fi
 reset; fixture "$CONF" "transmit_power=10"; chmod 0640 "$CONF"
 deploy
 check "clé gérée modifiée, conteneur arrêté : écriture sans redémarrage" 0 \
-  "docker=ps --quiet --filter name=^zigbee2mqtt$;" "py=doc['advanced']['transmit_power'] == 20"
+  "docker=$PS" "py=doc['advanced']['transmit_power'] == 20"
 
 # --- Écriture concurrente ----------------------------------------------------------------
 
 reset; fixture "$CONF" "transmit_power=10"; chmod 0640 "$CONF"; touch "$T/running" "$T/concurrent"
 deploy -e z2m_restart_allowed=true
 check "écriture de Zigbee2MQTT entre analyse et écriture : refus, conteneur relancé" 2 \
-  "docker=ps --quiet --filter name=^zigbee2mqtt$;stop zigbee2mqtt;start zigbee2mqtt;" \
+  "docker=$RESTART" \
   "py=doc['renamed_by_z2m'] is True and doc['advanced']['transmit_power'] == 10" \
   "says=modifié depuis l'analyse"
 [ ! -e "$BACKUPS" ] && record 1 "concurrence : aucune copie, rien d'écrit" "" \
   || record 0 "concurrence : aucune copie, rien d'écrit" " dossier présent"
+
+# --- Échecs pendant la séquence arrêt, écriture, redémarrage ------------------------------
+
+reset; fixture "$CONF" "transmit_power=10"; chmod 0640 "$CONF"; touch "$T/running" "$T/fail_stop"
+S0="$(snapshot)"
+deploy -e z2m_restart_allowed=true
+check "échec de docker stop : rien d'écrit, docker start tenté, conteneur actif" 2 "same=$S0" \
+  "docker=$RESTART"
+[ -e "$T/running" ] && record 1 "échec de docker stop : Zigbee2MQTT toujours actif" "" \
+  || record 0 "échec de docker stop : Zigbee2MQTT toujours actif" ""
+
+reset; fixture "$CONF" "transmit_power=10"; chmod 0640 "$CONF"; touch "$T/running"
+chmod 0555 "$(dirname -- "$CONF")"
+S0="$(snapshot)"
+deploy -e z2m_restart_allowed=true
+chmod 0755 "$(dirname -- "$CONF")"
+check "échec d'écriture (dossier en lecture seule) : fichier intact, conteneur relancé" 2 \
+  "same=$S0" "docker=$RESTART"
+[ -e "$T/running" ] && record 1 "échec d'écriture : Zigbee2MQTT relancé" "" \
+  || record 0 "échec d'écriture : Zigbee2MQTT relancé" ""
+
+reset; fixture "$CONF" "transmit_power=10"; chmod 0640 "$CONF"; touch "$T/running" "$T/fail_start"
+deploy -e z2m_restart_allowed=true
+check "échec de docker start : échec explicite « ARRÊTÉ », jamais silencieux" 2 \
+  "says=Zigbee2MQTT n'a pas pu être redémarré" "says=docker start zigbee2mqtt" \
+  "py=doc['advanced']['transmit_power'] == 20"
+N="$(grep -c '^start zigbee2mqtt$' "$T/docker.log" || true)"
+[ "$N" -ge 3 ] && record 1 "échec de docker start : $N tentatives" "" \
+  || record 0 "échec de docker start : plusieurs tentatives" " $N tentative(s)"
+
+# --- --check : jamais d'arrêt ni d'écriture, même avec le redémarrage autorisé -------------------
+
+reset; fixture "$CONF" "transmit_power=10"; chmod 0640 "$CONF"; touch "$T/running"
+S0="$(snapshot)"
+deploy --check -e z2m_restart_allowed=true
+check "--check avec redémarrage autorisé : ni arrêt, ni écriture" 0 "same=$S0" "docker=$PS"
+[ ! -e "$BACKUPS" ] && record 1 "--check : aucune copie créée" "" || record 0 "--check : aucune copie créée" ""
 
 # --- Rotation des copies ---------------------------------------------------------------------
 
@@ -317,6 +368,34 @@ def flat(tasks):
 for t in flat(yaml.safe_load(open(root + "/tasks/zigbee2mqtt_config.yml"))):
     if "z2m_config" in t:
         assert t.get("diff") is False, t["name"]
+PYS
+
+# Copies de retour arrière : hors du volume du conteneur, dans le périmètre Restic (prod).
+# Redémarrage refusé par défaut : rôle, workflow (lancement manuel et push).
+"$PY" -I - "$REPO_DIR" <<'PYS' && record 1 "copies hors volume, dans Restic ; redémarrage refusé par défaut" "" \
+  || record 0 "copies hors volume, dans Restic ; redémarrage refusé par défaut" ""
+import sys, yaml
+r = sys.argv[1]
+compose = yaml.safe_load(open(r + "/services/docker/core/docker-compose.yml"))
+assert compose["services"]["zigbee2mqtt"]["volumes"] == ["./zigbee2mqtt/data:/app/data"]
+tasks = open(r + "/infra/ansible/roles/compose_deploy/tasks/zigbee2mqtt_config.yml").read()
+assert 'backup_dir: "{{ z2m_project.dest }}/zigbee2mqtt/config-backups"' in tasks
+gv = yaml.safe_load(open(r + "/infra/ansible/inventories/prod/group_vars/docker_hosts.yml"))
+dest = [p["dest"] for p in gv["compose_projects"] if p["name"] == "core"][0]
+restic = yaml.safe_load(open(r + "/infra/ansible/roles/restic_backup/defaults/main.yml"))
+paths = gv.get("restic_backup_paths", restic["restic_backup_paths"])
+excl = gv.get("restic_backup_excludes", restic["restic_backup_excludes"])
+backups = dest + "/zigbee2mqtt/config-backups"
+assert gv["restic_backup_enabled"] is True and any(backups.startswith(p + "/") for p in paths)
+assert not any(backups.startswith(e) or e.startswith(backups) for e in excl), excl
+d = yaml.safe_load(open(r + "/infra/ansible/roles/compose_deploy/defaults/main.yml"))
+assert d["z2m_restart_allowed"] is False and d["z2m_config_backups_keep"] == 5
+wf = yaml.safe_load(open(r + "/.github/workflows/deploy.yml"))
+assert wf[True]["workflow_dispatch"]["inputs"]["z2m_restart"]["default"] is False
+for job in ("deploy-test", "deploy-prod"):
+    step = [s for s in wf["jobs"][job]["steps"] if s.get("name") == "Deploy"][0]
+    assert step["env"]["Z2M_RESTART"] == "${{ github.event_name == 'workflow_dispatch' && inputs.z2m_restart && 'true' || 'false' }}"
+    assert '-e "z2m_restart_allowed=${Z2M_RESTART}"' in step["run"]
 PYS
 
 echo

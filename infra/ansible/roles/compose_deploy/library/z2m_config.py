@@ -32,19 +32,6 @@ try:
 except ImportError:  # pragma: no cover - dépend de l'hôte
     HAS_YAML = False
 
-DOCUMENTATION = r"""
-module: z2m_config
-short_description: Fusion ciblée de configuration.yaml de Zigbee2MQTT
-options:
-  path: {type: path, required: true}
-  managed: {type: str, required: true, no_log: true, description: fragment YAML rendu}
-  backup_dir: {type: path, required: true}
-  backups_keep: {type: int, default: 5}
-  expected_sha256: {type: str, description: empreinte lue à l'analyse ; arrêt si elle a changé}
-  attributes_only: {type: bool, default: false, description: ne jamais écrire le contenu}
-extends_documentation_fragment: [files]
-"""
-
 # --- YAML ---------------------------------------------------------------------
 
 BOOL, INT, FLOAT = ("tag:yaml.org,2002:" + t for t in ("bool", "int", "float"))
@@ -262,7 +249,6 @@ def main():
             backup_dir=dict(type="path", required=True),
             backups_keep=dict(type="int", default=5),
             expected_sha256=dict(type="str"),
-            attributes_only=dict(type="bool", default=False),
         ),
         add_file_common_args=True,
         supports_check_mode=True,
@@ -293,10 +279,6 @@ def main():
     file_args = module.load_file_common_arguments(module.params, path=path)
 
     if target["content"] is not None:
-        if p["attributes_only"]:
-            module.fail_json(msg="contenu à modifier alors que seuls les attributs sont permis : "
-                                 "configuration.yaml modifié depuis l'analyse ? rien n'est écrit",
-                             **result)
         result.update(changed=True, content_changed=True)
         if module.check_mode:
             module.exit_json(**result)

@@ -266,14 +266,41 @@ Autoriser le redémarrage de Zigbee2MQTT quand une clé gérée change :
 ```
 
 En CI : case « Autoriser le redémarrage de Zigbee2MQTT » du lancement manuel de `Deploy`.
-Pour voir ce qui changerait sans rien modifier : `./deploy.sh test --check --limit docker_hosts`.
+Valeur par défaut : `false`, aussi bien pour `deploy.sh` que pour le workflow (case décochée ;
+toujours `false` au push). Pour voir ce qui changerait sans rien modifier :
+`./deploy.sh test --check --limit docker_hosts` ; en `--check`, ni arrêt ni écriture, même
+avec `z2m_restart_allowed=true`.
+
+#### Échecs pendant l'écriture
+
+Zigbee2MQTT n'est arrêté qu'une fois l'écriture décidée et autorisée. Ensuite :
+
+| Échec | Fichier | Zigbee2MQTT | Déploiement |
+|---|---|---|---|
+| `docker stop` | inchangé | `docker start` tenté (sans effet s'il tourne encore), puis vérifié | échec |
+| Fichier modifié depuis l'analyse | inchangé | redémarré, vérifié | échec, relancer |
+| Écriture (disque, droits) | inchangé (remplacement atomique) ; une copie a pu être faite | redémarré, vérifié | échec |
+| `docker start` (4 tentatives, 5 s d'écart) | nouveau | **arrêté** | échec explicite « n'a pas pu être redémarré », avec la commande de relance |
+
+Seule une interruption d'Ansible lui-même (connexion SSH coupée, runner arrêté) entre l'arrêt
+et le redémarrage peut laisser Zigbee2MQTT arrêté sans ce message. Un `docker stop` est un
+arrêt manuel : la politique `unless-stopped` ne le relancera pas, même au redémarrage de la
+VM. Le déploiement suivant le relance (`docker compose up -d`), ou à la main :
+`docker start zigbee2mqtt`.
 
 #### Retour arrière
 
 Avant chaque écriture, l'ancien fichier est copié dans
-`/srv/docker/core/zigbee2mqtt/config-backups/` (dossier `0700`, copies `0600`, root ; hors
-du volume du conteneur). Seules les 5 plus récentes sont gardées
-(`z2m_config_backups_keep`). Elles contiennent les secrets du fichier.
+`/srv/docker/core/zigbee2mqtt/config-backups/configuration.yaml.<AAAAMMJJTHHMMSSffffffZ>`
+(horodatage UTC) :
+
+- **hors du volume** du conteneur, qui ne monte que `./zigbee2mqtt/data` ;
+- **dans le périmètre Restic** de la prod (`restic_backup_paths: [/srv/docker/core]`, aucune
+  exclusion) : les copies suivent donc aussi la rétention Restic ;
+- dossier `0700` et copies `0600`, propriétaire root (le dossier est remis en `0700` à chaque
+  écriture) ; elles contiennent les secrets du fichier ;
+- seules les 5 plus récentes sont gardées sur l'hôte (`z2m_config_backups_keep`) ; aucune
+  copie quand rien n'est écrit, ni en `--check`.
 
 ```bash
 cd /srv/docker/core

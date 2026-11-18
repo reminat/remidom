@@ -42,3 +42,6 @@ override.tf.json
 terraform.rc
 .env
 acme.json
+# Python : caches et fichiers compilés
+__pycache__/
+*.py[cod]
