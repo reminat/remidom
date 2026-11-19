@@ -234,8 +234,9 @@ Il doit aussi apparaître dans GitHub : Settings → Actions → Runners.
 ### Zigbee2MQTT : `configuration.yaml`
 
 Zigbee2MQTT écrit lui-même dans ce fichier : noms et options des appareils (`devices`),
-groupes (`groups`), réglages modifiés dans son interface, `version` du schéma. Jusqu'au
-18/11/2026, le rôle le remplaçait entièrement par le modèle, ce qui effaçait ces sections
+groupes (`groups`), réglages modifiés dans son interface, `version` du schéma. Jusqu'à la
+PR #35 (déployée en prod le 19/11/2026), le rôle le remplaçait entièrement par le modèle,
+ce qui effaçait ces sections
 (constat dans [Services Docker](../../docs/services-docker.md#incident-du-18112026--noms-zigbee2mqtt-effacés)).
 
 Désormais, le module [`z2m_config`](roles/compose_deploy/library/z2m_config.py) ne fait

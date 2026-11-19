@@ -61,21 +61,88 @@ Sauvegarde et cohérence à chaud service par service :
 
 ### Incident du 18/11/2026 : noms Zigbee2MQTT effacés
 
-Constat réel daté, sources : journaux des runs `Deploy` prod et propriétaire du homelab.
+Incident du 14 au 19/11/2026, identifié le 18/11/2026. Constats réels datés ; sources :
+journaux des runs `Deploy`, inspection en lecture seule de `docker-prod-01` et constats du
+propriétaire du homelab. Heures en UTC.
 
-- Le rôle `compose_deploy` remplaçait `zigbee2mqtt/data/configuration.yaml` par son modèle,
-  qui n'a pas de section `devices:` : les noms donnés aux appareils étaient effacés.
-- Déploiements prod qui ont réécrit le fichier : 14/11/2026 (≈ 19:50 UTC) et 17/11/2026
-  (≈ 20:13 UTC) ; celui du 15/11/2026 n'a rien changé (fichier déjà identique au modèle).
-- Le snapshot Restic `4a5cd195` (14/11/2026) contenait 38 noms, restaurés sélectivement le
-  18/11/2026 sur `docker-prod-01`, sans toucher à la clé réseau ni à `database.db` ; le
-  dernier appareil a été renommé à la main. Noms revenus dans Zigbee2MQTT et Home Assistant
-  (constat du propriétaire, 18/11/2026).
-- Correction : fusion ciblée des seules clés gérées, voir
-  [`HOWTO.md`](../infra/ansible/HOWTO.md#zigbee2mqtt--configurationyaml).
+**Symptômes et impact.** En prod, les noms personnalisés des appareils Zigbee avaient
+disparu dans Zigbee2MQTT et dans Home Assistant (constat du propriétaire, 18/11/2026). Le
+réseau Zigbee lui-même n'est pas en cause : le modèle reprenait la clé réseau de Bitwarden,
+et `database.db` n'est pas géré par Ansible.
 
-Non vérifié : autres clés écrites par Zigbee2MQTT (réglages de l'interface, `pan_id`,
-`ext_pan_id`) éventuellement effacées le 14/11 ou le 17/11.
+**Cause racine.** Le rôle `compose_deploy` rendait `zigbee2mqtt/data/configuration.yaml` avec
+`ansible.builtin.template`, qui remplaçait tout le fichier. Le modèle n'a pas de section
+`devices:` : les noms écrits par Zigbee2MQTT étaient effacés à chaque déploiement dont le
+rendu différait du fichier en place.
+
+**Chronologie.**
+
+| Date | Fait |
+|---|---|
+| 14/11/2026 | Le snapshot Restic `4a5cd195` contient 38 noms personnalisés. |
+| 14/11, ≈ 19:50 | Déploiement prod : le fichier est remplacé intégralement, la section `devices:` disparaît. |
+| 15/11/2026 | Le snapshot Restic du jour ne contient plus aucun nom. Le déploiement prod de ce jour ne change rien (fichier déjà identique au modèle). |
+| 17/11, ≈ 20:13 | Nouveau remplacement du fichier par Ansible. |
+| 18/11/2026 | Problème identifié ; restauration sélective des 38 noms ; 39<sup>e</sup> appareil renommé à la main. |
+| 19/11/2026 | PR [#35](https://github.com/reminat/remidom/pull/35) validée sur `docker-test-01` (run [44612096319](https://github.com/reminat/remidom/actions/runs/44612096319)). |
+| 19/11/2026 | Inspection en lecture seule du fichier de prod (chemins de clés, sans valeurs). |
+| 19/11/2026 | PR #35 fusionnée dans `main` (commit `60bb5cb8206630e1f9b85f65e3591bad885e2838`). |
+| 19/11/2026 | Déploiement prod réussi (run [44614468804](https://github.com/reminat/remidom/actions/runs/44614468804)). |
+
+**Restauration (18/11/2026).** Seule la section `devices:` a été reprise du snapshot Restic
+`4a5cd195` (14/11/2026) : 38 noms restaurés sélectivement sur `docker-prod-01`, sans
+toucher à la clé réseau ni à `database.db`. Le dernier appareil a été renommé à la main.
+Les 39 noms sont revenus dans Zigbee2MQTT et Home Assistant (constat du propriétaire).
+
+Aucune sauvegarde Restic postérieure à la restauration n'a été vérifiée à ce jour : la
+présence des 39 noms dans un snapshot daté du 19/11/2026 ou après reste à contrôler.
+
+**Correction permanente.** PR [#35](https://github.com/reminat/remidom/pull/35) : le module
+`z2m_config` fusionne les seules clés gérées par Ansible dans le fichier existant. Noms,
+groupes et autres réglages écrits par Zigbee2MQTT sont conservés. La clé réseau n'est jamais
+réécrite sur un fichier existant ; le déploiement s'arrête si elle diffère de Bitwarden. Un
+changement de clé gérée qui impose de redémarrer Zigbee2MQTT exige une autorisation
+explicite (`z2m_restart_allowed`, désactivée par défaut). Détails :
+[`HOWTO.md`](../infra/ansible/HOWTO.md#zigbee2mqtt--configurationyaml).
+
+**Validation en test (19/11/2026, run
+[44612096319](https://github.com/reminat/remidom/actions/runs/44612096319), branche
+`fix/z2m-config-merge`, commit `3184909`).**
+
+- Un appareil de `docker-test-01` a été renommé `TEST-PR35-Ampoule` avant le déploiement ; le
+  nom subsiste après (constat du propriétaire).
+- Journal Ansible : analyse `ok`, tâche « propriétaire et droits » `ok`, et les tâches d'arrêt
+  du conteneur, d'écriture et de redémarrage `skipping`. Aucune réécriture du YAML ni aucun
+  arrêt explicite de Zigbee2MQTT.
+
+**Inspection de la prod (19/11/2026, lecture seule).** Les 18 chemins YAML hors `devices:`
+sont présents à la fois dans le fichier actuel et dans le snapshot `4a5cd195`. Seuls les
+chemins ont été comparés, pas les valeurs.
+
+**Validation en prod (19/11/2026, run
+[44614468804](https://github.com/reminat/remidom/actions/runs/44614468804), `main`, commit
+`60bb5cb`).**
+
+- Journal Ansible : mêmes résultats qu'en test (analyse et droits `ok` ; arrêt, écriture et
+  redémarrage `skipping`).
+- Constats après déploiement : 39 noms sur 39 conservés ; SHA-256 de `configuration.yaml`
+  identique avant et après ; conteneur Zigbee2MQTT toujours actif, date de démarrage
+  inchangée.
+
+**Risques résiduels.**
+
+- Le contrôle des chemins YAML ne vérifie pas les valeurs. Deux cas n'auraient pas été
+  détectés : une clé gérée par le modèle (par exemple `advanced.transmit_power`), modifiée
+  auparavant dans l'interface et remise à la valeur du modèle le 14/11 ou le 17/11 ; une clé
+  non gérée (par exemple `advanced.pan_id`, `advanced.ext_pan_id`) effacée puis réécrite par
+  Zigbee2MQTT avec une autre valeur. Non vérifié.
+- `docker compose pull` puis `docker compose up -d` s'exécutent à chaque déploiement,
+  indépendamment de la fusion. Ils peuvent recréer le conteneur Zigbee2MQTT, par exemple
+  après une nouvelle image ou une modification de `docker-compose.yml`. La tâche
+  `Docker compose up` est toujours signalée `changed` : le journal ne permet pas de
+  distinguer une recréation. Une recréation ne touche pas aux noms, qui sont dans le
+  dossier monté `zigbee2mqtt/data`, mais interrompt le service.
+- Une sauvegarde Restic contenant les 39 noms n'est pas encore vérifiée (voir plus haut).
 
 ## Mises à jour d'images
 
