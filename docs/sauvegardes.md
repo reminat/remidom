@@ -53,7 +53,8 @@ du 31/10 au 17/11/2026, premiers `forget` et `prune` automatiques réussis. Dern
 restauration de `docker-prod` documenté : 28/10/2026. Le 18/11/2026, la section `devices:`
 de `zigbee2mqtt/data/configuration.yaml` a été extraite du snapshot `4a5cd195` pour une
 réparation réelle (38 noms rétablis) : extraction d'un seul fichier, pas un test de
-restauration complet ; voir
+restauration complet. Le snapshot `c37a68be` du 19/11/2026 (01:30 UTC) contient les
+39 appareils et leurs 39 noms ; voir
 [l'incident Zigbee2MQTT](services-docker.md#incident-du-18112026--noms-zigbee2mqtt-effacés).
 
 ## Audit du 15/11/2026
@@ -486,7 +487,7 @@ mais non testée.
 |---|---|
 | Constater les sauvegardes Restic de prod depuis le 31/10 (journal du service, `snapshots`, rapports du contrôle du NAS, `forget` et `prune` du 07/11) | fait : [audit du 15/11/2026](#audit-du-15112026) et [compléments du 17/11/2026](#compléments-du-17112026) ; points ouverts dans « Restant à vérifier » |
 | Restaurer depuis Restic un dossier de Mosquitto, Zigbee2MQTT et Node-RED et le comparer | prod : dernier test le 28/10/2026 (restauration sur disque), extraction d'un fichier de Zigbee2MQTT le 18/11/2026 ([incident](services-docker.md#incident-du-18112026--noms-zigbee2mqtt-effacés)) ; test : restauration isolée le 15/11/2026 |
-| Vérifier qu'un snapshot `docker-prod` postérieur au 18/11/2026 contient les 39 noms Zigbee2MQTT | à vérifier |
+| Vérifier qu'un snapshot `docker-prod` postérieur au 18/11/2026 contient les 39 noms Zigbee2MQTT | fait le 19/11/2026 : snapshot `c37a68be` (01:30 UTC), 39 appareils et 39 noms ([incident](services-docker.md#incident-du-18112026--noms-zigbee2mqtt-effacés)) |
 | Configurer le stockage Synology et la sauvegarde Home Assistant vers Synology et Nabu Casa | configuré, constat du 17/11/2026 ([ci-dessus](#constat-du-17112026-haos-prod-01)) |
 | Constater la première sauvegarde automatique Home Assistant sur *Ce système*, Synology et Home Assistant Cloud | à vérifier |
 | Stocker la clé de chiffrement Home Assistant dans Bitwarden | à faire ou à confirmer |
