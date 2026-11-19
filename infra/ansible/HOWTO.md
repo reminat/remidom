@@ -218,17 +218,112 @@ Il doit aussi apparaître dans GitHub : Settings → Actions → Runners.
 - Crée le répertoire de données (`/srv/docker`)
 
 ### `compose_deploy`
+- Fusionne les clés gérées dans `zigbee2mqtt/data/configuration.yaml`, avant toute autre
+  tâche du rôle (voir [Zigbee2MQTT : `configuration.yaml`](#zigbee2mqtt--configurationyaml))
 - Synchronise les projets Docker Compose sur l'hôte (rsync avec `--checksum`)
 - Rend les templates :
   - `.env.j2` → `.env` (TZ, DOMAIN_BASE, CF_DNS_API_TOKEN)
   - `traefik/traefik.yml.j2` → `traefik/traefik.yml`
   - `traefik/dynamic/*.yml.j2` → routes hors Docker (`haos`, middlewares ; `unifi`, `code`, `proxmox` si leur URL est définie)
-  - `zigbee2mqtt/data/configuration.yaml.j2` → `configuration.yaml`
 - Crée `traefik/acme/acme.json` avec les permissions `600` (requis par Traefik)
 - Configure les permissions (Mosquitto, Node-RED)
 - Génère le fichier de mots de passe Mosquitto
 - Lance `docker compose pull` puis `docker compose up -d`
 - Reload Mosquitto
+
+### Zigbee2MQTT : `configuration.yaml`
+
+Zigbee2MQTT écrit lui-même dans ce fichier : noms et options des appareils (`devices`),
+groupes (`groups`), réglages modifiés dans son interface, `version` du schéma. Jusqu'au
+18/11/2026, le rôle le remplaçait entièrement par le modèle, ce qui effaçait ces sections
+(constat dans [Services Docker](../../docs/services-docker.md#incident-du-18112026--noms-zigbee2mqtt-effacés)).
+
+Désormais, le module [`z2m_config`](roles/compose_deploy/library/z2m_config.py) ne fait
+qu'imposer les clés du modèle
+[`configuration.yaml.j2`](../../services/docker/core/zigbee2mqtt/data/configuration.yaml.j2) :
+
+| Situation | Effet |
+|---|---|
+| Fichier absent | modèle rendu écrit tel quel |
+| Clés gérées déjà conformes (même si le formatage diffère) | rien n'est écrit, aucun redémarrage |
+| Noms, groupes, autres clés | jamais modifiés |
+| `version` | jamais imposée sur un fichier existant (pas de rétrogradation) |
+| `advanced.network_key` | jamais écrite sur un fichier existant ; **arrêt sans modification** si elle est absente ou différente de Bitwarden |
+| Clé gérée différente, Zigbee2MQTT arrêté | écriture |
+| Clé gérée différente, Zigbee2MQTT actif | **arrêt sans modification**, sauf redémarrage autorisé : arrêt du conteneur, écriture, redémarrage |
+| YAML invalide, fichier vide | **arrêt sans modification** |
+| Fichier modifié entre l'analyse et l'écriture (Zigbee2MQTT) | **arrêt sans écriture**, conteneur redémarré ; relancer le déploiement |
+
+Lecture et écriture suivent YAML 1.2 comme Zigbee2MQTT : `on` ou `yes` restent des chaînes.
+Le journal n'affiche que les **chemins** des clés modifiées (par exemple
+`advanced.transmit_power`), jamais de valeur. Retirer une clé du modèle ne la retire pas du
+fichier : la supprimer à la main.
+
+Autoriser le redémarrage de Zigbee2MQTT quand une clé gérée change :
+
+```bash
+./deploy.sh test -e z2m_restart_allowed=true
+```
+
+En CI : case « Autoriser le redémarrage de Zigbee2MQTT » du lancement manuel de `Deploy`.
+Valeur par défaut : `false`, aussi bien pour `deploy.sh` que pour le workflow (case décochée ;
+toujours `false` au push). Pour voir ce qui changerait sans rien modifier :
+`./deploy.sh test --check --limit docker_hosts` ; en `--check`, ni arrêt ni écriture, même
+avec `z2m_restart_allowed=true`.
+
+#### Échecs pendant l'écriture
+
+Zigbee2MQTT n'est arrêté qu'une fois l'écriture décidée et autorisée. Ensuite :
+
+| Échec | Fichier | Zigbee2MQTT | Déploiement |
+|---|---|---|---|
+| `docker stop` | inchangé | `docker start` tenté (sans effet s'il tourne encore), puis vérifié | échec |
+| Fichier modifié depuis l'analyse | inchangé | redémarré, vérifié | échec, relancer |
+| Écriture (disque, droits) | inchangé (remplacement atomique) ; une copie a pu être faite | redémarré, vérifié | échec |
+| `docker start` (4 tentatives, 5 s d'écart) | nouveau | **arrêté** | échec explicite « n'a pas pu être redémarré », avec la commande de relance |
+
+Seule une interruption d'Ansible lui-même (connexion SSH coupée, runner arrêté) entre l'arrêt
+et le redémarrage peut laisser Zigbee2MQTT arrêté sans ce message. Un `docker stop` est un
+arrêt manuel : la politique `unless-stopped` ne le relancera pas, même au redémarrage de la
+VM. Le déploiement suivant le relance (`docker compose up -d`), ou à la main :
+`docker start zigbee2mqtt`.
+
+#### Retour arrière
+
+Avant chaque écriture, l'ancien fichier est copié dans
+`/srv/docker/core/zigbee2mqtt/config-backups/configuration.yaml.<AAAAMMJJTHHMMSSffffffZ>`
+(horodatage UTC) :
+
+- **hors du volume** du conteneur, qui ne monte que `./zigbee2mqtt/data` ;
+- **dans le périmètre Restic** de la prod (`restic_backup_paths: [/srv/docker/core]`, aucune
+  exclusion) : les copies suivent donc aussi la rétention Restic ;
+- dossier `0700` et copies `0600`, propriétaire root (le dossier est remis en `0700` à chaque
+  écriture) ; elles contiennent les secrets du fichier ;
+- seules les 5 plus récentes sont gardées sur l'hôte (`z2m_config_backups_keep`) ; aucune
+  copie quand rien n'est écrit, ni en `--check`.
+
+```bash
+cd /srv/docker/core
+sudo ls -1 zigbee2mqtt/config-backups/   # horodatage UTC, la plus récente en dernier
+docker stop zigbee2mqtt
+sudo install -m 0640 -o 1883 -g 1883 \
+  zigbee2mqtt/config-backups/configuration.yaml.<horodatage> zigbee2mqtt/data/configuration.yaml
+docker start zigbee2mqtt
+```
+
+Le déploiement suivant réimposera les clés gérées : corriger le modèle dans Git avant de
+redéployer si le changement était indésirable.
+
+#### Tests
+
+Valeurs fictives, sans Docker ni accès réseau ; Ansible installé localement ou dans un venv
+temporaire :
+
+```bash
+python3 -m unittest discover -s infra/ansible/tests -p 'test_z2m_config.py' -v
+bash infra/ansible/tests/zigbee2mqtt-config-test.sh
+bash infra/ansible/tests/deploy-wrapper-test.sh
+```
 
 ---
 
@@ -410,7 +505,7 @@ mélange.
 | Zigbee2MQTT 2.13.0 | `database.db` | atomique (`.tmp` + `fsync` + `rename`, zigbee-herdsman 10.8.0), toutes les 5 min et sur événement | à chaud | appareils connus à l'état du dernier enregistrement |
 | | `coordinator_backup.json` | atomique (`.tmp` + `rename`), quotidien | à chaud | sauvegarde du coordinateur (même adaptateur conseillé) |
 | | `state.json` | **non atomique** (`writeFileSync` toutes les 5 min) | à chaud, risque faible de copie tronquée | état des appareils seulement (simple cache) : s'il est illisible, Zigbee2MQTT repart sans, et les appareils republient leur état |
-| | `configuration.yaml` | rendu par Ansible (clé réseau dans Bitwarden) | à chaud | identique, ou redéployé par Ansible |
+| | `configuration.yaml` | écrit par Zigbee2MQTT (noms, groupes) ; clés d'infrastructure fusionnées par Ansible (clé réseau dans Bitwarden) | à chaud | identique ; Ansible ne recrée que les clés gérées, pas les noms |
 | Node-RED 4.1.8 | `flows.json`, `flows_cred.json`, `.config.*.json` | atomique (`.$$$` + `fsync` + `rename`, `localfilesystem/util.js`) | à chaud | flux au dernier déploiement ; identifiants déchiffrables avec la clé du même dossier |
 | | `node_modules/` | statique | à chaud | identique |
 | Portainer 2.39.1 | `portainer.db` | **BoltDB modifiée sur place** (mmap), écritures périodiques ; verrou exclusif empêchant une lecture cohérente par un autre processus | **arrêt pendant la sauvegarde** | état à l'heure de la sauvegarde |

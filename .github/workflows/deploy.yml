@@ -29,6 +29,11 @@ on:
         default: test
         type: choice
         options: [test, prod]
+      z2m_restart:
+        description: Autoriser le redémarrage de Zigbee2MQTT si une clé gérée de configuration.yaml change
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -64,9 +69,11 @@ jobs:
       - name: Deploy
         env:
           BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+          # Faux au push ; vrai seulement si la case est cochée au lancement manuel.
+          Z2M_RESTART: ${{ github.event_name == 'workflow_dispatch' && inputs.z2m_restart && 'true' || 'false' }}
         run: |
           cd infra/ansible
-          ./deploy.sh test --skip-tags github_runner
+          ./deploy.sh test --skip-tags github_runner -e "z2m_restart_allowed=${Z2M_RESTART}"
 
   deploy-prod:
     name: Deploy → prod
@@ -97,6 +104,8 @@ jobs:
       - name: Deploy
         env:
           BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+          # Faux au push ; vrai seulement si la case est cochée au lancement manuel.
+          Z2M_RESTART: ${{ github.event_name == 'workflow_dispatch' && inputs.z2m_restart && 'true' || 'false' }}
         run: |
           cd infra/ansible
-          ./deploy.sh prod --skip-tags github_runner
+          ./deploy.sh prod --skip-tags github_runner -e "z2m_restart_allowed=${Z2M_RESTART}"

@@ -1,6 +1,15 @@
 - name: Check secrets before any rendering
   ansible.builtin.import_tasks: check_secrets.yml
 
+# Avant les autres tâches du rôle : un refus (clé réseau, redémarrage non autorisé, YAML
+# invalide) arrête le déploiement avant toute modification de la pile.
+- name: Zigbee2MQTT configuration (targeted merge)
+  ansible.builtin.include_tasks: zigbee2mqtt_config.yml
+  loop: "{{ compose_projects | selectattr('name', 'equalto', 'core') | list }}"
+  loop_control:
+    loop_var: z2m_project
+    label: "{{ z2m_project.name }}"
+
 - name: Ensure project directories exist
   ansible.builtin.file:
     path: "{{ item.dest }}"
@@ -113,18 +122,6 @@
     mode: "0600"
     modification_time: preserve
     access_time: preserve
-  loop: "{{ compose_projects }}"
-  when: item.name == 'core'
-
-- name: Render Zigbee2MQTT configuration
-  ansible.builtin.template:
-    src: "{{ item.src }}/zigbee2mqtt/data/configuration.yaml.j2"
-    dest: "{{ item.dest }}/zigbee2mqtt/data/configuration.yaml"
-    mode: "0640"
-    owner: "1883"
-    group: "1883"
-  no_log: true
-  diff: false
   loop: "{{ compose_projects }}"
   when: item.name == 'core'
 

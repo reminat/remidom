@@ -1,3 +1,7 @@
+{# Clés gérées par Ansible, fusionnées dans configuration.yaml (tasks/zigbee2mqtt_config.yml) :
+   Zigbee2MQTT y conserve ses propres sections (devices, groups, réglages de l'interface).
+   Sur un fichier existant, version et network_key ne sont jamais écrits ; network_key doit
+   déjà être égale à celle de Bitwarden. Retirer une clé d'ici ne la retire pas du fichier. #}
 homeassistant:
   enabled: true
 frontend:
